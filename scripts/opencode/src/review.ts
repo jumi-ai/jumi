@@ -93,6 +93,13 @@ import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
+import {
+  classifyBlockingFindings,
+  normalizeFindingForge,
+  normalizeFindingRunner,
+  parseBlockingFindings,
+  touchedFromFilenames,
+} from "./review_findings.ts";
 import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -303,6 +310,11 @@ export interface ReviewOptions {
    * `publishReviewResult` with the capped counts.
    */
   recordSuggestions?: (counts: ReviewSuggestionCounts) => Promise<void>;
+  /**
+   * Fail-open recorder for per-finding 🔴/🟡 outcomes. Forwarded to
+   * `publishReviewResult` alongside the 💡 counts.
+   */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
@@ -393,6 +405,16 @@ export interface PublishReviewOptions {
    * reclaim path has no fetched files).
    */
   changedFiles?: readonly { filename: string }[];
+  /**
+   * Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired by the engine
+   * tick to the ledger; tests may omit it. Receives one row per blocking
+   * finding of the previous review (fixed/dismissed/repeated/unmatched).
+   */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for the recorded rows (1-based). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner for the recorded rows. Defaults to empty. */
+  writerRunner?: string | null;
 }
 
 const encoder = new TextEncoder();
@@ -1838,6 +1860,32 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       addressed: counts.addressed,
     });
   }
+  if (opts.recordFindings && opts.previousFindings && opts.previousFindings.length > 0) {
+    try {
+      const prevBlocking = parseBlockingFindings(opts.previousFindings.join("\n\n"), { singleFilePath });
+      const currBlocking = parseBlockingFindings(comment, { singleFilePath });
+      const touched = touchedFromFilenames((opts.changedFiles ?? []).map((file) => file.filename));
+      const classified = classifyBlockingFindings(prevBlocking, currBlocking, touched);
+      const rows = classified.map((entry) => ({
+        forge: normalizeFindingForge(opts.forgeKind),
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        severity: entry.prev.severity,
+        reviewerRunner: normalizeFindingRunner(opts.resultRunner),
+        writerRunner: (opts.writerRunner ?? "").trim(),
+        reviewRound: opts.reviewRound ?? 1,
+        outcome: entry.outcome,
+        fingerprint: entry.fingerprint,
+        path: entry.prev.path,
+        line: entry.prev.line,
+      }));
+      await opts.recordFindings(rows);
+      logDiagnostic(log, "review_findings", { review: reviewLabel, findings: rows.length });
+    } catch (err) {
+      log(`finding metrics unavailable: ${errorMessage(err)}`);
+    }
+  }
   // Opt-in blocking questions: when the effective list (deployer plus the
   // repository's default-branch file) names this PR author, a
   // questions-only success still fails the required check so automerge waits,
@@ -3069,6 +3117,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         forgeKind: opts.forgeKind,
         previousFindings: previousReview?.findings,
         recordSuggestions: opts.recordSuggestions,
+        ...(opts.recordFindings ? { recordFindings: opts.recordFindings } : {}),
         changedFiles: prFiles,
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
       });

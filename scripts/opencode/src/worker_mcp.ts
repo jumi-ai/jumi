@@ -16,18 +16,28 @@
  * - `blocked_on(ref, reason)`: cross-repo ref like `owner/repo#N` (or `#N`
  *   for this repo), feeding the dependency/blocked path;
  * - `set_handoff(notes)`: notes for the next round, size-capped, never secrets.
+ * - `finding_response(finding, status, reason?)`: structured answer to one
+ *   blocking finding (`fixed`, or `unchanged` with a reason).
  *
  * The parent reads the small result store after the run and prefers the tool
  * value over the legacy `JUMI_*.md` file fallback for one transition period.
  */
 
 import { randomBytes } from "node:crypto";
+import { validateFindingResponse } from "./review_findings.ts";
 import { agyMcpServerEntry, claudeMcpConfigFor, codexMcpTomlEntry, openCodeMcpEntry } from "./review_mcp.ts";
 import { sanitizeCheckReason } from "./verdict.ts";
 
 export const WORKER_MCP_SERVER_NAME = "jumi-worker";
 
-export const WORKER_MCP_TOOL_NAMES = ["no_changes", "set_pr_body", "skip", "blocked_on", "set_handoff"] as const;
+export const WORKER_MCP_TOOL_NAMES = [
+  "no_changes",
+  "set_pr_body",
+  "skip",
+  "blocked_on",
+  "set_handoff",
+  "finding_response",
+] as const;
 
 export type WorkerMcpToolName = (typeof WORKER_MCP_TOOL_NAMES)[number];
 
@@ -222,6 +232,12 @@ export interface WorkerBlockedOn {
   number: number;
 }
 
+export interface WorkerFindingResponse {
+  finding: string;
+  status: "fixed" | "unchanged";
+  reason: string;
+}
+
 /**
  * Small result store the parent reads after the run. One store lives for one
  * spawn and dies with it. Last call per tool wins.
@@ -233,6 +249,7 @@ export class WorkerResultStore {
   private skipReason?: string;
   private blockedOn?: WorkerBlockedOn;
   private handoff?: string;
+  private findingResponses: WorkerFindingResponse[] = [];
   private closed = false;
 
   get isClosed(): boolean {
@@ -351,13 +368,35 @@ export class WorkerResultStore {
     return this.handoff !== undefined;
   }
 
+  setFindingResponse(input: {
+    finding?: unknown;
+    fingerprint?: unknown;
+    status?: unknown;
+    reason?: unknown;
+  }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validateFindingResponse(input);
+    if (!validated.ok) return validated;
+    this.findingResponses.push({ finding: validated.finding, status: validated.status, reason: validated.reason });
+    return { ok: true };
+  }
+
+  getFindingResponses(): WorkerFindingResponse[] {
+    return this.findingResponses.map((entry) => ({ ...entry }));
+  }
+
+  hasFindingResponses(): boolean {
+    return this.findingResponses.length > 0;
+  }
+
   hasAnything(): boolean {
     return (
       this.reason !== undefined ||
       this.prBody !== undefined ||
       this.skipReason !== undefined ||
       this.blockedOn !== undefined ||
-      this.handoff !== undefined
+      this.handoff !== undefined ||
+      this.findingResponses.length > 0
     );
   }
 }
@@ -442,6 +481,20 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
         required: ["notes"],
       },
     },
+    {
+      name: "finding_response",
+      description:
+        "Answer one reviewer blocking finding in a structured way: fixed, or unchanged with a reason. The answer is recorded against the finding so pushback is a signal rather than free text.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          finding: { type: "string" },
+          status: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["finding", "status"],
+      },
+    },
   ];
 }
 
@@ -479,6 +532,10 @@ function callTool(
   }
   if (name === "set_handoff") {
     const result = store.setHandoff({ notes: args.notes });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+  }
+  if (name === "finding_response") {
+    const result = store.setFindingResponse({ finding: args.finding, status: args.status, reason: args.reason });
     return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
   }
   return { ok: false, text: `unknown tool: ${name}` };

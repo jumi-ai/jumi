@@ -146,6 +146,8 @@ export interface RunReviewJobExtras {
   persistResult?: (result: PersistReviewResult) => Promise<void>;
   /** Fail-open recorder for per-review 💡 counts. ProcessEngineTick wires it to the ledger. */
   recordSuggestions?: (counts: import("./review_suggestions.ts").ReviewSuggestionCounts) => Promise<void>;
+  /** Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired to the ledger like suggestions. */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
   engine?: Engine;
   openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
@@ -328,6 +330,7 @@ export async function runReviewJob(
       logger: (message) => logger(message),
       persistResult: extras.persistResult,
       recordSuggestions: extras.recordSuggestions,
+      ...(extras.recordFindings ? { recordFindings: extras.recordFindings } : {}),
       engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
@@ -1250,6 +1253,15 @@ export async function processEngineTick(
         (async (counts) => {
           try {
             await store.recordReviewSuggestions(counts);
+          } catch {
+            // Fail-open: a metric write must never fail the review.
+          }
+        }),
+      recordFindings:
+        extras.recordFindings ??
+        (async (rows) => {
+          try {
+            await store.recordReviewFindings(rows);
           } catch {
             // Fail-open: a metric write must never fail the review.
           }

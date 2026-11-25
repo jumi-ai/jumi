@@ -33,6 +33,7 @@ import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { canonicalKickCoords, type RequeueForgeSnapshot, requeueForgeRefusal } from "./requeue_gate.ts";
 import { BODY_ONLY_REVIEW_ACTION, isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import type { NewReviewFindingRow, ReviewFindingTotalsRow } from "./review_findings.ts";
 import type { ReviewSuggestionCounts, ReviewSuggestionTotalsRow } from "./review_suggestions.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 import {
@@ -346,6 +347,36 @@ export interface ReviewJobStore {
   recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void>;
   /** Ledger 💡 sums by (runner, forge). */
   getReviewSuggestionTotals(): Promise<ReviewSuggestionTotalsRow[]>;
+  /**
+   * Durable per-finding 🔴/🟡 outcomes: one row per blocking finding of the
+   * previous review (forge, owner, repo, PR, severity, reviewer runner,
+   * writer runner, review round, outcome). Fail-open like suggestions.
+   * Repo-level detail stays in the ledger; metrics aggregate by
+   * (runner, forge, severity, outcome).
+   */
+  recordReviewFindings(rows: NewReviewFindingRow[]): Promise<void>;
+  /** Ledger 🔴/🟡 counts by (runner, forge, severity, outcome). */
+  getReviewFindingTotals(): Promise<ReviewFindingTotalsRow[]>;
+  /**
+   * Settle on merge/close: every `repeated` row for the PR becomes
+   * `open_at_merge`. Returns the number of rows settled.
+   */
+  markFindingsOpenAtMerge(owner: string, repo: string, prNumber: number): Promise<number>;
+  /**
+   * Structured worker pushback for one finding: `fixed`, or `unchanged` with
+   * a reason. Recorded on the matching ledger row (by fingerprint, else by
+   * path+line); returns true when a row was updated.
+   */
+  recordFindingResponse(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    fingerprint?: string;
+    path?: string;
+    line?: number;
+    status: string;
+    reason: string;
+  }): Promise<boolean>;
   reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number, kinds?: readonly JobKind[]): Promise<ReclaimResult>;
   /**
    * Router cancel for one issue. Queued worker rows become `cancelled`
@@ -915,6 +946,33 @@ CREATE INDEX IF NOT EXISTS jumi_review_suggestions_runner_forge
   ON jumi_review_suggestions (runner, forge);
 `;
 
+const REVIEW_FINDINGS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS jumi_review_findings (
+  id BIGSERIAL PRIMARY KEY,
+  forge TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  severity TEXT NOT NULL,
+  reviewer_runner TEXT NOT NULL,
+  writer_runner TEXT NOT NULL DEFAULT '',
+  review_round INTEGER NOT NULL DEFAULT 1,
+  outcome TEXT NOT NULL,
+  fingerprint TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL DEFAULT '',
+  line INTEGER NOT NULL DEFAULT 0,
+  worker_status TEXT NOT NULL DEFAULT '',
+  worker_reason TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS jumi_review_findings_pr
+  ON jumi_review_findings (owner, repo, pr_number);
+
+CREATE INDEX IF NOT EXISTS jumi_review_findings_runner_severity_outcome
+  ON jumi_review_findings (reviewer_runner, severity, outcome);
+`;
+
 const REVIEW_HANDOVER_PENDING_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS review_handover_pending (
   review_job_id BIGINT PRIMARY KEY,
@@ -1356,6 +1414,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly runUsage: Array<NewRunUsageRow & { id: number }> = [];
   private nextSuggestionId = 1;
   readonly reviewSuggestions: Array<ReviewSuggestionCounts & { id: number }> = [];
+  private nextFindingId = 1;
+  readonly reviewFindings: Array<NewReviewFindingRow & { id: number }> = [];
 
   private locked<T>(fn: () => T | Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
@@ -2203,6 +2263,76 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         }
       }
       return [...sums.values()];
+    });
+  }
+
+  recordReviewFindings(rows: NewReviewFindingRow[]): Promise<void> {
+    return this.locked(() => {
+      for (const row of rows) {
+        this.reviewFindings.push({ ...row, id: this.nextFindingId++ });
+      }
+    });
+  }
+
+  getReviewFindingTotals(): Promise<ReviewFindingTotalsRow[]> {
+    return this.locked(() => {
+      const sums = new Map<string, ReviewFindingTotalsRow>();
+      for (const row of this.reviewFindings) {
+        const key = `${row.reviewerRunner}\0${row.forge}\0${row.severity}\0${row.outcome}`;
+        const existing = sums.get(key);
+        if (existing) existing.count += 1;
+        else {
+          sums.set(key, {
+            runner: row.reviewerRunner,
+            forge: row.forge,
+            severity: row.severity,
+            outcome: row.outcome,
+            count: 1,
+          });
+        }
+      }
+      return [...sums.values()];
+    });
+  }
+
+  markFindingsOpenAtMerge(owner: string, repo: string, prNumber: number): Promise<number> {
+    return this.locked(() => {
+      let settled = 0;
+      for (const row of this.reviewFindings) {
+        if (row.owner === owner && row.repo === repo && row.prNumber === prNumber && row.outcome === "repeated") {
+          row.outcome = "open_at_merge";
+          settled++;
+        }
+      }
+      return settled;
+    });
+  }
+
+  recordFindingResponse(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    fingerprint?: string;
+    path?: string;
+    line?: number;
+    status: string;
+    reason: string;
+  }): Promise<boolean> {
+    return this.locked(() => {
+      const match = [...this.reviewFindings]
+        .reverse()
+        .find(
+          (row) =>
+            row.owner === opts.owner &&
+            row.repo === opts.repo &&
+            row.prNumber === opts.prNumber &&
+            ((opts.fingerprint && row.fingerprint === opts.fingerprint) ||
+              (opts.path != null && row.path === opts.path && (opts.line == null || row.line === opts.line)))
+        );
+      if (!match) return false;
+      match.workerStatus = opts.status;
+      match.workerReason = opts.reason;
+      return true;
     });
   }
 
@@ -3875,6 +4005,7 @@ const REQUIRED_LEDGER_TABLES = [
   "role_gates",
   "issue_handoffs",
   "jumi_review_suggestions",
+  "jumi_review_findings",
   "review_handover_pending",
   "strict_refresh_slots",
   "follow_up_wake_causes",
@@ -4111,6 +4242,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(PROVENANCE_SCHEMA_SQL);
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
         await tx.unsafe(REVIEW_SUGGESTIONS_SCHEMA_SQL);
+        await tx.unsafe(REVIEW_FINDINGS_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
         await tx.unsafe(RUNNER_COOLDOWNS_SCHEMA_SQL);
         // Columns added after the table first shipped: existing deployments
@@ -5529,6 +5661,113 @@ export class PgReviewJobStore implements ReviewJobStore {
       addressed: num(row.addressed),
       reviews: num(row.reviews),
     }));
+  }
+
+  async recordReviewFindings(rows: NewReviewFindingRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    try {
+      for (const row of rows) {
+        await this.sql.unsafe(
+          `INSERT INTO jumi_review_findings
+            (forge, owner, repo, pr_number, severity, reviewer_runner, writer_runner,
+             review_round, outcome, fingerprint, path, line, worker_status, worker_reason)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            row.forge,
+            row.owner,
+            row.repo,
+            row.prNumber,
+            row.severity,
+            row.reviewerRunner,
+            row.writerRunner,
+            Math.max(1, Math.floor(row.reviewRound)),
+            row.outcome,
+            row.fingerprint,
+            row.path,
+            Math.max(0, Math.floor(row.line)),
+            row.workerStatus ?? "",
+            row.workerReason ?? "",
+          ]
+        );
+      }
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async getReviewFindingTotals(): Promise<ReviewFindingTotalsRow[]> {
+    const rows = asRows<{ runner: unknown; forge: unknown; severity: unknown; outcome: unknown; count: unknown }>(
+      await this.sql.unsafe(
+        `SELECT reviewer_runner AS runner, forge, severity, outcome, COUNT(*)::bigint AS count
+         FROM jumi_review_findings GROUP BY reviewer_runner, forge, severity, outcome`
+      )
+    );
+    return rows.map((row) => ({
+      runner: str(row.runner),
+      forge: str(row.forge),
+      severity: str(row.severity),
+      outcome: str(row.outcome),
+      count: num(row.count),
+    }));
+  }
+
+  async markFindingsOpenAtMerge(owner: string, repo: string, prNumber: number): Promise<number> {
+    try {
+      const rows = asRows<{ count: unknown }>(
+        await this.sql.unsafe(
+          `UPDATE jumi_review_findings SET outcome = 'open_at_merge'
+           WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND outcome = 'repeated'
+           RETURNING 1 AS count`,
+          [owner, repo, prNumber]
+        )
+      );
+      return rows.length;
+    } catch (err) {
+      wrapSqlError(err);
+      return 0;
+    }
+  }
+
+  async recordFindingResponse(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    fingerprint?: string;
+    path?: string;
+    line?: number;
+    status: string;
+    reason: string;
+  }): Promise<boolean> {
+    try {
+      const rows = asRows<{ id: unknown }>(
+        await this.sql.unsafe(
+          `UPDATE jumi_review_findings SET worker_status = $4, worker_reason = $5
+           WHERE id = (
+             SELECT id FROM jumi_review_findings
+             WHERE owner = $1 AND repo = $2 AND pr_number = $3
+               AND ($6 = '' OR fingerprint = $6)
+               AND ($7 = '' OR path = $7)
+               AND ($8 IS NULL OR line = $8)
+             ORDER BY id DESC LIMIT 1
+           )
+           RETURNING id`,
+          [
+            opts.owner,
+            opts.repo,
+            opts.prNumber,
+            opts.status,
+            opts.reason,
+            opts.fingerprint ?? "",
+            opts.path ?? "",
+            opts.line ?? null,
+          ]
+        )
+      );
+      return rows.length > 0;
+    } catch (err) {
+      wrapSqlError(err);
+      return false;
+    }
   }
 
   async readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
