@@ -214,8 +214,7 @@ function buildCarriedMarkdown(opts: {
   targetBranch: string;
   findings: readonly string[];
 }): string {
-  const findingsBlock =
-    opts.findings.length > 0 ? `\n\n${opts.findings.map((line) => `- ${line}`).join("\n")}` : "";
+  const findingsBlock = opts.findings.length > 0 ? `\n\n${opts.findings.map((line) => `- ${line}`).join("\n")}` : "";
   return (
     `${opts.marker}\n### Jumi review\n\nReviewed commit: \`${opts.headSha}\`\n\n` +
     `${REVIEW_CARRY_MARKER} \`${opts.previousSha}\`: this head is a clean merge of \`${opts.targetBranch}\` ` +
@@ -252,8 +251,7 @@ async function evaluateCarry(opts: {
   });
   if (!withVerdict) return { kind: "no-previous" };
   if (withVerdict.state !== "success") return { kind: "refused", reason: "previous review not success" };
-  if (hasOpenBlockers(withVerdict.findings))
-    return { kind: "refused", reason: "previous review has open findings" };
+  if (hasOpenBlockers(withVerdict.findings)) return { kind: "refused", reason: "previous review has open findings" };
   if (shaMatches(withVerdict.sha, opts.headSha)) return { kind: "refused", reason: "head already reviewed" };
   const clean = await checkCleanMerge({
     previousSha: withVerdict.sha,

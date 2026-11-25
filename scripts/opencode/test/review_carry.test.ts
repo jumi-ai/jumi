@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
+import type { ForgePreset } from "./fakes/forge.ts";
 import { forEachForge, makeReviewApi } from "./fakes/forge.ts";
 import { makeBranch, makeComment, makePR, makeRepo } from "./fixtures.ts";
 import { withWorkspace } from "./harness/temp.ts";
@@ -62,32 +63,28 @@ interface CarryFixture {
   p1?: string;
 }
 
-async function runCarry(
-  preset: { name: string; pullFile: (name?: string) => { filename: string } & Record<string, unknown> },
-  fixture: CarryFixture
-) {
+async function runCarry(preset: ForgePreset, fixture: CarryFixture) {
   return withWorkspace(async (workspace) => {
     let runs = 0;
     const statuses: Array<{ state: string; description?: string }> = [];
     const bodies: string[] = [];
     const prFile = preset.pullFile("src/pr.ts");
     const api = makeReviewApi({
-      capabilities: preset.name === "github" ? (await import("../src/forge_capabilities.ts")).FORGE_CAPABILITIES.github : (await import("../src/forge_capabilities.ts")).FORGE_CAPABILITIES.gitea,
+      capabilities:
+        preset.name === "github"
+          ? (await import("../src/forge_capabilities.ts")).FORGE_CAPABILITIES.github
+          : (await import("../src/forge_capabilities.ts")).FORGE_CAPABILITIES.gitea,
       getPR: async () => makePR({ head: makeBranch({ sha: MERGE }) }),
       getRepo: async () => makeRepo(),
       getPRFiles: async () => [prFile as never],
-      listIssueComments: async () => [
-        makeComment({ id: 50, body: fixture.previousBody }),
-      ],
+      listIssueComments: async () => [makeComment({ id: 50, body: fixture.previousBody })],
       listPullReviews: async () => [],
       listPullReviewComments: async () => [],
       listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
       listCheckRuns: async () => [],
       listActionJobs: async () => [],
       getRepoFile: async () =>
-        fixture.settingsContent !== undefined
-          ? { found: true, content: fixture.settingsContent }
-          : { found: false },
+        fixture.settingsContent !== undefined ? { found: true, content: fixture.settingsContent } : { found: false },
       createCommitStatus: async (_o, _r, _s, status) => {
         statuses.push(status);
         return status;
