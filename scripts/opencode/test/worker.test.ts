@@ -36,6 +36,13 @@ import { traced } from "./golden/trace.ts";
 
 const processWorkerTick = traced("processWorkerTick", realProcessWorkerTick);
 
+import {
+  beginClaimedWorktree,
+  isClaimedEarlyResult,
+  openClaimedLoop,
+  runClaimedLoop,
+} from "../src/claimed_worktree.ts";
+import type { Engine } from "../src/engine.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import {
@@ -1649,5 +1656,102 @@ describe("processWorkerTick", () => {
       skipReason: "stuck: cannot resolve conflicts",
     });
     expect(await store.sits.get("kirmanak", "demo", 12)).toMatchObject({ reason: "implement-latch" });
+  });
+
+  test("shutdown abort during preparation releases the lease without a failure comment", async () => {
+    await withDirs(async (home, workdir) => {
+      const fallbackEngine: Engine = async () => ({ status: "ok" });
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const api = workerApi();
+      const abort = new AbortController();
+      const started = Promise.withResolvers<void>();
+      const tick = processWorkerTick(
+        store,
+        makeWorkerConfig({ home, workdir }),
+        api,
+        "worker-1",
+        {
+          abortSignal: abort.signal,
+          implement: async (opts) => {
+            const claimed = await beginClaimedWorktree({
+              job: makeIssueJob(),
+              home,
+              workdir,
+              fallbackEngine,
+              useClaim: false,
+            });
+            if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+            const loop = openClaimedLoop(claimed, {
+              giteaUrl: "https://gitea.kirmanak.stream",
+              giteaToken: "bot-token",
+              botUsername: "jumi",
+              heartbeatIntervalMs: 0,
+            });
+            return await runClaimedLoop(loop, opts.abortSignal, async () => {
+              started.resolve();
+              await waitUntilAborted(opts.abortSignal);
+              const err = new Error("cancelled");
+              err.name = "AbortError";
+              throw err;
+            });
+          },
+        },
+        () => undefined
+      );
+      await started.promise;
+      abort.abort();
+      await tick;
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.leasedBy).toBeNull();
+      expect(api.comments).toEqual([]);
+    });
+  });
+
+  test("explicit cancel during preparation marks cancelled without a failure comment", async () => {
+    await withDirs(async (home, workdir) => {
+      const fallbackEngine: Engine = async () => ({ status: "ok" });
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const api = workerApi();
+      const started = Promise.withResolvers<void>();
+      const tick = processWorkerTick(
+        store,
+        makeWorkerConfig({ home, workdir }),
+        api,
+        "worker-1",
+        {
+          implement: async (opts) => {
+            const claimed = await beginClaimedWorktree({
+              job: makeIssueJob(),
+              home,
+              workdir,
+              fallbackEngine,
+              useClaim: false,
+            });
+            if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+            const loop = openClaimedLoop(claimed, {
+              giteaUrl: "https://gitea.kirmanak.stream",
+              giteaToken: "bot-token",
+              botUsername: "jumi",
+              heartbeatIntervalMs: 0,
+            });
+            return await runClaimedLoop(loop, opts.abortSignal, async () => {
+              started.resolve();
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              return { status: "cancelled" };
+            });
+          },
+        },
+        () => undefined
+      );
+      await started.promise;
+      await store.cancelQueuedForIssue("kirmanak", "demo", 12);
+      await tick;
+      expect(store.rows[0]?.state).toBe("cancelled");
+      expect(store.rows[0]?.leasedBy).toBeNull();
+      expect(api.comments.some((body) => /fail/i.test(body))).toBe(false);
+    });
   });
 });

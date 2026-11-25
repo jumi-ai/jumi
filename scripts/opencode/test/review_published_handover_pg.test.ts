@@ -92,7 +92,7 @@ describePg("markPublishedWithHandover against real postgres", () => {
   test("success settles terminal plus pending together; repeat throws without duplicating", async () => {
     const leased = await leaseReview(store);
     const res = await store.markPublishedWithHandover(leased.id, "engine-1", { state: "succeeded" }, "posted");
-    expect(res).toEqual({ cancelled: false });
+    expect(res).toEqual({ cancelled: false, promoted: 0, parked: 0 });
     expect((await store.get(leased.id))?.state).toBe("succeeded");
     expect(await pendingCount(sql, leased.id)).toBe(1);
 
@@ -115,7 +115,7 @@ describePg("markPublishedWithHandover against real postgres", () => {
     expect(await pendingCount(sql, leased.id)).toBe(1);
     expect(await store.cancelQueuedForPull("kirmanak", "demo", 7)).toBe(0);
     const res = await store.markPublishedWithHandover(leased.id, "engine-1", { state: "succeeded" }, "posted");
-    expect(res).toEqual({ cancelled: true });
+    expect(res).toEqual({ cancelled: true, promoted: 0, parked: 0 });
     expect((await store.get(leased.id))?.state).toBe("cancelled");
     expect(await pendingCount(sql, leased.id)).toBe(0);
   });
@@ -132,7 +132,7 @@ describePg("markPublishedWithHandover against real postgres", () => {
       { state: "skipped", reason: CI_PENDING_REASON },
       "skipped"
     );
-    expect(res).toEqual({ cancelled: false });
+    expect(res).toEqual({ cancelled: false, promoted: 0, parked: 0 });
     expect((await store.get(leased.id))?.state).toBe("queued");
     expect(await pendingCount(sql)).toBe(0);
   });

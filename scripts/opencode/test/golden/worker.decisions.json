@@ -1701,6 +1701,18 @@
     "name": "processWorkerTick",
     "result": "processed"
   },
+  "worker.test.ts::69": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
   "worker.test.ts::7": {
     "claimExists": null,
     "effects": [
@@ -1724,6 +1736,40 @@
     "input": {
       "botUsername": "jumi",
       "leasedBy": "worker-a"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::70": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstopped"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
     },
     "latchAfter": null,
     "latchBefore": null,

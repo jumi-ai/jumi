@@ -297,7 +297,7 @@ export const REPO_SETTINGS_REGISTRY = [
   requiredSetting({
     key: "auto_rerun_flakes",
     field: "autoRerunFlakes",
-    doc: "Rerun failed flaky CI jobs once per head and check; false keeps the human-rerun note.",
+    doc: "Rerun failed CI jobs once per head and check after a no_changes round; false never reruns.",
     defaultValue: true,
     parse: (raw): RepoSettingResult<boolean> => {
       if (typeof raw !== "boolean") return { ok: false, error: `"auto_rerun_flakes" must be a boolean` };
@@ -1549,9 +1549,10 @@ export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
 }
 
 /**
- * Whether Jumi reruns failed flaky CI jobs once per head and check.
- * Missing, invalid, or unreadable files behave as today (on): the
- * repository opts out with `auto_rerun_flakes: false`.
+ * Whether Jumi reruns still-failed CI jobs once per head and check after a
+ * worker `no_changes` on red CI. Missing, invalid, or unreadable files
+ * behave as today (on): the repository opts out with
+ * `auto_rerun_flakes: false`.
  */
 export function isAutoRerunFlakesEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;

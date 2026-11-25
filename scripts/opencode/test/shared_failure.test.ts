@@ -367,7 +367,7 @@ describe("wake waiters with merge-only", () => {
 
 describe("shared-failure deferral (full follow-up path)", () => {
   const FAILURE_LOG = "::error::Talos dry-run failed (exit code 1)\n";
-  const FLAKE_LOG = "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n";
+  const TIMEOUT_LOG = "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n";
 
   function testPr(number: number, issue: number, sha: string) {
     // Local copy of the follow-up harness PR shape (kirmanak/demo).
@@ -651,13 +651,13 @@ describe("shared-failure deferral (full follow-up path)", () => {
     });
   });
 
-  test("a handled flake does not retrigger", async () => {
+  test("a red timeout log runs the worker and records handled", async () => {
     const { withDirs } = await import("./harness/temp.ts");
     await withDirs(async (home: string, workdir: string) => {
       const ledger = new MemoryReviewJobStore();
-      const sha = "flakesha000000000000000000000000000001";
+      const sha = "timeoutsha0000000000000000000000000001";
       const openPullsRef = { current: [testPr(127, 12, sha)] };
-      const { api } = await makeApiFor({ openPullsRef, log: FLAKE_LOG });
+      const { api } = await makeApiFor({ openPullsRef, log: TIMEOUT_LOG });
 
       const first = await runWake({
         api,
@@ -667,28 +667,14 @@ describe("shared-failure deferral (full follow-up path)", () => {
         issueNumber: 12,
         prNumber: 127,
         sha,
-        delivery: "delivery-flake-1",
-        shouldRun: false,
+        delivery: "delivery-timeout-1",
+        shouldRun: true,
       });
-      expect(first.status).toBe("skipped");
-      expect(first.reason).toContain("infra flake");
+      expect(first.status).toBe("no-changes");
       const handled = await readCiState(ciStatePath(home, "kirmanak", "demo", 12));
       expect(handled.handled).toHaveLength(1);
 
-      const second = await runWake({
-        api,
-        ledger: ledger as never,
-        home,
-        workdir,
-        issueNumber: 12,
-        prNumber: 127,
-        sha,
-        delivery: "delivery-flake-2",
-        shouldRun: false,
-      });
-      expect(second.status).toBe("skipped");
-      expect(second.openCode).toBe(0);
-      expect(second.reason).not.toContain("waiting on #");
+      expect(first.openCode).toBe(1);
     });
   });
 });
