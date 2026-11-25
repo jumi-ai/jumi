@@ -159,7 +159,7 @@ describe("decodeWorkerJobIntent", () => {
           strictRefresh: true,
           strictBaseSha: "base",
         }),
-        key: "follow-up:kirmanak/demo#132:hs",
+        key: "follow-up:kirmanak/demo#132:hs:base",
         payload: { ...basePayload, action: "push", mergeOnly: true, strictRefresh: true, strictBaseSha: "base" },
         expected: "follow-up-strict-refresh",
       },

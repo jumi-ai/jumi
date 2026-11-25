@@ -1259,7 +1259,7 @@ describePg("PgReviewJobStore against real postgres", () => {
           strictRefresh: true,
           strictBaseSha: "base",
         }),
-        key: "follow-up:kirmanak/demo#304:hs",
+        key: "follow-up:kirmanak/demo#304:hs:base",
         intent: "follow-up-strict-refresh",
         payload: payloadFor(204, {
           action: "push",
