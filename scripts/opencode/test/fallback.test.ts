@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cleanupCodexJobHomes, codexJobDir, codexRetainedHome } from "../src/codex_home.ts";
 import { observeEngineRun, renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { type Engine, EngineFailedError, type EngineResult } from "../src/engine.ts";
 import {
   agyConversationPath,
   clearOpenCodeSession,
+  codexThreadPath,
   hasResumableSession,
   isProviderUnavailableResult,
   looksLikeProviderUnavailable,
@@ -1316,6 +1318,58 @@ describe("hasResumableSession", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("codex thread without a Jumi home marker resumes as today", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-resume-home-"));
+    try {
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await writeFile(codexThreadPath(dir), "thread-9\n");
+      expect(await hasResumableSession(dir)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await cleanupCodexJobHomes(dir);
+    }
+  });
+
+  test("codex thread with a review marker needs the retained session state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-resume-codex-"));
+    try {
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await writeFile(codexThreadPath(dir), "thread-9\n");
+      await writeFile(join(dir, ".jumi-tmp", "codex-home-kind"), "review\n");
+      // Thread id alone is not resumable: its rollout was deleted with the
+      // per-spawn home.
+      expect(await hasResumableSession(dir)).toBe(false);
+      const home = codexRetainedHome(dir, "review");
+      await mkdir(join(home, "sessions", "2026", "11", "25"), { recursive: true });
+      await writeFile(join(home, "sessions", "2026", "11", "25", "rollout-thread-9.jsonl"), "{}\n");
+      expect(await hasResumableSession(dir)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await cleanupCodexJobHomes(dir);
+    }
+  });
+
+  test("codex thread with a worker marker ignores the review home", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-resume-worker-"));
+    try {
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await writeFile(codexThreadPath(dir), "thread-9\n");
+      await writeFile(join(dir, ".jumi-tmp", "codex-home-kind"), "worker\n");
+      const reviewHome = codexRetainedHome(dir, "review");
+      await mkdir(join(reviewHome, "sessions", "2026", "11", "25"), { recursive: true });
+      await writeFile(join(reviewHome, "sessions", "2026", "11", "25", "rollout-thread-9.jsonl"), "{}\n");
+      // Only the worker home counts for a worker thread.
+      expect(await hasResumableSession(dir)).toBe(false);
+      const workerHome = codexRetainedHome(dir, "worker");
+      await mkdir(join(workerHome, "sessions", "2026", "11", "25"), { recursive: true });
+      await writeFile(join(workerHome, "sessions", "2026", "11", "25", "rollout-thread-9.jsonl"), "{}\n");
+      expect(await hasResumableSession(dir)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await cleanupCodexJobHomes(dir);
+    }
+  });
 });
 
 describe("clearOpenCodeSession", () => {
@@ -1329,6 +1383,25 @@ describe("clearOpenCodeSession", () => {
       for (const path of [db, `${db}-wal`, `${db}-shm`]) expect(await Bun.file(path).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("removes the codex marker and retained homes so a hop starts fresh", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-session-codex-"));
+    try {
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await writeFile(codexThreadPath(dir), "thread-9\n");
+      await writeFile(join(dir, ".jumi-tmp", "codex-home-kind"), "review\n");
+      const home = codexRetainedHome(dir, "review");
+      await mkdir(join(home, "sessions"), { recursive: true });
+      await writeFile(join(home, "sessions", "rollout-thread-9.jsonl"), "{}\n");
+      expect(await hasResumableSession(dir)).toBe(true);
+      await clearOpenCodeSession(dir);
+      expect(await hasResumableSession(dir)).toBe(false);
+      expect(await Bun.file(codexJobDir(dir)).exists()).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await cleanupCodexJobHomes(dir);
     }
   });
 });

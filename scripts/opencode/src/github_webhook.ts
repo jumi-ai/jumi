@@ -716,6 +716,13 @@ export async function handleGithubWebhookEvent(
                   const receivedAt = new Date().toISOString();
                   const workerJob: import("./types.ts").IssueJob = { ...strictJob, delivery, receivedAt };
                   const workerResult = await deps.worker.queue.enqueue(workerJob);
+                  if (strictSlots && strictJob.prNumber && strictJob.headSha) {
+                    const baseBranch = fullPr.base?.ref?.trim() ? fullPr.base.ref.trim() : "";
+                    if (baseBranch)
+                      await strictSlots
+                        .clearPending(strictOwner, strictRepo, baseBranch, strictJob.prNumber, strictJob.headSha)
+                        .catch(() => undefined);
+                  }
                   logger(
                     `${workerResult.queued ? "queued" : "deduped"} ${workerResult.key} delivery=${delivery} strict-refresh`
                   );
@@ -1154,10 +1161,11 @@ export async function handleGithubWebhookEvent(
       // conflicts stay for the conflict workflow. Unknown/off stays silent.
       // Single-slot per repo and target branch: the oldest ready PR holds the
       // slot across CI/review/merge; waiting PRs get no speculative push.
+      let strictSlots: import("./strict_refresh_queue.ts").StrictRefreshSlotStore | undefined;
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
         const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
-        const strictSlots = strictSlotsFor(deps);
+        strictSlots = strictSlotsFor(deps);
         const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger, strictSlots);
         for (const partial of strict.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };
@@ -1172,7 +1180,21 @@ export async function handleGithubWebhookEvent(
         return skipped("no managed jumi PRs", logger);
       }
       // Push is out of scope for sits: enqueue without remembering or clearing.
-      return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+      const enqueued = await enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+      // Best effort: clear the durable intent now that the job is queued. A
+      // throw above skips this and the tick drains the intent instead.
+      if (strictSlots) {
+        const branch = payload.ref.startsWith("refs/heads/") ? payload.ref.slice("refs/heads/".length) : "";
+        if (branch) {
+          const [o, r] = payload.repository.full_name.split("/");
+          if (o && r)
+            for (const job of jobs) {
+              if (job.prNumber && job.headSha && (job as { strictRefresh?: boolean }).strictRefresh)
+                await strictSlots.clearPending(o, r, branch, job.prNumber, job.headSha).catch(() => undefined);
+            }
+        }
+      }
+      return enqueued;
     }
 
     if (GITHUB_FOLLOWUP_EVENTS.has(event ?? "")) {

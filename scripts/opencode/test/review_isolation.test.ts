@@ -9,9 +9,11 @@ import {
   claudeReviewBasePrompt,
 } from "../src/claude.ts";
 import { codexArgv } from "../src/codex.ts";
+import { codexJobDir, codexRetainedHome } from "../src/codex_home.ts";
 import { buildEnv } from "../src/git.ts";
 import { buildPROpenedPrompt } from "../src/prompt.ts";
 import { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } from "../src/review_base.ts";
+import { reviewShellDeniedReadPrefixes, reviewShellSandboxRules } from "../src/review_sandbox.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("review isolation", () => {
@@ -142,6 +144,47 @@ describe("review isolation", () => {
       expect(text).toContain('"/work/dir"');
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("retained codex homes stay outside the checkout and the shell allow-list", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "work-"));
+    try {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      for (const kind of ["review", "worker"] as const) {
+        const home = codexRetainedHome(workdir, kind);
+        const jobDir = codexJobDir(workdir);
+        // Outside the checkout (and the per-kind home inside the job dir).
+        expect(home.startsWith(`${workdir}/`)).toBe(false);
+        expect(home.startsWith(`${jobDir}/`)).toBe(true);
+        expect(jobDir.startsWith(`${workdir}/`)).toBe(false);
+        expect(jobDir.startsWith("/tmp/")).toBe(true);
+        // Outside every path the review shell policy allows: shells get RW
+        // on the checkout and scratch only, and RO on system paths without
+        // the shared tmpdir, so the job dir under /tmp is unreachable.
+        const rules = reviewShellSandboxRules({ workdir, scratchDir: scratch });
+        for (const allowed of [...rules.readWrite, ...rules.readOnly]) {
+          expect(home === allowed || home.startsWith(`${allowed}/`)).toBe(false);
+        }
+        // File tools deny the job dir, covering the retained homes with the
+        // per-spawn files.
+        const denied = reviewShellDeniedReadPrefixes({
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: jobDir,
+        });
+        expect(denied).toContain(jobDir);
+        expect(home === jobDir || home.startsWith(`${jobDir}/`)).toBe(true);
+      }
+      // The job dir is keyed to the worktree: another worktree gets another home.
+      const other = await mkdtemp(join(tmpdir(), "work-"));
+      try {
+        expect(codexJobDir(other)).not.toBe(codexJobDir(workdir));
+      } finally {
+        await rm(other, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
     }
   });
 
