@@ -18,6 +18,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import {
   checkoutPullRequestWorkspace,
   createReviewWorkspace,
+  GIT_ABORT_GRACE_MS,
   GITHUB_GIT_USERNAME,
   type GitRunner,
   gitConfigArgs,
@@ -32,6 +33,7 @@ import {
   workerOpenCodeChildEnvWithGradleSeed,
 } from "../src/workspace.ts";
 import { makeBranch, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { fakeBin, withFakeBins } from "./harness/bins.ts";
 import { withEnv } from "./harness/env.ts";
 import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
@@ -1259,4 +1261,240 @@ describe("prepareGradleSeed", () => {
       await rm(seed, { recursive: true, force: true });
     }
   });
+});
+
+const hasSetsidForGitAbort = Boolean(Bun.which("setsid"));
+const itSetsidForGitAbort = hasSetsidForGitAbort ? test : test.skip;
+
+async function readPidLog(path: string): Promise<number[]> {
+  const text = await readFile(path, "utf8").catch(() => "");
+  const pids = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((pid) => Number.isFinite(pid) && pid > 0);
+  return [...new Set(pids)];
+}
+
+/**
+ * A reaped zombie still answers `kill(pid, 0)` but holds no pipes and runs no
+ * code, so the abort tests treat `Z`/`X` (or a vanished `/proc` entry) as gone.
+ */
+async function pidIsLive(pid: number): Promise<boolean> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const state = stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trim()
+      .split(/\s+/)[0];
+    return state !== "Z" && state !== "X" && state !== "x";
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function waitForPids(path: string, count: number, timeoutMs = 5000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let pids: number[] = [];
+  while (Date.now() < deadline) {
+    pids = await readPidLog(path);
+    if (pids.length >= count) return pids;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return pids;
+}
+
+/**
+ * A SIGKILLed orphan can still sample as `R` for a scheduler tick after the
+ * abort rejects; it is already dying and settles to `Z`/gone almost
+ * immediately. Poll briefly so the "leaves none running" check does not race
+ * teardown, and return any pids still live past the timeout.
+ */
+async function waitForAllGone(pids: number[], timeoutMs = 3000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let live: number[] = [];
+  do {
+    live = [];
+    for (const pid of pids) {
+      if (await pidIsLive(pid)) live.push(pid);
+    }
+    if (live.length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return live;
+}
+
+describe("runGit abort", () => {
+  test("grace constant bounds the abort wait", () => {
+    expect(GIT_ABORT_GRACE_MS).toBe(5000);
+  });
+
+  test("pre-aborted signal rejects AbortError without spawning", async () => {
+    await withFakeBins({ git: fakeBin("git", "exit 0") }, async ({ workdir, argsLog }) => {
+      const err = await runGit(["status"], {
+        cwd: workdir,
+        env: { PATH: process.env.PATH, ARGS_LOG: argsLog },
+        signal: AbortSignal.abort(),
+      }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(err instanceof Error && err.name).toBe("AbortError");
+      expect(await readFile(argsLog, "utf8").catch(() => "")).toBe("");
+    });
+  });
+
+  test("missing setsid rejects with an explicit error before spawning", async () => {
+    await withFakeBins({ git: fakeBin("git", "exit 0") }, async ({ workdir, argsLog }) => {
+      const err = await runGit(["status"], {
+        cwd: workdir,
+        env: { PATH: "/nonexistent-dir-for-jumi-git-abort-test", ARGS_LOG: argsLog },
+        signal: new AbortController().signal,
+      }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(err instanceof Error && err.message).toContain("setsid");
+      expect(await readFile(argsLog, "utf8").catch(() => "")).toBe("");
+    });
+  });
+
+  itSetsidForGitAbort(
+    "TERM-ignoring child and grandchild are killed, rejects AbortError within grace plus margin",
+    async () => {
+      await withFakeBins(
+        {
+          git: fakeBin(
+            "git",
+            `trap '' TERM
+echo $$ >> "$PIDS_LOG"
+sleep 60 &
+echo $! >> "$PIDS_LOG"
+sh -c 'trap "" TERM; echo $$ >> "$PIDS_LOG"; sleep 60 & echo $! >> "$PIDS_LOG"; wait' &
+echo $! >> "$PIDS_LOG"
+wait`
+          ),
+        },
+        async ({ workdir, argsLog }) => {
+          const pidsLog = `${argsLog}.pids`;
+          const controller = new AbortController();
+          const pending = runGit(["clone", "https://forge.example.test/owner/repo.git"], {
+            cwd: workdir,
+            env: { PATH: process.env.PATH, ARGS_LOG: argsLog, PIDS_LOG: pidsLog },
+            signal: controller.signal,
+          });
+          const pids = await waitForPids(pidsLog, 4);
+          expect(pids.length).toBeGreaterThanOrEqual(4);
+          const abortAt = Date.now();
+          controller.abort();
+          const err = await pending.then(
+            () => null,
+            (caught: unknown) => caught
+          );
+          expect(err instanceof Error && err.name).toBe("AbortError");
+          expect(Date.now() - abortAt).toBeLessThan(GIT_ABORT_GRACE_MS + 3000);
+          expect(await waitForAllGone(pids)).toEqual([]);
+        }
+      );
+    },
+    15_000
+  );
+
+  itSetsidForGitAbort(
+    "helper holding pipes open is killed without waiting for EOF",
+    async () => {
+      await withFakeBins(
+        {
+          git: fakeBin(
+            "git",
+            `echo $$ >> "$PIDS_LOG"
+sh -c 'trap "" TERM; echo $$ >> "$PIDS_LOG"; sleep 60' &
+echo $! >> "$PIDS_LOG"
+trap 'exit 0' TERM
+sleep 60`
+          ),
+        },
+        async ({ workdir, argsLog }) => {
+          const pidsLog = `${argsLog}.pids`;
+          const controller = new AbortController();
+          const pending = runGit(["fetch", "origin"], {
+            cwd: workdir,
+            env: { PATH: process.env.PATH, ARGS_LOG: argsLog, PIDS_LOG: pidsLog },
+            signal: controller.signal,
+          });
+          const pids = await waitForPids(pidsLog, 2);
+          expect(pids.length).toBeGreaterThanOrEqual(2);
+          const abortAt = Date.now();
+          controller.abort();
+          const err = await pending.then(
+            () => null,
+            (caught: unknown) => caught
+          );
+          expect(err instanceof Error && err.name).toBe("AbortError");
+          expect(Date.now() - abortAt).toBeLessThan(GIT_ABORT_GRACE_MS + 3000);
+          expect(await waitForAllGone(pids)).toEqual([]);
+        }
+      );
+    },
+    15_000
+  );
+
+  itSetsidForGitAbort(
+    "fake that exits on SIGTERM returns before the grace elapses",
+    async () => {
+      await withFakeBins(
+        { git: fakeBin("git", `echo $$ >> "$PIDS_LOG"\nexec sleep 60`) },
+        async ({ workdir, argsLog }) => {
+          const pidsLog = `${argsLog}.pids`;
+          const controller = new AbortController();
+          const pending = runGit(["clone", "https://forge.example.test/owner/repo.git"], {
+            cwd: workdir,
+            env: { PATH: process.env.PATH, ARGS_LOG: argsLog, PIDS_LOG: pidsLog },
+            signal: controller.signal,
+          });
+          const pids = await waitForPids(pidsLog, 1);
+          expect(pids.length).toBeGreaterThanOrEqual(1);
+          const abortAt = Date.now();
+          controller.abort();
+          const err = await pending.then(
+            () => null,
+            (caught: unknown) => caught
+          );
+          expect(err instanceof Error && err.name).toBe("AbortError");
+          expect(Date.now() - abortAt).toBeLessThan(GIT_ABORT_GRACE_MS);
+          expect(await waitForAllGone(pids)).toEqual([]);
+        }
+      );
+    },
+    15_000
+  );
+
+  itSetsidForGitAbort(
+    "signal path still redacts secrets on failure",
+    async () => {
+      await withFakeBins(
+        { git: fakeBin("git", `printf 'fatal: auth %s\\n' "$GIT_AUTH_TOKEN" >&2\nexit 128`) },
+        async ({ workdir, argsLog }) => {
+          const err = await runGit(["fetch", "origin"], {
+            cwd: workdir,
+            env: { PATH: process.env.PATH, ARGS_LOG: argsLog, GIT_AUTH_TOKEN: "ghs_secret" },
+            signal: new AbortController().signal,
+          }).then(
+            () => null,
+            (caught: unknown) => caught
+          );
+          expect(err).toBeInstanceOf(Error);
+          expect((err as Error).message).toContain("128");
+          expect((err as Error).message).not.toContain("ghs_secret");
+        }
+      );
+    },
+    15_000
+  );
 });
