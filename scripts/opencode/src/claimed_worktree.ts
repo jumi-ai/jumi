@@ -478,12 +478,14 @@ export async function ensureBareCache(
     await loop.runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
       cwd: loop.barePath,
       env: loop.env,
+      signal: opts.abortSignal,
     });
   } else {
     opts.log(`Cloning ${loop.owner}/${loop.repo} into bare cache`);
     await loop.runConfiguredGit(["clone", "--bare", gitRemoteUrl(cloneUrl, loop.auth), loop.barePath], {
       cwd: dirname(loop.barePath),
       env: loop.env,
+      signal: opts.abortSignal,
     });
     if (loop.auth.embedTokenInUrl) {
       await loop.runConfiguredGit(["remote", "set-url", "origin", cloneUrl], { cwd: loop.barePath, env: loop.env });
@@ -491,6 +493,7 @@ export async function ensureBareCache(
     await loop.runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
       cwd: loop.barePath,
       env: loop.env,
+      signal: opts.abortSignal,
     });
   }
   throwIfAborted(opts.abortSignal);
@@ -538,12 +541,14 @@ export async function attachIssueWorktree(
       await loop.runConfiguredGit(["worktree", "add", loop.worktree, opts.branch], {
         cwd: loop.barePath,
         env: loop.env,
+        signal: opts.abortSignal,
       });
     } else if (await loop.refExists(`refs/remotes/origin/${opts.branch}`)) {
       opts.log(`Adding worktree ${loop.worktree} from origin/${opts.branch}`);
       await loop.runConfiguredGit(["worktree", "add", "-B", opts.branch, loop.worktree, `origin/${opts.branch}`], {
         cwd: loop.barePath,
         env: loop.env,
+        signal: opts.abortSignal,
       });
     } else {
       opts.log(`Adding worktree ${loop.worktree} on ${opts.branch}`);
@@ -552,6 +557,7 @@ export async function attachIssueWorktree(
         {
           cwd: loop.barePath,
           env: loop.env,
+          signal: opts.abortSignal,
         }
       );
     }
