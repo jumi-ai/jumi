@@ -23,6 +23,7 @@ import {
 } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { claudeApiKeySecrets } from "./claude_credentials.ts";
+import { cleanupJobHarnessTemp } from "./codex_home.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
@@ -3252,7 +3253,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         // Best-effort: never replace the review result.
       }
       await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
-      await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
+      // The job ends here (success, failure, or abort): remove the worktree
+      // harness temp and the retained Codex homes with it.
+      await cleanupJobHarnessTemp(opts.workspace);
     }
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;

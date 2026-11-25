@@ -124,6 +124,16 @@ export async function destroyRuntimeWorkspace(
     opts.logger?.(`runtime destroy detach failed: ${errorMessage(err)}`);
     if (firstErr === undefined) firstErr = err;
   }
+  // The job ends here (success, failure, timeout, or cancel): remove the
+  // retained Codex homes keyed to the worktree so no session state carries
+  // to another job, PR, or worktree. Best-effort on the way out.
+  try {
+    const { cleanupCodexJobHomes } = await import("./codex_home.ts");
+    await cleanupCodexJobHomes(loop.worktree);
+  } catch (err) {
+    opts.logger?.(`runtime destroy codex home cleanup failed: ${errorMessage(err)}`);
+    if (firstErr === undefined && !opts.pushLanded) firstErr = err;
+  }
   if (firstErr !== undefined && !opts.pushLanded) throw firstErr;
 }
 
