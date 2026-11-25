@@ -47,7 +47,8 @@ import {
 } from "./run_usage.ts";
 import {
   ISSUE_SKIP_LATCHES_SCHEMA_SQL,
-  MemorySkipLatchStore,
+  LedgerMemorySkipLatchStore,
+  type MemorySkipLatchStore,
   PgSkipLatchStore,
   type SkipLatchStore,
 } from "./skip_latches.ts";
@@ -1285,7 +1286,13 @@ function attemptKeyForRow(row: NewRunUsageRow & { id: number }): string {
 
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
-  readonly skipLatches = new MemorySkipLatchStore();
+  // Ledger-aware adapter (still a MemorySkipLatchStore so existing callers
+  // and assignments keep working); standalone memory stores reject fences.
+  readonly skipLatches: MemorySkipLatchStore = new LedgerMemorySkipLatchStore({
+    findLedgerRow: (jobId) => this.rows.find((row) => row.id === jobId),
+    readLatchGeneration: (owner, repo, issueNumber) =>
+      this.issueSkipLatches.get(issueSkipLatchKey(owner, repo, issueNumber))?.generation ?? 0,
+  });
   readonly sits = new MemoryRouterSitStore();
   readonly provenance = new MemoryProvenanceStore();
   readonly handoffs = new MemoryHandoffStore();
