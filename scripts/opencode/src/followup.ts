@@ -2317,6 +2317,37 @@ export async function implementFollowUp(
     const triggerHandled =
       (triggerCommentId !== undefined && snapshot.latch.followup.handledCommentIds.includes(triggerCommentId)) ||
       (triggerReviewId !== undefined && snapshot.latch.followup.handledReviewIds.includes(triggerReviewId));
+    const markPostCapTriggerHandled = async (): Promise<void> => {
+      // A trusted refusal posts a new PR comment (the stuck-sticky edit alone
+      // is invisible). Record the trigger as handled without bumping the
+      // round so a redelivered/duplicated webhook for the same
+      // comment/review id hits `comment-already-handled` in `decide()` instead
+      // of posting a second refusal comment. Untrusted, bot, and ignored
+      // senders never reach here, so they cannot make Jumi write.
+      try {
+        const current = snapshot.latch.followup;
+        const handledCommentIds = [...current.handledCommentIds];
+        const handledReviewIds = [...current.handledReviewIds];
+        if (triggerCommentId !== undefined && !handledCommentIds.includes(triggerCommentId)) {
+          handledCommentIds.push(triggerCommentId);
+        }
+        if (triggerReviewId !== undefined && !handledReviewIds.includes(triggerReviewId)) {
+          handledReviewIds.push(triggerReviewId);
+        }
+        await writeFollowUpLatch(latches, latchKey, {
+          prNumber: pr.number,
+          round: current.round,
+          lastHeadSha: current.lastHeadSha,
+          handledCommentIds,
+          handledReviewIds,
+          handledReviewFindings: current.handledReviewFindings,
+          updatedAt: now().toISOString(),
+          ...(current.suggestionHold ? { suggestionHold: current.suggestionHold } : {}),
+        });
+      } catch (err) {
+        log(`post-cap handled latch update failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+      }
+    };
     const handlePostCapHumanWake = async (
       idLabel: string,
       idForBody: number | undefined,
@@ -2360,6 +2391,7 @@ export async function implementFollowUp(
         } catch (err) {
           log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
         }
+        await markPostCapTriggerHandled();
         return;
       }
       if (assessment.incomplete) {
@@ -2378,6 +2410,7 @@ export async function implementFollowUp(
         } catch (err) {
           log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
         }
+        await markPostCapTriggerHandled();
         return;
       }
       if (assessment.openCount === 0) {
@@ -2398,12 +2431,13 @@ export async function implementFollowUp(
         } catch (err) {
           log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
         }
+        await markPostCapTriggerHandled();
         return;
       }
       answerRoundPastCap = true;
       log(`answer round past cap for ${owner}/${repo}#${pr.number} ${idLabel}`);
     };
-    if (roundCapped && isHumanWake && !ciWake && !triggerHandled) {
+    if (roundCapped && isHumanWake && !ciWake && !triggerHandled && snapshot.hasFeedback) {
       // Earlier decision gates win over the round cap: an unreadable
       // ignore-authors list (`settings-unreadable`) and a hit conflict cap
       // on a conflicted PR (`conflict-cap`) both precede the round-cap check

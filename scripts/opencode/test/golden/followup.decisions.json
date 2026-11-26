@@ -2085,6 +2085,160 @@
       "status": "skipped"
     }
   },
+  "followup.test.ts::132": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "Jumi did not act on your comment 55: no open ❓ maintainer: question on the current head, so the follow-up round cap still applies."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc",
+            "prNumber": 127,
+            "round": 3,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "stuck: too many follow-up rounds",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::133": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "comment already handled",
+      "status": "skipped"
+    }
+  },
   "followup.test.ts::14": {
     "claimExists": false,
     "effects": [
@@ -3819,6 +3973,29 @@
         "seq": 0
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc",
+            "prNumber": 127,
+            "round": 5,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -3827,7 +4004,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 1
+        "seq": 2
       }
     ],
     "input": {
@@ -3846,7 +4023,9 @@
       "ci": {},
       "conflict": {},
       "followup": {
-        "handledCommentIds": [],
+        "handledCommentIds": [
+          55
+        ],
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc",
@@ -4157,6 +4336,29 @@
         "seq": 0
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc",
+            "prNumber": 127,
+            "round": 3,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -4165,7 +4367,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 1
+        "seq": 2
       }
     ],
     "input": {
@@ -4184,7 +4386,9 @@
       "ci": {},
       "conflict": {},
       "followup": {
-        "handledCommentIds": [],
+        "handledCommentIds": [
+          55
+        ],
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc",

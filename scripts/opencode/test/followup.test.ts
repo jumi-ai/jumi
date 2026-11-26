@@ -6622,3 +6622,52 @@ describe("openMaintainerQuestionsAnyTrailer", () => {
     expect(assessment.hasAnyReview).toBe(true);
   });
 });
+
+describe("post-cap refusal idempotency", () => {
+  test("trusted refusal marks trigger handled so redelivery is comment-already-handled", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = followupApi();
+      const gitRunner: GitRunner = async () => {
+        throw new Error("git should not run");
+      };
+      const logs: string[] = [];
+      const baseOpts = {
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+      };
+      const first = await implementFollowUp(baseOpts);
+      expect(first).toEqual({ status: "skipped", reason: "stuck: too many follow-up rounds" });
+      expect(logs.some((line) => line.includes("post-cap answer refused for kirmanak/demo#127 (comment 55)"))).toBe(
+        true
+      );
+      expect(api.comments.filter((body) => body.includes("Jumi did not act")).length).toBe(1);
+      const latchAfterFirst = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
+      expect(latchAfterFirst.handledCommentIds).toContain(55);
+      const secondLogs: string[] = [];
+      const second = await implementFollowUp({ ...baseOpts, logger: (message: string) => secondLogs.push(message) });
+      expect(second).toEqual({ status: "skipped", reason: "comment already handled" });
+      expect(api.comments.filter((body) => body.includes("Jumi did not act")).length).toBe(1);
+    });
+  });
+});

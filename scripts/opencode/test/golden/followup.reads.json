@@ -390,6 +390,35 @@
       "listOpenPulls": 1
     }
   },
+  "followup.test.ts::132": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 2,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::133": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
   "followup.test.ts::14": {
     "name": "implementFollowUp",
     "reads": {
