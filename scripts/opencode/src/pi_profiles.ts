@@ -84,6 +84,11 @@ export const KNOWN_PI_ENDPOINTS: readonly string[] = [
   "https://opencode.ai/zen/v1",
   "https://opencode.ai/zen/go/v1",
   "https://opencode.ai/inference/v1",
+  // Official xAI API base (Pi built-in `xai` provider model details). The
+  // direct SuperGrok subscription route addresses this base with an OAuth
+  // subscription bearer, never an API key; listing it here does not enable
+  // any route (the deployment allowlist still defaults off).
+  "https://api.x.ai/v1",
 ];
 
 const GOOGLE_PI_PROVIDERS = new Set(["google", "google-vertex", "google-vertex-ai", "google-generative-ai"]);
