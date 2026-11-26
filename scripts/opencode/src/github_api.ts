@@ -1092,6 +1092,10 @@ export class GithubAPI {
     return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
   }
 
+  async updatePullRequestTitle(owner: string, repo: string, index: number, title: string): Promise<Pull> {
+    return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { title }));
+  }
+
   /**
    * Best-effort delete of a git ref (checkpoint hidden refs). GitHub takes
    * the ref without the `refs/` prefix (`DELETE

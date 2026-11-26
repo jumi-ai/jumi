@@ -33,6 +33,7 @@ export const WORKER_MCP_SERVER_NAME = "jumi-worker";
 export const WORKER_MCP_TOOL_NAMES = [
   "no_changes",
   "set_pr_body",
+  "set_pr_title",
   "skip",
   "blocked_on",
   "set_handoff",
@@ -55,6 +56,12 @@ export const MAX_WORKER_PR_REMAINING_ITEM_CHARS = 1000;
 
 /** Longest accepted `skip` reason (chars, after trim). Mirrors the parent prose cap. */
 export const MAX_WORKER_SKIP_REASON_CHARS = 8000;
+
+/** Longest accepted `set_pr_title` title (chars, after trim). Forge titles cap at 255. */
+export const MAX_WORKER_PR_TITLE_CHARS = 255;
+
+/** Longest accepted `set_pr_title` reason (chars, after trim). */
+export const MAX_WORKER_PR_TITLE_REASON_CHARS = 2000;
 
 /** Longest accepted `blocked_on` reason (chars, after trim). */
 export const MAX_WORKER_BLOCKED_REASON_CHARS = 2000;
@@ -121,6 +128,32 @@ export function validatePrBody(markdown: unknown): { ok: true; markdown: string 
     return { ok: false, error: `markdown is too long (max ${MAX_WORKER_PR_BODY_CHARS} chars)` };
   }
   return { ok: true, markdown: trimmed };
+}
+
+export function validatePrTitle(title: unknown): { ok: true; title: string } | { ok: false; error: string } {
+  if (typeof title !== "string") return { ok: false, error: "title is required" };
+  const trimmed = title.replaceAll("\0", "").trim();
+  if (!trimmed) return { ok: false, error: "title is required" };
+  if (trimmed.includes("\n") || trimmed.includes("\r")) {
+    return { ok: false, error: "title must be a single line" };
+  }
+  if (trimmed.length > MAX_WORKER_PR_TITLE_CHARS) {
+    return { ok: false, error: `title is too long (max ${MAX_WORKER_PR_TITLE_CHARS} chars)` };
+  }
+  return { ok: true, title: trimmed };
+}
+
+export function validatePrTitleReason(
+  reason: unknown
+): { ok: true; reason: string | undefined } | { ok: false; error: string } {
+  if (reason === undefined || reason === null) return { ok: true, reason: undefined };
+  if (typeof reason !== "string") return { ok: false, error: "reason must be a string" };
+  const trimmed = reason.replaceAll("\0", "").trim();
+  if (!trimmed) return { ok: true, reason: undefined };
+  if (trimmed.length > MAX_WORKER_PR_TITLE_REASON_CHARS) {
+    return { ok: false, error: `reason is too long (max ${MAX_WORKER_PR_TITLE_REASON_CHARS} chars)` };
+  }
+  return { ok: true, reason: trimmed };
 }
 
 export function validatePrRemaining(
@@ -246,6 +279,8 @@ export class WorkerResultStore {
   private reason?: string;
   private prBody?: string;
   private prRemaining?: string[] | undefined;
+  private prTitle?: string;
+  private prTitleReason?: string | undefined;
   private skipReason?: string;
   private blockedOn?: WorkerBlockedOn;
   private handoff?: string;
@@ -312,6 +347,29 @@ export class WorkerResultStore {
 
   hasPrRemaining(): boolean {
     return this.prRemaining !== undefined && this.prRemaining.length > 0;
+  }
+
+  setPrTitle(input: { title?: unknown; reason?: unknown }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validatePrTitle(input.title);
+    if (!validated.ok) return validated;
+    const validatedReason = validatePrTitleReason(input.reason);
+    if (!validatedReason.ok) return validatedReason;
+    this.prTitle = validated.title;
+    this.prTitleReason = validatedReason.reason;
+    return { ok: true };
+  }
+
+  getPrTitle(): string | undefined {
+    return this.prTitle ? `${this.prTitle}` : undefined;
+  }
+
+  getPrTitleReason(): string | undefined {
+    return this.prTitleReason ? `${this.prTitleReason}` : undefined;
+  }
+
+  hasPrTitle(): boolean {
+    return this.prTitle !== undefined;
   }
 
   setSkip(input: { reason?: unknown }): { ok: true } | { ok: false; error: string } {
@@ -393,6 +451,7 @@ export class WorkerResultStore {
     return (
       this.reason !== undefined ||
       this.prBody !== undefined ||
+      this.prTitle !== undefined ||
       this.skipReason !== undefined ||
       this.blockedOn !== undefined ||
       this.handoff !== undefined ||
@@ -404,7 +463,7 @@ export class WorkerResultStore {
 /**
  * Give the next spawn its own result scope: close the previous store and
  * point the server at a fresh one. Handoff is the one result that persists
- * across attempts, so carry it forward; skip, PR body, no-changes and
+ * across attempts, so carry it forward; skip, PR body, PR title, no-changes and
  * blockers start empty for the new attempt.
  */
 export function rotateResultScope(
@@ -427,8 +486,10 @@ export function rotateResultScope(
 export const UNFENCED_PR_BODY_ADDENDUM_NOTE =
   "The PR description is maintainer-written (no Jumi fence). Your `set_pr_body` markdown becomes a fenced Jumi section appended below it after a blank line: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description. The maintainer text above stays unchanged.";
 
-function toolSchemas(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
-  return [
+function toolSchemas(opts?: {
+  prTitleEligible?: boolean;
+}): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
+  const tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [
     {
       name: "no_changes",
       description:
@@ -452,6 +513,20 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
         required: ["markdown"],
       },
     },
+  ];
+  if (opts?.prTitleEligible === true) {
+    tools.push({
+      name: "set_pr_title",
+      description:
+        "Record a new pull-request title for an adopted PR whose commits changed what it does (one line, at most 255 characters). Offered only on adopted PRs; when it is not listed, do not retitle. Last call wins.",
+      inputSchema: {
+        type: "object",
+        properties: { title: { type: "string" }, reason: { type: "string" } },
+        required: ["title"],
+      },
+    });
+  }
+  tools.push(
     {
       name: "skip",
       description: "Record that this implement round has nothing to change, with the reason. Last call wins.",
@@ -495,14 +570,15 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
         required: ["finding", "status"],
       },
     },
-  ];
+  );
+  return tools;
 }
 
 function callTool(
   store: WorkerResultStore,
   name: string,
   args: Record<string, unknown>,
-  opts?: { prBodyFenced?: boolean }
+  opts?: { prBodyFenced?: boolean; prTitleEligible?: boolean }
 ): { ok: boolean; text: string } {
   if (name === "no_changes") {
     const result = store.setNoChanges({ reason: args.reason });
@@ -521,6 +597,11 @@ function callTool(
       };
     }
     return { ok: true, text: JSON.stringify({ recorded: true }) };
+  }
+  if (name === "set_pr_title") {
+    if (opts?.prTitleEligible !== true) return { ok: false, text: "unknown tool: set_pr_title" };
+    const result = store.setPrTitle({ title: args.title, reason: args.reason });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
   }
   if (name === "skip") {
     const result = store.setSkip({ reason: args.reason });
@@ -551,6 +632,8 @@ export interface StartedWorkerMcpServer {
    * keep a stable endpoint while each attempt gets its own scope.
    */
   setStore: (store: WorkerResultStore) => void;
+  /** Update whether `set_pr_title` is listed and accepted (adopted-PR eligibility). */
+  setPrTitleEligible?: (eligible: boolean) => void;
 }
 
 export async function startWorkerMcpServer(opts: {
@@ -558,9 +641,12 @@ export async function startWorkerMcpServer(opts: {
   token?: string;
   /** False when the live body has no Jumi fence: the `set_pr_body` result names the addendum case. */
   prBodyFenced?: boolean;
+  /** True when the PR is eligible for `set_pr_title`: only then is the tool listed and accepted. */
+  prTitleEligible?: boolean;
 }): Promise<StartedWorkerMcpServer> {
   const token = opts.token ?? randomWorkerMcpToken();
   let current = opts.store;
+  let prTitleEligible = opts.prTitleEligible ?? false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -591,12 +677,21 @@ export async function startWorkerMcpServer(opts: {
         });
       }
       if (method === "tools/list") {
-        return Response.json({ jsonrpc: "2.0", id: body?.id ?? null, result: { tools: toolSchemas() } });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: body?.id ?? null,
+          result: { tools: toolSchemas({ prTitleEligible }) },
+        });
       }
       if (method === "tools/call") {
         const name = String(params.name ?? "");
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        const out = callTool(current, name, args, { prBodyFenced: opts.prBodyFenced });
+        const out = callTool(
+          current,
+          name,
+          args,
+          { prBodyFenced: opts.prBodyFenced, prTitleEligible }
+        );
         return Response.json({
           jsonrpc: "2.0",
           id: body?.id ?? null,
@@ -616,6 +711,9 @@ export async function startWorkerMcpServer(opts: {
     setStore: (store: WorkerResultStore) => {
       current = store;
     },
+    setPrTitleEligible: (eligible: boolean) => {
+      prTitleEligible = eligible;
+    },
   };
 }
 
@@ -627,7 +725,7 @@ export type WorkerResultSource = "tool" | "file fallback" | "missing";
  * used so the file fallback can be removed later.
  */
 export function preferWorkerTool(
-  name: "pr_body" | "skip" | "blocked_on" | "handoff" | "no_changes",
+  name: "pr_body" | "pr_title" | "skip" | "blocked_on" | "handoff" | "no_changes",
   toolValue: string | null | undefined,
   fileValue: string | null | undefined,
   log?: (message: string) => void

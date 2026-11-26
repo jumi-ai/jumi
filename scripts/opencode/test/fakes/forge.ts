@@ -222,6 +222,12 @@ export function makeForgeApi(overrides: Partial<Forge> = {}): ForgeFake<Forge> {
       const body = args[3] as string;
       return { ...neutralPull(index), body };
     },
+    updatePullRequestTitle: async (...args) => {
+      record("updatePullRequestTitle", args);
+      const index = args[2] as number;
+      const title = args[3] as string;
+      return { ...neutralPull(index), title };
+    },
     getPRFiles: async (...args) => {
       record("getPRFiles", args);
       return [];
@@ -520,6 +526,12 @@ export function makeIssueApi(
       const index = args[2] as number;
       const body = args[3] as string;
       return { ...neutralPull(index), body };
+    },
+    updatePullRequestTitle: async (...args) => {
+      record("updatePullRequestTitle", args);
+      const index = args[2] as number;
+      const title = args[3] as string;
+      return { ...neutralPull(index), title };
     },
     listPullReviewComments: async (...args) => {
       record("listPullReviewComments", args);

@@ -124,6 +124,7 @@ import {
 
 const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
+export const PR_TITLE_ELIGIBLE_FILE = "JUMI_PR_TITLE_ELIGIBLE";
 export const SKIP_FILE = "JUMI_SKIP.md";
 export const INCOMPLETE_IMPLEMENT = "Incomplete implement: no skip artifact";
 
@@ -989,6 +990,47 @@ export function replaceJumiPrBodyRegion(body: string | null | undefined, text: s
     return `${current}\n\n${wrapJumiPrBody(text)}`;
   }
   return `${current.slice(0, bounds.start)}${wrapJumiPrBody(text)}${current.slice(bounds.end)}`;
+}
+
+/** Hidden marker recording the adopted PR's original title inside the Jumi fenced section. */
+const ORIGINAL_TITLE_MARKER_PREFIX = "<!-- jumi-original-title:";
+
+function escapeOriginalTitle(title: string): string {
+  return title.replaceAll("--", "&#45;&#45;");
+}
+
+function unescapeOriginalTitle(stored: string): string {
+  return stored.replaceAll("&#45;&#45;", "--");
+}
+
+/** Render the hidden original-title marker for a title (with `--` escaped). */
+export function formatOriginalTitleMarker(title: string): string {
+  return `${ORIGINAL_TITLE_MARKER_PREFIX} ${escapeOriginalTitle(title.trim())} -->`;
+}
+
+const ORIGINAL_TITLE_MARKER_RE = /<!--\s*jumi-original-title:\s*(.*?)\s*-->/s;
+
+/** Extract the original title from a PR body (or Jumi region text), or undefined when absent. */
+export function extractOriginalTitle(body: string | null | undefined): string | undefined {
+  if (!body) return undefined;
+  const match = ORIGINAL_TITLE_MARKER_RE.exec(body);
+  if (!match) return undefined;
+  const raw = (match[1] ?? "").trim();
+  if (!raw) return undefined;
+  return unescapeOriginalTitle(raw);
+}
+
+/**
+ * Ensure Jumi inner text carries the original-title marker. A second retitle
+ * never replaces the first original: when the text already has a marker it is
+ * returned unchanged.
+ */
+export function withOriginalTitleMarker(innerText: string, originalTitle: string): string {
+  if (extractOriginalTitle(innerText) !== undefined) return innerText;
+  const trimmed = innerText.trim();
+  const marker = formatOriginalTitleMarker(originalTitle);
+  if (!trimmed) return marker;
+  return `${marker}\n${trimmed}`;
 }
 
 const RUNNER_STAMP_LINE = /\n*_Jumi · [^\n]*_\s*$/;
