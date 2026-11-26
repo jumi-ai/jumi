@@ -429,6 +429,18 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
+  # Offline Pi plus legacy regressions (#940): the real Pi SDK sessions at
+  # in-container loopback (the probe only contacts 127.0.0.1; Docker jobs add
+  # --network none, which buildah chroot isolation rejects), the structured
+  # reviewer verdict plus worker diff and fixture test, legacy
+  # startup/dispatch without Pi credentials, pi failure without rescue.
+  # Runs as the image UID with a fresh HOME, mirroring the job-pod shape.
+  if ! buildah run --user 10001:10001 --env HOME=/tmp/probe-home --env TMPDIR=/tmp "${ctr}" -- \
+    sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "offline Pi/legacy probe failed against the installed components" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "installed-tools manifest missing in reviewer image" >&2
