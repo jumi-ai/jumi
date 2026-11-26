@@ -547,18 +547,21 @@ function piWorkerBasename(word: string): string {
 function piWorkerGitWriteDenied(command: string): boolean {
   const words = piWorkerShellWords(command);
   for (let i = 0; i < words.length; i++) {
-    if (words[i].quoted) continue;
+    // Quote marks are stripped by the shell before exec, so a quoted
+    // spelling (`"git" push`, `git 'push'`) still runs git: match the
+    // unquoted text. A single quoted word with a space (`echo "git push"`)
+    // never has basename `git`, so it stays data.
     if (piWorkerBasename(words[i].text) !== "git") continue;
     let j = i + 1;
     while (j < words.length) {
-      if (words[j].quoted) break;
       const flag = words[j].text;
       if (!flag.startsWith("-") || flag === "-") break;
-      // `-c <k=v>` and `-C <path>` consume the next word.
+      // `-c <k=v>` and `-C <path>` consume the next word (quoted or not:
+      // the shell strips the quotes before git parses them).
       if ((flag === "-c" || flag === "-C") && j + 1 < words.length) j += 2;
       else j += 1;
     }
-    if (j >= words.length || words[j].quoted) continue;
+    if (j >= words.length) continue;
     if (PI_WORKER_GIT_WRITE_SUBCOMMANDS.has(words[j].text.toLowerCase())) return true;
   }
   return false;
@@ -600,6 +603,61 @@ function piWorkerSplitSegments(command: string): string[] {
   return out;
 }
 
+const PI_WORKER_WRAPPER_COMMANDS = new Set(["sudo", "env", "command"]);
+const PI_WORKER_WRAPPER_VALUE_FLAGS = new Set([
+  "-u",
+  "--user",
+  "-g",
+  "--group",
+  "-C",
+  "--chdir",
+  "--unset",
+  "-S",
+  "--split-string",
+  "--argv0",
+  "-a",
+  "--argv-name",
+]);
+
+/**
+ * Resolve a shell segment's effective command word: skip leading
+ * `VAR=value` assignments and `sudo`/`env`/`command` wrappers (plus their
+ * dash flags and flag values) the way the shell does before exec. Quote
+ * marks are ignored because the shell strips them (`"curl"` still runs
+ * curl).
+ */
+function piWorkerEffectiveCommandWord(words: PiWorkerShellWord[]): PiWorkerShellWord | undefined {
+  let i = 0;
+  let skipped = false;
+  while (i < words.length) {
+    const text = words[i].text;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text)) {
+      i++;
+      skipped = true;
+      continue;
+    }
+    const base = piWorkerBasename(text);
+    if (PI_WORKER_WRAPPER_COMMANDS.has(base)) {
+      i++;
+      skipped = true;
+      continue;
+    }
+    if (skipped && (text === "--" || (text.startsWith("-") && text.length > 1 && text !== "-"))) {
+      i++;
+      skipped = true;
+      // Flags that consume a value (`sudo -u root curl`, `env -u FOO curl`):
+      // skip the value word too when it is not another flag.
+      if (!text.includes("=") && PI_WORKER_WRAPPER_VALUE_FLAGS.has(text) && i < words.length) {
+        const next = words[i].text;
+        if (next && !next.startsWith("-")) i++;
+      }
+      continue;
+    }
+    break;
+  }
+  return words[i];
+}
+
 /** Deny shell network exfil verbs (`curl`, `wget`, `ssh`, ..., `/dev/tcp/`, scripted urllib). */
 function piWorkerNetworkDenied(command: string): boolean {
   if (/\/dev\/tcp\//.test(command)) return true;
@@ -607,8 +665,13 @@ function piWorkerNetworkDenied(command: string): boolean {
   for (const segment of segments) {
     const words = piWorkerShellWords(segment.trim()).filter((word) => word.text.length > 0);
     if (words.length === 0) continue;
-    const first = words.find((word) => word.text.length > 0) ?? words[0];
-    if (!first.quoted && PI_WORKER_NETWORK_COMMANDS.has(piWorkerBasename(first.text))) return true;
+    // Quote marks and `VAR=value`/`sudo`/`env`/`command` prefixes are
+    // stripped/handled by the shell before exec, so `"curl" x`, `FOO=1 curl`,
+    // `sudo curl`, and `env curl` all still run curl: resolve the segment's
+    // effective command word before matching. `echo curl` (curl as an
+    // argument) stays allowed; only the command position is checked.
+    const first = piWorkerEffectiveCommandWord(words);
+    if (first && PI_WORKER_NETWORK_COMMANDS.has(piWorkerBasename(first.text))) return true;
     for (const word of words) {
       if (word.quoted) continue;
       const base = piWorkerBasename(word.text);
