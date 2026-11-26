@@ -264,8 +264,8 @@ function formatBlockingQuestions(blocking: boolean | undefined, runner: PromptRu
   if (!blocking) return "";
   return `
 <blocking_questions>
-  Open ❓ questions block merge for this pull author: the service posts a failing
-  check while any ❓ is open, so required-check automerge waits. Gather upstream
+  Open ordinary ❓ questions block merge for this pull author: the service posts a failing
+  check while any ordinary ❓ is open, so required-check automerge waits. Gather upstream
   evidence yourself before asking. ${webEvidenceGuidance(runner.runnerType, runner.cap)} A read-only shallow
   clone of the public upstream repository at the tags/refs named in the diff into
   "$TMPDIR" scratch outside the porcelain (and diffing those refs there, removing the
@@ -275,10 +275,12 @@ function formatBlockingQuestions(blocking: boolean | undefined, runner: PromptRu
   such as a rendered chart or a command run in the checkout. When upstream
   changes stay unverifiable after you tried to read them, state that as a
   non-blocking note in the review rather than a ❓. Keep writing a success trailer
-  when only ❓ questions remain; the service fails the status while they are open.
+  when only ❓ questions remain; the service fails the status while ordinary ones are open.
+  A ❓ maintainer: question never fails the check: it holds the merge as a maintainer
+  question (pending waiting on maintainer) and the worker never answers it.
   On a later review, treat a previous ❓ as closed only when a reply or change
   actually answers it; otherwise repeat or sharpen it. The check turns success
-  only when no questions are open.
+  only when no ordinary questions are open.
 </blocking_questions>`;
 }
 

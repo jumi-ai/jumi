@@ -159,7 +159,7 @@ import {
   capSuggestionFindings,
   countBugFindings,
   countMaintainerQuestionFindings,
-  countQuestionFindings,
+  countNonMaintainerQuestionFindings,
   countRiskFindings,
   countSuggestionFindings,
   describeBlockingReason,
@@ -1884,7 +1884,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     !parsed.verdict.incomplete &&
     parsed.verdict.state === "success" &&
     isBlockingQuestionAuthor(pr.user?.login, blockingQuestionAuthors)
-      ? countQuestionFindings(comment, { singleFilePath })
+      ? countNonMaintainerQuestionFindings(comment, { singleFilePath })
       : 0;
   // Trailer and status counts come from the findings that actually publish,
   // never from the model's free-text reason: a model that writes "1 blocking"

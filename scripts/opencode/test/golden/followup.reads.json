@@ -177,7 +177,6 @@
   "followup.test.ts::114": {
     "name": "needsFollowUp",
     "reads": {
-      "getCollaboratorPermission": 1,
       "getRepo": 1,
       "listIssueComments": 1,
       "listPullReviewComments": 1,
