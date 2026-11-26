@@ -155,6 +155,10 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   void optionalEnv(resolved, "JUMI_GIT_EMAIL");
   void optionalEnv(resolved, "PHOENIX_PUBLIC_HOST");
   void optionalEnv(resolved, "JUMI_SEARXNG_URL");
+  // Deployment-owned Pi route allowlist (`src/pi_profiles.ts`); read here
+  // so the contract gate sees the optional key. Unset or blank means all Pi
+  // routes stay off; runtime reads it via `piAllowedRoutesFromEnv`.
+  void optionalEnv(resolved, "JUMI_PI_ALLOWED_ROUTES");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);
   const conflictTimeoutMs = intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000);

@@ -390,6 +390,7 @@ describe("deploy/contract.md", () => {
       "BOARD_MCP_KICK_TOKEN",
       "JUMI_ALLOW_UNSANDBOXED_REVIEWS",
       "JUMI_HARNESS_MODE",
+      "JUMI_PI_ALLOWED_ROUTES",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
     expect(parsed.worker.gitOpsEnv).toEqual([
@@ -455,6 +456,7 @@ describe("deploy/contract.md", () => {
       "JUMI_CHECKPOINT_INTERVAL_MS",
       "JUMI_CHECKPOINT_MAX_AGE_MS",
       "JUMI_HARNESS_MODE",
+      "JUMI_PI_ALLOWED_ROUTES",
     ]);
     expect(parsed.reviewer.ports).toEqual(["3000", "3001", "3010"]);
     expect(parsed.worker.ports).toEqual(["3000", "3010"]);
