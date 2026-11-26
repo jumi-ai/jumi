@@ -102,6 +102,7 @@
   "pi_claude.ts": 228,
   "pi_claude_probe.ts": 517,
   "pi_hop.ts": 315,
+  "pi_offline_legacy_probe.ts": 436,
   "pi_opencode_go.ts": 484,
   "pi_profiles.ts": 383,
   "pi_review.ts": 692,
