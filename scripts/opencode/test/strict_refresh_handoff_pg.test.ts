@@ -57,6 +57,10 @@ function checkState(state: Check["state"]): Check {
   return { context: "ci", state, status: state };
 }
 
+function reviewGreen(): Check {
+  return { context: "jumi/opencode-review", state: "success", status: "success" };
+}
+
 function githubApi(opts: { list: Pull[]; fresh: Record<number, Pull>; statuses?: Record<string, Check[]> }) {
   return {
     listOpenPulls: async () => opts.list,
@@ -87,6 +91,8 @@ function simpleApi(pulls: Pull[]) {
       clone_url: "https://github.com/o/r.git",
       default_branch: "main",
     }),
+    listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+    listCheckRuns: async () => [],
   } as never;
 }
 
@@ -116,7 +122,10 @@ describePg("strict handoff against real postgres (#893)", () => {
       890: jumiPull(890, { mergeableState: "behind" }),
       891: jumiPull(891, { mergeableState: "behind" }),
     };
-    const statuses = { "head-890": [checkState("success")], "head-891": [checkState("success")] };
+    const statuses = {
+      "head-890": [checkState("success"), reviewGreen()],
+      "head-891": [checkState("success"), reviewGreen()],
+    };
     const api = githubApi({ list, fresh, statuses });
 
     const first = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1_000);
@@ -181,5 +190,26 @@ describePg("strict handoff against real postgres (#893)", () => {
     expect(summary).toEqual({ expired: 0, enqueued: 1 });
     expect(enqueued[0]?.prNumber).toBe(100);
     expect((await slots.getSlot("o", "r", "main"))?.pendingJob).toBeUndefined();
+  });
+
+  test("ensureAdmitNextDue never clobbers a held slot (pg parity with memory)", async () => {
+    expect(await slots.ensureAdmitNextDue("o", "r", "main", 1_000)).toBe(true);
+    expect(await slots.listAdmitNextDue(1_000)).toHaveLength(1);
+    expect(await slots.consumeAdmitNext("o", "r", "main")).toBe(true);
+    expect(await slots.listAdmitNextDue(1_000)).toHaveLength(0);
+
+    await slots.tryAdmit({
+      owner: "o",
+      repo: "r",
+      baseBranch: "main",
+      prNumber: 100,
+      headSha: "head-100",
+      baseSha: "base-1",
+      admittedAtMs: 1_000,
+      updatedAtMs: 1_000,
+    });
+    expect(await slots.ensureAdmitNextDue("o", "r", "main", 2_000)).toBe(false);
+    expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(100);
+    expect(await slots.listAdmitNextDue(2_000)).toHaveLength(0);
   });
 });
