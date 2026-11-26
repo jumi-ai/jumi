@@ -6,6 +6,8 @@ import type { GitRunner } from "./workspace.ts";
  * or pushed. One shared list so a new sentinel cannot be missed in one path
  * again (implement, follow-up, conflict all strip this list).
  */
+export const PR_TITLE_ELIGIBLE_FILE = "JUMI_PR_TITLE_ELIGIBLE";
+
 export const JUMI_SENTINEL_FILES: readonly string[] = [
   "JUMI_TASK.md",
   "JUMI_QUEUE.md",
@@ -15,6 +17,7 @@ export const JUMI_SENTINEL_FILES: readonly string[] = [
   "JUMI_PR.md",
   "JUMI_HANDOFF.md",
   "JUMI_ATTACHMENTS.md",
+  PR_TITLE_ELIGIBLE_FILE,
 ];
 
 export function sentinelTrackedReason(ref: string, files: readonly string[]): string {
