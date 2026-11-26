@@ -1,4 +1,5 @@
 import { sitForOwnedReason } from "./pr_decision.ts";
+import { isHeadSettingsFailureReason } from "./repo_settings.ts";
 import { createBunSqlClient, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -186,6 +187,13 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
 
   // Push-confirmation exhaustion: Jumi pushed but the forge never registered it.
   if (text.startsWith("forge did not register push ")) return "push-unregistered";
+
+  // Invalid head settings: requeueing the same commit can only skip the same
+  // way, so the board shows it as waiting on a change to the pull instead of
+  // offering a same-commit requeue.
+  if (isHeadSettingsFailureReason(text)) {
+    return "terminal-result";
+  }
 
   return undefined;
 }
