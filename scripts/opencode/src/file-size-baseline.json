@@ -65,6 +65,7 @@
   "forge_capabilities.ts": 144,
   "forge_errors.ts": 145,
   "forge_webfetch.ts": 149,
+  "fresh_job_credential_boundary.ts": 438,
   "git.ts": 1349,
   "git_abort.ts": 167,
   "gitea_issues.ts": 376,
