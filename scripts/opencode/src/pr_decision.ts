@@ -146,6 +146,8 @@ export interface PrDecisionSnapshot {
   hasFeedback: boolean;
   stateRound: number;
   maxFollowupRounds: number;
+  /** Admit exactly one trusted maintainer-answer round past the cap. */
+  answerRoundPastCap?: boolean | undefined;
   ciPending: boolean;
   ciUnhandled: CiCheckRef[];
   ciHash?: string | undefined;
@@ -581,9 +583,12 @@ export function decide(snapshot: PrDecisionSnapshot, caller: DecideCaller = "fol
   let hasFeedback = snapshot.hasFeedback;
   if (hasFeedback && snapshot.stateRound >= snapshot.maxFollowupRounds) {
     if (!snapshot.ciWake) {
-      return skip("round-cap", {}, snapshot, caller);
+      if (!snapshot.answerRoundPastCap) {
+        return skip("round-cap", {}, snapshot, caller);
+      }
+    } else {
+      hasFeedback = false;
     }
-    hasFeedback = false;
   }
   if (!hasFeedback) {
     if (snapshot.ciPending) {
