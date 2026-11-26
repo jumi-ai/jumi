@@ -339,6 +339,7 @@ export interface Forge extends AttachmentSupport {
   closePullRequest(owner: string, repo: string, index: number): Promise<Pull>;
   reopenPullRequest(owner: string, repo: string, index: number): Promise<Pull>;
   updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull>;
+  updatePullRequestTitle?(owner: string, repo: string, index: number, title: string): Promise<Pull>;
   getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]>;
   listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]>;
   findStickyIssueComment(
@@ -433,6 +434,7 @@ export type IssueApi = Tracker &
     | "createPullRequest"
     | "closePullRequest"
     | "updatePullRequestBody"
+    | "updatePullRequestTitle"
     | "listPullReviewComments"
     | "listPullReviews"
     | "listCommitStatuses"
