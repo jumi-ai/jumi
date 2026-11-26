@@ -1,5 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
 import { type ForgeKind, parseForge } from "./forge.ts";
+import { type HarnessMode, parseHarnessMode } from "./harness_mode.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 import {
   type IndependentReviewConfig,
@@ -74,6 +75,8 @@ export interface ServiceConfig {
   maxJobAttempts: number;
   maxFollowupRounds: number;
   maxIncompleteRetries: number;
+  /** Deployment-only harness selector. Unset is legacy; never inferred from forge or repo settings. */
+  harnessMode?: HarnessMode;
   phoenixOtlpEndpoint?: string;
   boardPeerUrl?: string;
   boardPeerToken?: string;
@@ -312,6 +315,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
     maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),
     maxIncompleteRetries: intEnv(resolved, MAX_INCOMPLETE_RETRIES_ENV, 2),
+    // Deployment-only harness selector: unset is legacy, invalid fails startup.
+    // Never inferred from forge, never from repository settings.
+    harnessMode: parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE")),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
     boardPeerUrl: optionalEnv(resolved, "BOARD_PEER_URL"),
     boardPeerToken: optionalEnv(resolved, "BOARD_PEER_TOKEN"),

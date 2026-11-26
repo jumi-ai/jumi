@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { loadConfig, overlaySecretsFromFile, SECRETS_FILE_ENV, type ServiceConfig, scrubSecretEnv } from "./config.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
+import { throwIfPiHarness } from "./harness_mode.ts";
 import { JOB_ID_ENV } from "./job_env.ts";
 import { refuseAgyJobMode, refuseXaiOAuth } from "./job_requirements.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
@@ -231,6 +232,14 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   const kind = row.kind;
   const role = roleForKind(kind);
   const config = kind === "review" ? options.engineConfig : options.workerConfig;
+  // Explicit pi fails before any lease-adjacent work or legacy spawn.
+  try {
+    throwIfPiHarness((config as { harnessMode?: "legacy" | "pi" }).harnessMode ?? "legacy");
+  } catch (err) {
+    const reason = errorMessage(err);
+    log(reason);
+    return { exitCode: 2, reason };
+  }
   const chain = orderedRunners(config);
   const opencodeConfigPath = (config as { opencodeConfig?: string }).opencodeConfig;
   const wellKnownUrl = (config as { opencodeWellKnownUrl?: string }).opencodeWellKnownUrl;
