@@ -95,6 +95,7 @@ import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.t
 import { attachCarryNote, tryCarryReview } from "./review_carry.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
+import { recordBlockingFindingOutcomes, resolveFindingWriterRunner } from "./review_findings_publish.ts";
 import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -305,6 +306,15 @@ export interface ReviewOptions {
    * `publishReviewResult` with the capped counts.
    */
   recordSuggestions?: (counts: ReviewSuggestionCounts) => Promise<void>;
+  /**
+   * Fail-open recorder for per-finding 🔴/🟡 outcomes. Forwarded to
+   * `publishReviewResult` alongside the 💡 counts.
+   */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for recorded finding rows (1-based ledger attempt). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner stamp for recorded finding rows. Resolved via provenance when unset. */
+  writerRunner?: string | null;
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
@@ -395,6 +405,24 @@ export interface PublishReviewOptions {
    * reclaim path has no fetched files).
    */
   changedFiles?: readonly { filename: string }[];
+  /**
+   * Files touched between the previous review and this one (`delta.files`,
+   * with patches so the fixed/dismissed classification reads file and line).
+   * The fixed/dismissed classification reads this; when unset it falls back
+   * to `changedFiles`. Kept separate because `changedFiles` (the full PR file
+   * list) still drives the settings-file gate.
+   */
+  touchedFiles?: readonly { filename: string; patch?: string }[];
+  /**
+   * Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired by the engine
+   * tick to the ledger; tests may omit it. Receives one row per blocking
+   * finding of the previous review (fixed/dismissed/repeated/unmatched).
+   */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for the recorded rows (1-based). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner for the recorded rows. Defaults to empty. */
+  writerRunner?: string | null;
 }
 
 const encoder = new TextEncoder();
@@ -1841,6 +1869,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       addressed: counts.addressed,
     });
   }
+  await recordBlockingFindingOutcomes(opts, comment, { singleFilePath, log, reviewLabel });
   // Opt-in blocking questions: when the effective list (deployer plus the
   // repository's default-branch file) names this PR author, a
   // questions-only success still fails the required check so automerge waits,
@@ -3105,6 +3134,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
         }
       }
+      const writerRunner = await resolveFindingWriterRunner(opts, reviewedHeadSha, pr.head.ref);
       return await publishReviewResult({
         api: forgeApi,
         forge: forgeApi,
@@ -3124,7 +3154,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         forgeKind: opts.forgeKind,
         previousFindings: previousReview?.findings,
         recordSuggestions: opts.recordSuggestions,
+        ...(opts.recordFindings ? { recordFindings: opts.recordFindings } : {}),
         changedFiles: prFiles,
+        touchedFiles: (delta?.files ?? prFiles).map((file) => ({ filename: file.filename, patch: file.patch })),
+        ...(opts.reviewRound !== undefined ? { reviewRound: opts.reviewRound } : {}),
+        ...(writerRunner ? { writerRunner } : {}),
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
       });
     };

@@ -365,6 +365,16 @@ export async function settleReviewsForClosedPull(
 ): Promise<void> {
   await markPullClosedBestEffort(sits as RouterSitStore | undefined, owner, repo, prNumber, logger);
   await cancelReviewsForPullClosedBestEffort(review, owner, repo, prNumber, logger);
+  const store = review as
+    | { markFindingsOpenAtMerge?: (o: string, r: string, n: number) => Promise<number> }
+    | undefined;
+  if (store && typeof store.markFindingsOpenAtMerge === "function") {
+    try {
+      await store.markFindingsOpenAtMerge(owner, repo, prNumber);
+    } catch (err) {
+      logger(`finding merge settle failed: ${errorMessage(err)}`);
+    }
+  }
 }
 
 function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
