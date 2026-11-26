@@ -652,7 +652,7 @@ function judgeSearchDeny(label: string, result: string | undefined): { ok: boole
   // too. Anything else — including a ran-and-failed search — means the deny
   // did not hold.
   const unavailable = /not available for this request/i.test(result) && result.includes("websearch");
-  const hidden = /no tool named\s+"?websearch"?/i.test(result);
+  const hidden = /no tool named\W+websearch/i.test(result);
   const ok = isPermissionDenyText(result) || unavailable || hidden;
   return { ok, line: ok ? `${label}: denied` : `${label}: NOT DENIED: ${result.slice(0, 200)}` };
 }
