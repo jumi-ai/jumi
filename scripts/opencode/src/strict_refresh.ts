@@ -698,23 +698,27 @@ async function releaseStaleStrictSlot(opts: {
   const now = opts.nowMs ?? Date.now();
   const held = await slots.getSlot(owner, repo, baseBranch);
   if (!held) return;
-  if (now - held.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS) {
-    await slots.release(owner, repo, baseBranch, {
-      terminal: { prNumber: held.prNumber, headSha: held.headSha, baseSha: held.baseSha, reason: "timeout" },
+  const generation = held.generation ?? 1;
+  const fencedRelease = (terminal?: { prNumber: number; headSha: string; baseSha: string; reason: string }) =>
+    slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+      ...(terminal ? { terminal } : {}),
       nowMs: now,
+      expectedGeneration: generation,
     });
+  if (now - held.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS) {
+    await fencedRelease({ prNumber: held.prNumber, headSha: held.headSha, baseSha: held.baseSha, reason: "timeout" });
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
     return;
   }
   const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
   const holder = await strictHolderPull({ api, owner, repo, pulls, prNumber: held.prNumber, gitea, log });
   if (!holder) {
-    await slots.release(owner, repo, baseBranch, { nowMs: now });
+    await fencedRelease();
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
     return;
   }
   if (!isStrictRefreshCandidate(holder, owner, repo, policy.botUsername, policy)) {
-    await slots.release(owner, repo, baseBranch, { nowMs: now });
+    await fencedRelease();
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} ineligible)`);
     return;
   }
@@ -728,7 +732,7 @@ async function releaseStaleStrictSlot(opts: {
       log
     )
   ) {
-    await slots.release(owner, repo, baseBranch, { nowMs: now });
+    await fencedRelease();
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
     return;
   }
@@ -737,10 +741,7 @@ async function releaseStaleStrictSlot(opts: {
       ? isStrictRefreshBlocked(holder)
       : await isTerminallyStrictBlocked({ api, owner, repo, pr: holder, requiredContexts, log })
   ) {
-    await slots.release(owner, repo, baseBranch, {
-      terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" },
-      nowMs: now,
-    });
+    await fencedRelease({ prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" });
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`);
   }
 }
@@ -837,8 +838,11 @@ async function reconcileStrictSlotForCandidates(opts: {
     next: Pull,
     reasonLog: string
   ): Promise<Pull | undefined> => {
+    const current = await slots.getSlot(owner, repo, baseBranch);
     const ok = await slots.handoff(owner, repo, baseBranch, {
       expectedPrNumber,
+      ...(current?.generation !== undefined ? { expectedGeneration: current.generation } : {}),
+      ...(current ? { expectedHeadSha: current.headSha } : {}),
       ...(terminal ? { terminal } : {}),
       next: {
         owner,
@@ -874,7 +878,11 @@ async function reconcileStrictSlotForCandidates(opts: {
     const predicted = { prNumber: held.prNumber, headSha: held.headSha, baseSha: held.baseSha, reason: "timeout" };
     const next = (await refill(predicted))[0];
     if (!next) {
-      await slots.release(owner, repo, baseBranch, { terminal: predicted, nowMs });
+      await slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+        terminal: predicted,
+        nowMs,
+        ...(held.generation !== undefined ? { expectedGeneration: held.generation } : {}),
+      });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
       return undefined;
     }
@@ -894,7 +902,10 @@ async function reconcileStrictSlotForCandidates(opts: {
   )[0];
   if (!holder) {
     if (!waiting) {
-      await slots.release(owner, repo, baseBranch, { nowMs });
+      await slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+        nowMs,
+        ...(held.generation !== undefined ? { expectedGeneration: held.generation } : {}),
+      });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
       return undefined;
     }
@@ -907,7 +918,10 @@ async function reconcileStrictSlotForCandidates(opts: {
   }
   if (!isStrictRefreshCandidate(holder, owner, repo, policy.botUsername, policy)) {
     if (!waiting || waiting.number === holder.number) {
-      await slots.release(owner, repo, baseBranch, { nowMs });
+      await slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+        nowMs,
+        ...(held.generation !== undefined ? { expectedGeneration: held.generation } : {}),
+      });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} ineligible)`);
       return undefined;
     }
@@ -929,7 +943,10 @@ async function reconcileStrictSlotForCandidates(opts: {
     )
   ) {
     if (!waiting || waiting.number === holder.number) {
-      await slots.release(owner, repo, baseBranch, { nowMs });
+      await slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+        nowMs,
+        ...(held.generation !== undefined ? { expectedGeneration: held.generation } : {}),
+      });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
       return undefined;
     }
@@ -948,7 +965,11 @@ async function reconcileStrictSlotForCandidates(opts: {
     const predicted = { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" };
     const next = ready.filter((pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, predicted))[0];
     if (!next) {
-      await slots.release(owner, repo, baseBranch, { terminal: predicted, nowMs });
+      await slots.releaseIfHolder(owner, repo, baseBranch, held.prNumber, held.headSha, {
+        terminal: predicted,
+        nowMs,
+        ...(held.generation !== undefined ? { expectedGeneration: held.generation } : {}),
+      });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`);
       return undefined;
     }
@@ -1327,7 +1348,8 @@ export function strictRecheckSkipReason(opts: {
   if (!expected || opts.fresh.head.sha.toLowerCase() !== expected) {
     return "strict refresh: competing head update";
   }
-  if (opts.strict !== "strict") return "strict refresh: strictness off or unknown";
+  if (opts.strict === "off") return "strict refresh: strictness off";
+  if (opts.strict !== "strict") return "strict refresh: strictness unknown";
   if (opts.fresh.autoMergeEnabled !== true) return "strict refresh: auto-merge no longer armed";
   return null;
 }
@@ -1382,8 +1404,11 @@ export async function recheckStrictRefreshEligibility(opts: {
       defaultBranch: opts.defaultBranch,
       log: opts.log,
     });
+    if (strict === "off") {
+      return { fresh, skipReason: "strict refresh: strictness off" };
+    }
     if (strict !== "strict") {
-      return { fresh, skipReason: "strict refresh: strictness off or unknown" };
+      return { fresh, skipReason: "strict refresh: strictness unknown" };
     }
     const armed = await readGiteaScheduleArmed(opts.api, opts.owner, opts.repo, fresh.number, opts.log);
     if (!armed) {
@@ -1423,8 +1448,11 @@ export async function recheckStrictRefreshEligibility(opts: {
     return { fresh, skipReason: "strict refresh: competing head update" };
   }
   const strict = await resolveStrictPolicy(opts.api, opts.owner, opts.repo, fresh.base.ref, opts.log);
+  if (strict === "off") {
+    return { fresh, skipReason: "strict refresh: strictness off" };
+  }
   if (strict !== "strict") {
-    return { fresh, skipReason: "strict refresh: strictness off or unknown" };
+    return { fresh, skipReason: "strict refresh: strictness unknown" };
   }
   if (fresh.autoMergeEnabled !== true) {
     return { fresh, skipReason: "strict refresh: auto-merge no longer armed" };

@@ -490,6 +490,19 @@ export interface BoardStore {
   listTerminalImplements?(limit?: number): Promise<ReviewJobRecord[]>;
   /** Stuck skip reason per issue, when the ledger tracks it. Lets an implement-latch sit name conflict resolution. */
   readIssueSkipLatch?(owner: string, repo: string, issueNumber: number): Promise<{ skipReason: string | null }>;
+  /** Strict-refresh slots whose retry budget is exhausted. Surfaced as needs_kick. */
+  strictSlots?: {
+    listNeedsKick(): Promise<
+      Array<{
+        owner: string;
+        repo: string;
+        baseBranch: string;
+        prNumber: number;
+        headSha: string;
+        lastError?: string | null;
+      }>
+    >;
+  };
   sits: {
     list(): Promise<RouterSitRecord[]>;
     listClosedPulls?(): Promise<Array<{ owner: string; repo: string; number: number }>>;
@@ -667,6 +680,33 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     const reason = (row.resultReason ?? "").trim();
     if (reason === "") continue;
     needs_kick.push(blockedImplementItem(row, reason, forge));
+  }
+  try {
+    const strictNeeds = (await store.strictSlots?.listNeedsKick()) ?? [];
+    for (const slot of strictNeeds) {
+      const key = `${slot.owner.toLowerCase()}/${slot.repo.toLowerCase()}#${slot.prNumber}`;
+      if (inflightKeys.has(key)) continue;
+      if (closedKeys.has(key)) continue;
+      const err = (slot.lastError ?? "refresh retries exhausted").trim().slice(0, 300);
+      const message = `Strict refresh needs attention on ${slot.owner}/${slot.repo}#${slot.baseBranch} (holder #${slot.prNumber}): ${err}`;
+      const item: BoardItem = {
+        reason: "strict-refresh-needs-kick",
+        message,
+        owner: slot.owner,
+        repo: slot.repo,
+        number: slot.prNumber,
+        kind: "follow-up",
+      };
+      if (forge) item.forge = forge;
+      const sha = (slot.headSha ?? "").trim();
+      if (sha !== "") {
+        item.commit = sha;
+        item.headSha = sha;
+      }
+      needs_kick.push(item);
+    }
+  } catch {
+    // Best-effort: a strict-slot read never fails the board.
   }
   const sitting: BoardItem[] = [];
   // Resolve stuck reasons up front so an implement-latch sit on a

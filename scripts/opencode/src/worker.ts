@@ -1164,6 +1164,49 @@ export async function processWorkerTick(
           job.prNumber
         );
       }
+      if (
+        (job as { strictRefresh?: boolean; mergeOnly?: boolean }).strictRefresh === true &&
+        (job as { mergeOnly?: boolean }).mergeOnly === true &&
+        typeof job.prNumber === "number"
+      ) {
+        try {
+          const { settleStrictSlotForCancelledJob } = await import("./strict_refresh_terminal.ts");
+          const held = await store.strictSlots.listHeldSlots().catch(() => []);
+          const slot = held.find((s) => s.owner === job.owner && s.repo === job.repo && s.prNumber === job.prNumber);
+          if (slot && (slot.headSha ?? "").toLowerCase() === (job.headSha ?? "").toLowerCase()) {
+            const inflight = await store.listInflight(500).catch(() => []);
+            const successor = inflight.find(
+              (r) => r.owner === job.owner && r.repo === job.repo && r.prNumber === job.prNumber
+            );
+            if (successor) {
+              await settleStrictSlotForCancelledJob({
+                slots: store.strictSlots,
+                owner: slot.owner,
+                repo: slot.repo,
+                baseBranch: slot.baseBranch,
+                prNumber: slot.prNumber,
+                headSha: slot.headSha,
+                hasSuccessor: true,
+                successor: { headSha: successor.headSha ?? slot.headSha, baseSha: slot.baseSha },
+                log: logger,
+              });
+            } else {
+              await settleStrictSlotForCancelledJob({
+                slots: store.strictSlots,
+                owner: slot.owner,
+                repo: slot.repo,
+                baseBranch: slot.baseBranch,
+                prNumber: slot.prNumber,
+                headSha: slot.headSha,
+                hasSuccessor: false,
+                log: logger,
+              });
+            }
+          }
+        } catch {
+          // Best-effort.
+        }
+      }
       try {
         await cancelIssueWork({
           api,
