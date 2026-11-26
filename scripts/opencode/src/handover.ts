@@ -20,13 +20,7 @@ import { upsertStuckText } from "./stuck.ts";
 import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import {
-  countBugFindings,
-  countRiskFindings,
-  parseReviewOutput,
-  reviewVerdictView,
-  trailerNonBlockingRiskCount,
-} from "./verdict.ts";
+import { countBugFindings, parseReviewOutput, reviewVerdictView, trailerNonBlockingRiskCount } from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS: string = TOO_MANY_FOLLOWUP_ROUNDS_REASON;
 
@@ -477,21 +471,20 @@ export async function enqueueFollowUpFromReview(
     );
     return logSkip("suggestions disabled");
   }
-  // Risk follow-up off: a review whose only wake reason is non-blocking 🟡
-  // (a downgraded failure with only risks, or a success naming non-blocking
-  // risks) starts no follow-up. Failures with 🔴, blocking questions, and
-  // enabled suggestions still run as today.
+  // Risk follow-up off: a `success` review whose only wake reason is
+  // non-blocking 🟡 starts no follow-up. Failures (🔴, blocking 🟡),
+  // blocking questions, and enabled suggestions still run as today: a
+  // `failure` trailer names blocking work, so it must still hand over even
+  // when its body also publishes 🟡 findings.
   if (!policy.followupOnRisks) {
     try {
       const parsed = parseReviewOutput(opts.markdown ?? "");
-      if (!parsed.verdict.incomplete) {
+      if (!parsed.verdict.incomplete && parsed.verdict.state === "success") {
         const bugs = countBugFindings(parsed.comment);
-        const failureRisks = countRiskFindings(parsed.comment);
         const advisoryRisks = trailerNonBlockingRiskCount(parsed.verdict.description);
-        const hasRisks = failureRisks > 0 || advisoryRisks > 0;
         const blockingQs = isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record);
         const suggestionWake = isLeftoverSimplificationTrailer(opts.markdown, record) && policy.followupOnSuggestions;
-        if (bugs === 0 && hasRisks && !blockingQs && !suggestionWake) {
+        if (bugs === 0 && advisoryRisks > 0 && !blockingQs && !suggestionWake) {
           await resolveHeldSuggestion(
             opts.store,
             opts.api,
