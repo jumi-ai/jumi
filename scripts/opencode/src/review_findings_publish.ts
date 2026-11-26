@@ -7,7 +7,7 @@ import {
   normalizeFindingForge,
   normalizeFindingRunner,
   parseBlockingFindings,
-  touchedFromFilenames,
+  touchedFromFiles,
 } from "./review_findings.ts";
 import { formatRunnerStamp } from "./runners.ts";
 import { errorMessage } from "./util/error.ts";
@@ -21,7 +21,7 @@ import { errorMessage } from "./util/error.ts";
 export interface BlockingFindingRecordInput {
   recordFindings?: (rows: NewReviewFindingRow[]) => Promise<void>;
   previousFindings?: readonly string[];
-  touchedFiles?: readonly { filename: string }[];
+  touchedFiles?: readonly { filename: string; patch?: string }[];
   changedFiles?: readonly { filename: string }[];
   forgeKind?: string;
   owner: string;
@@ -43,7 +43,7 @@ export async function recordBlockingFindingOutcomes(
       singleFilePath: ctx.singleFilePath,
     });
     const currBlocking = parseBlockingFindings(comment, { singleFilePath: ctx.singleFilePath });
-    const touched = touchedFromFilenames((input.touchedFiles ?? input.changedFiles ?? []).map((file) => file.filename));
+    const touched = touchedFromFiles((input.touchedFiles ?? input.changedFiles ?? []).map((file) => file));
     const classified = classifyBlockingFindings(prevBlocking, currBlocking, touched);
     const rows = classified.map((entry) => ({
       forge: normalizeFindingForge(input.forgeKind),

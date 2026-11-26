@@ -406,12 +406,13 @@ export interface PublishReviewOptions {
    */
   changedFiles?: readonly { filename: string }[];
   /**
-   * Files touched between the previous review and this one (`delta.files`).
+   * Files touched between the previous review and this one (`delta.files`,
+   * with patches so the fixed/dismissed classification reads file and line).
    * The fixed/dismissed classification reads this; when unset it falls back
    * to `changedFiles`. Kept separate because `changedFiles` (the full PR file
    * list) still drives the settings-file gate.
    */
-  touchedFiles?: readonly { filename: string }[];
+  touchedFiles?: readonly { filename: string; patch?: string }[];
   /**
    * Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired by the engine
    * tick to the ledger; tests may omit it. Receives one row per blocking
@@ -3155,7 +3156,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         recordSuggestions: opts.recordSuggestions,
         ...(opts.recordFindings ? { recordFindings: opts.recordFindings } : {}),
         changedFiles: prFiles,
-        touchedFiles: (delta?.files ?? prFiles).map((file) => ({ filename: file.filename })),
+        touchedFiles: (delta?.files ?? prFiles).map((file) => ({ filename: file.filename, patch: file.patch })),
         ...(opts.reviewRound !== undefined ? { reviewRound: opts.reviewRound } : {}),
         ...(writerRunner ? { writerRunner } : {}),
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),

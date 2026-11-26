@@ -76,12 +76,54 @@ export interface TouchedBetween {
 
 /** Build a file-level touched set from the current PR file list. */
 export function touchedFromFilenames(filenames: readonly string[]): TouchedBetween {
-  const paths = new Set<string>();
-  for (const name of filenames) {
-    const clean = name.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-    if (clean) paths.add(clean);
+  return touchedFromFiles(filenames.map((filename) => ({ filename })));
+}
+
+const TOUCH_HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+
+/** New-file lines covered by a unified patch hunk set (added + context lines). */
+function touchedLinesForPatch(patch: string): Set<number> {
+  const lines = new Set<number>();
+  const raw = patch.split(/\r?\n/);
+  let next = 0;
+  let inHunk = false;
+  for (const row of raw) {
+    const hunk = TOUCH_HUNK_RE.exec(row);
+    if (hunk) {
+      next = Number.parseInt(hunk[1], 10);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (row.startsWith("+++") || row.startsWith("---")) continue;
+    if (row.startsWith("+")) {
+      if (Number.isSafeInteger(next) && next >= 1) lines.add(next);
+      next += 1;
+    } else if (row.startsWith("-")) {
+      // Removed line: not a line in the new file.
+    } else if (row.startsWith("\\")) {
+      // "\ No newline at end of file": no line advance.
+    } else {
+      if (Number.isSafeInteger(next) && next >= 1) lines.add(next);
+      next += 1;
+    }
   }
-  return { paths };
+  return lines;
+}
+
+/** Build a touched set from files with optional patches; patch hunks populate per-file lines. */
+export function touchedFromFiles(files: readonly { filename: string; patch?: string }[]): TouchedBetween {
+  const paths = new Set<string>();
+  const lines = new Map<string, Set<number>>();
+  for (const file of files) {
+    const clean = file.filename.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    if (!clean) continue;
+    paths.add(clean);
+    if (typeof file.patch === "string" && file.patch.trim()) {
+      lines.set(clean, touchedLinesForPatch(file.patch));
+    }
+  }
+  return lines.size > 0 ? { paths, lines } : { paths };
 }
 
 /** True when the commit range touched the finding's file and line. */

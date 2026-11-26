@@ -219,6 +219,63 @@ forEachForge("touchedFiles (between-reviews delta) decides fixed vs dismissed", 
   expect(totals.find((row) => row.outcome === "fixed")?.count ?? 0).toBe(0);
 });
 
+forEachForge("between-reviews patch hunks decide fixed vs dismissed at line level", async (preset) => {
+  const previous = ["src/a.ts:10: 🔴 bug: null deref. Guard it."];
+  const farPatch = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -90,3 +90,4 @@",
+    " context",
+    "+added far away",
+    " context",
+    " context",
+  ].join("\n");
+  const nearPatch = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -8,3 +8,4 @@",
+    " context",
+    "+added at the finding",
+    " context",
+    " context",
+  ].join("\n");
+  async function outcomeFor(patch: string): Promise<string | undefined> {
+    const store = new MemoryReviewJobStore();
+    const api = makeReviewApi({
+      capabilities: preset.capabilities,
+      getPRFiles: async () => [makeFile({ filename: "src/a.ts", patch })],
+      listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+      createPullReview: async () => ({ id: 1 }),
+    });
+    await publishReviewResult({
+      api,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 11,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      logger: () => undefined,
+      forgeKind: preset.name,
+      resultRunner: "_Jumi · opencode · x_",
+      resultMarkdown: "unrelated note\n<!-- jumi-check: success -->",
+      previousFindings: previous,
+      changedFiles: [{ filename: "src/a.ts" }],
+      touchedFiles: [{ filename: "src/a.ts", patch }],
+      recordFindings: async (rows) => {
+        await store.recordReviewFindings(rows);
+      },
+    });
+    const totals = await store.getReviewFindingTotals();
+    return totals.find((row) => row.count === 1)?.outcome;
+  }
+  // Same file touched, but the hunk is far from line 10: dismissed, not fixed.
+  expect(await outcomeFor(farPatch)).toBe("dismissed");
+  // Hunk covers line 10: fixed.
+  expect(await outcomeFor(nearPatch)).toBe("fixed");
+});
+
 forEachForge("finding_response answers persist against rows by path and line", async (preset) => {
   const store = new MemoryReviewJobStore();
   await store.recordReviewFindings([
