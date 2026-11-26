@@ -146,6 +146,12 @@ export interface RunReviewJobExtras {
   persistResult?: (result: PersistReviewResult) => Promise<void>;
   /** Fail-open recorder for per-review 💡 counts. ProcessEngineTick wires it to the ledger. */
   recordSuggestions?: (counts: import("./review_suggestions.ts").ReviewSuggestionCounts) => Promise<void>;
+  /** Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired to the ledger like suggestions. */
+  recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for recorded finding rows (1-based ledger attempt). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner stamp for recorded finding rows. Resolved via provenance when unset. */
+  writerRunner?: string | null;
   engine?: Engine;
   openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
@@ -328,6 +334,9 @@ export async function runReviewJob(
       logger: (message) => logger(message),
       persistResult: extras.persistResult,
       recordSuggestions: extras.recordSuggestions,
+      ...(extras.recordFindings ? { recordFindings: extras.recordFindings } : {}),
+      ...(extras.reviewRound !== undefined ? { reviewRound: extras.reviewRound } : {}),
+      ...(extras.writerRunner ? { writerRunner: extras.writerRunner } : {}),
       engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
@@ -1229,6 +1238,8 @@ export async function processEngineTick(
       jobId: String(row.id),
       previousError: row.error ?? extras.previousError ?? null,
       failedRunner: row.resultRunner ?? extras.failedRunner ?? null,
+      // Ledger attempt is 0-based; recorded review rounds are 1-based.
+      reviewRound: extras.reviewRound ?? Math.max(1, (row.attempt ?? 0) + 1),
       provenance: extras.provenance ?? store.provenance,
       skipLatches: extras.skipLatches ?? store.skipLatches,
       runnerCooldownConfig:
@@ -1250,6 +1261,15 @@ export async function processEngineTick(
         (async (counts) => {
           try {
             await store.recordReviewSuggestions(counts);
+          } catch {
+            // Fail-open: a metric write must never fail the review.
+          }
+        }),
+      recordFindings:
+        extras.recordFindings ??
+        (async (rows) => {
+          try {
+            await store.recordReviewFindings(rows);
           } catch {
             // Fail-open: a metric write must never fail the review.
           }

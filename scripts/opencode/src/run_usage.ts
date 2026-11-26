@@ -410,6 +410,9 @@ export interface RunUsageLedger {
   getReviewSuggestionTotals(): Promise<
     Array<{ runner: string; forge: string; posted: number; dropped: number; addressed: number; reviews: number }>
   >;
+  getReviewFindingTotals(): Promise<
+    Array<{ runner: string; forge: string; severity: string; outcome: string; count: number }>
+  >;
 }
 
 function tokenSeriesLabels(agent: string, source: string, model: string, tokenType?: TokenType): string {
@@ -431,17 +434,27 @@ function tokenSeriesLabels(agent: string, source: string, model: string, tokenTy
  * class, matching the historical in-process histogram naming).
  */
 export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string> {
-  const [counts, tokenTotals, sessionTotals, exitCounts, runnerExitCounts, quotaResets, durations, suggestionTotals] =
-    await Promise.all([
-      store.countByKindState(),
-      store.getRunUsageTokenTotals(),
-      store.getRunUsageSessionTotals(),
-      store.getRunExitCounts(),
-      store.getRunRunnerExitCounts(),
-      store.getRunnerQuotaResets(),
-      store.getRunDurations(),
-      store.getReviewSuggestionTotals(),
-    ]);
+  const [
+    counts,
+    tokenTotals,
+    sessionTotals,
+    exitCounts,
+    runnerExitCounts,
+    quotaResets,
+    durations,
+    suggestionTotals,
+    findingTotals,
+  ] = await Promise.all([
+    store.countByKindState(),
+    store.getRunUsageTokenTotals(),
+    store.getRunUsageSessionTotals(),
+    store.getRunExitCounts(),
+    store.getRunRunnerExitCounts(),
+    store.getRunnerQuotaResets(),
+    store.getRunDurations(),
+    store.getReviewSuggestionTotals(),
+    store.getReviewFindingTotals(),
+  ]);
   const lines: string[] = [
     "# HELP ai_tokens_total Cumulative AI tokens recorded in the ledger",
     "# TYPE ai_tokens_total counter",
@@ -571,6 +584,28 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
   for (const row of sortedSuggestions) {
     lines.push(
       `jumi_review_suggestions_addressed_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}"} ${row.addressed}`
+    );
+  }
+
+  const sortedFindings = [...findingTotals].sort((a, b) =>
+    `${a.runner}\0${a.forge}\0${a.severity}\0${a.outcome}`.localeCompare(
+      `${b.runner}\0${b.forge}\0${b.severity}\0${b.outcome}`
+    )
+  );
+  lines.push("# HELP jumi_review_findings_total Blocking findings by reviewer runner, severity and outcome");
+  lines.push("# TYPE jumi_review_findings_total counter");
+  for (const row of sortedFindings) {
+    lines.push(
+      `jumi_review_findings_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}",severity="${escapeLabel(row.severity)}",outcome="${escapeLabel(row.outcome)}"} ${row.count}`
+    );
+  }
+  lines.push(
+    "# HELP jumi_review_findings_unmatched_total Blocking findings with no location that could not be matched"
+  );
+  lines.push("# TYPE jumi_review_findings_unmatched_total counter");
+  for (const row of sortedFindings.filter((r) => r.outcome === "unmatched")) {
+    lines.push(
+      `jumi_review_findings_unmatched_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}",severity="${escapeLabel(row.severity)}"} ${row.count}`
     );
   }
   return `${lines.join("\n")}\n`;
