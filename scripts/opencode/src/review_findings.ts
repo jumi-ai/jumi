@@ -245,7 +245,7 @@ export function normalizeFindingOutcome(value: string | null | undefined): strin
 
 // ── Structured worker pushback ─────────────────────────────────────────────
 
-export const FINDING_RESPONSE_STATUSES = ["fixed", "unchanged"] as const;
+export const FINDING_RESPONSE_STATUSES = ["fixed", "unchanged", "needs_maintainer"] as const;
 export type FindingResponseStatus = (typeof FINDING_RESPONSE_STATUSES)[number];
 
 export interface FindingResponseInput {
@@ -316,14 +316,14 @@ export function validateFindingResponse(
         ? input.fingerprint.trim()
         : "";
   if (!rawFinding) return { ok: false, error: "finding (or fingerprint) is required" };
-  if (input.status !== "fixed" && input.status !== "unchanged") {
-    return { ok: false, error: "status must be fixed or unchanged" };
+  if (input.status !== "fixed" && input.status !== "unchanged" && input.status !== "needs_maintainer") {
+    return { ok: false, error: "status must be fixed, unchanged, or needs_maintainer" };
   }
   const reason = typeof input.reason === "string" ? input.reason.replaceAll("\0", "").trim() : "";
   if (reason.length > MAX_FINDING_RESPONSE_REASON_CHARS) {
     return { ok: false, error: `reason is too long (max ${MAX_FINDING_RESPONSE_REASON_CHARS} chars)` };
   }
-  if (input.status === "unchanged" && !reason) {
+  if ((input.status === "unchanged" || input.status === "needs_maintainer") && !reason) {
     return { ok: false, error: "reason is required when nothing changed" };
   }
   return { ok: true, finding: rawFinding, status: input.status, reason };

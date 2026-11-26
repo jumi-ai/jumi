@@ -365,8 +365,8 @@ export interface ReviewJobStore {
    */
   markFindingsOpenAtMerge(owner: string, repo: string, prNumber: number): Promise<number>;
   /**
-   * Structured worker pushback for one finding: `fixed`, or `unchanged` with
-   * a reason. Recorded on the matching ledger row (by fingerprint, else by
+   * Structured worker pushback for one finding: `fixed`, `unchanged` with a reason, or `needs_maintainer`
+   * with a reason. Recorded on the matching ledger row (by fingerprint, else by
    * path+line); returns true when a row was updated.
    */
   recordFindingResponse(opts: {
