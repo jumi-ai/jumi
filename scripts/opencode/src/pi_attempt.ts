@@ -82,10 +82,22 @@ export function isPiAttemptOutcome(value: unknown): value is PiAttemptOutcome {
 }
 
 function cleanTokenCell(value: unknown): number | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-  if (value < 0) return undefined;
-  return Math.floor(value);
+  if (value === undefined || value === null || value === "") return undefined;
+  let num: number;
+  if (typeof value === "bigint") {
+    num = Number(value);
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    num = Number(trimmed);
+  } else if (typeof value === "number") {
+    num = value;
+  } else {
+    return undefined;
+  }
+  if (!Number.isFinite(num)) return undefined;
+  if (num < 0) return undefined;
+  return Math.floor(num);
 }
 
 /**
@@ -94,7 +106,9 @@ function cleanTokenCell(value: unknown): number | undefined {
  * absent (unknown), never zero. Returns `undefined` when nothing was
  * stated so the stamp omits `usage` entirely.
  */
-export function normalizePiAttemptUsage(usage: PiUsage | null | undefined): PiAttemptUsage | undefined {
+export function normalizePiAttemptUsage(
+  usage: PiUsage | PiAttemptUsage | null | undefined
+): PiAttemptUsage | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const out: PiAttemptUsage = {};
   const input = cleanTokenCell((usage as { inputTokens?: unknown }).inputTokens);
@@ -139,14 +153,9 @@ export function buildPiAttemptStamp(opts: {
   if (!payer) throw new Error("pi attempt stamp needs a payer");
   if (!isPiAttemptOutcome(outcome)) throw new Error("pi attempt stamp needs an outcome");
   const raw = opts.usage as PiUsage | PiAttemptUsage | null | undefined;
-  const usage =
-    raw && typeof raw === "object" && ("inputTokens" in raw || "cachedInputTokens" in raw || "outputTokens" in raw)
-      ? normalizePiAttemptUsage(raw as PiUsage)
-      : undefined;
-  // `PiAttemptUsage` shape (already normalized cells) passes through the
-  // same cleaner: unknown stays absent, a stated zero stays zero.
-  const normalizedUsage =
-    usage ?? (raw && typeof raw === "object" ? normalizePiAttemptCells(raw as PiAttemptUsage) : undefined);
+  // One normalizer over all five cells: unknown stays absent, a stated zero
+  // stays zero (including cache-write/reasoning-only usage).
+  const normalizedUsage = raw && typeof raw === "object" ? normalizePiAttemptUsage(raw) : undefined;
   return {
     profile,
     role,
@@ -156,22 +165,6 @@ export function buildPiAttemptStamp(opts: {
     outcome,
     ...(normalizedUsage ? { usage: normalizedUsage } : {}),
   };
-}
-
-function normalizePiAttemptCells(usage: PiAttemptUsage): PiAttemptUsage | undefined {
-  if (!usage || typeof usage !== "object") return undefined;
-  const out: PiAttemptUsage = {};
-  const input = cleanTokenCell(usage.inputTokens);
-  const cached = cleanTokenCell(usage.cachedInputTokens);
-  const output = cleanTokenCell(usage.outputTokens);
-  const cacheWrite = cleanTokenCell(usage.cacheWriteTokens);
-  const reasoning = cleanTokenCell(usage.reasoningTokens);
-  if (input !== undefined) out.inputTokens = input;
-  if (cached !== undefined) out.cachedInputTokens = cached;
-  if (output !== undefined) out.outputTokens = output;
-  if (cacheWrite !== undefined) out.cacheWriteTokens = cacheWrite;
-  if (reasoning !== undefined) out.reasoningTokens = reasoning;
-  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**

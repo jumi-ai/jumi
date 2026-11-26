@@ -137,6 +137,7 @@ export async function runPiHop(request: PiHopRequest): Promise<PiHopResult> {
   const nowMs = request.nowMs ?? Date.now;
   const attempts: PiHopAttempt[] = [];
   const exhaustedPools = new Set<string>();
+  let statedQuotaResetAtMs: number | undefined;
   const role = String(request.role ?? "").trim();
 
   for (let index = 0; index < names.length; index++) {
@@ -175,6 +176,7 @@ export async function runPiHop(request: PiHopRequest): Promise<PiHopResult> {
         status: "failed",
         attempts,
         exhaustedPools: [...exhaustedPools],
+        ...(statedQuotaResetAtMs !== undefined ? { quotaResetAtMs: statedQuotaResetAtMs } : {}),
         reason: `failed:pool-exhausted:${route.fundingPool.slice(0, 80)}`,
       };
     }
@@ -241,12 +243,13 @@ export async function runPiHop(request: PiHopRequest): Promise<PiHopResult> {
     }
     if (kind === "quota") {
       // Record only the stated reset (absolute or retry-after resolved
-      // against now); never guess. The pool is exhausted for this hop.
+      // against now); never guess. The pool is exhausted for this hop. The
+      // first stated reset is carried forward so an alias-skip over the same
+      // pool still reports the backoff the provider stated.
       const resetAtMs = resolvePiHopResetAtMs(result, nowMs());
+      if (resetAtMs !== undefined && statedQuotaResetAtMs === undefined) statedQuotaResetAtMs = resetAtMs;
       exhaustedPools.add(route.fundingPool);
       if (index + 1 < names.length) {
-        const next: { result?: PiAdapterResult; stamp?: PiAttemptStamp } = { result, stamp };
-        void next;
         continue;
       }
       return {
@@ -256,7 +259,7 @@ export async function runPiHop(request: PiHopRequest): Promise<PiHopResult> {
         stamp,
         attempts,
         exhaustedPools: [...exhaustedPools],
-        ...(resetAtMs !== undefined ? { quotaResetAtMs: resetAtMs } : {}),
+        ...(statedQuotaResetAtMs !== undefined ? { quotaResetAtMs: statedQuotaResetAtMs } : {}),
         reason: "failed:quota",
       };
     }

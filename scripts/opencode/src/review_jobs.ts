@@ -4190,17 +4190,6 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
   };
 }
 
-function numOrNull(value: unknown): number | null {
-  if (value == null || value === "") return null;
-  if (typeof value === "bigint") return Number(value);
-  if (typeof value === "number") return Number.isFinite(value) ? Math.floor(value) : null;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.floor(parsed) : null;
-  }
-  return null;
-}
-
 function piAttemptFieldsOf(row: ReviewJobRow): Partial<ReviewJobRecord> {
   const stamp = piAttemptStampFromRecord({
     piProfile: row.pi_profile,
@@ -4230,7 +4219,6 @@ function piAttemptFieldsOf(row: ReviewJobRow): Partial<ReviewJobRecord> {
   if (record.piTokensOutput != null) out.piTokensOutput = record.piTokensOutput;
   if (record.piTokensCacheWrite != null) out.piTokensCacheWrite = record.piTokensCacheWrite;
   if (record.piTokensReasoning != null) out.piTokensReasoning = record.piTokensReasoning;
-  void numOrNull;
   return out;
 }
 
