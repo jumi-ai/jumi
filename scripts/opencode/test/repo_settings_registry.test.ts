@@ -195,7 +195,7 @@ const invalidPerKey: Array<[string, string, string]> = [
 
 describe("repo_settings registry", () => {
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(34);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(35);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);
