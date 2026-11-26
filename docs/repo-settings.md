@@ -55,6 +55,7 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `no_automerge_label` | non-blank string | `no-automerge` | Name of the per-PR label that opts one Jumi PR out of auto-merge, even when `automerge` is `true`. Honoured whoever added it (safe direction). Matches case-insensitively; same validation as `automerge_label` | Overrides `automerge` and `automerge_label`: both labels together never schedule, with one conflict note. Adding/removing either label on an open Jumi PR re-runs every gate |
 | `pickup_label` | non-blank string | `jumi` | The GitHub label that hands an issue or pull to Jumi. Covers every place the `jumi` label is used on GitHub: issue pickup, handing over a pull, and the marker Jumi leaves on taken-over pulls (removing it still cancels). Gitea keeps using assignment and ignores this key. Because the label webhook reads the repository's default-branch settings for the name, a missing, unreadable, or invalid file falls back to `jumi`. A blank or non-string value makes the whole file invalid. Logins are not involved; label matching stays case-insensitive | No deployer setting (the deployment default is `jumi`) |
 | `pr_title` | non-blank string template | `{title}` | Pull-request title template for forge issues. The only placeholders are `{title}` (the issue title) and `{issue}` (the issue number). Any other `{...}` or stray brace makes the whole file invalid. Exactly one spelling: `pr-title` or `prTitle` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker titles keep today's format) |
+| `retitle_adopted_prs` | boolean | `true` (on) | `false` never retitles an adopted PR when Jumi's commits change what it does. Absent (or a missing file) retitles as today; the retitle is a write, so an invalid or unreadable file never retitles. Exactly one spelling: `retitle-adopted-prs` or `retitleAdoptedPrs` is an unknown key rejected with the usual "did you mean" error. A non-boolean value makes the whole file invalid | No deployer setting. Read from the default branch only |
 | `review_budget` | mapping (may be empty) | `{}` (no overrides) | Size budget overrides for reviews in this repository (see the two rows below). Read once when the job starts; applied wherever `maxFiles` and `maxPatchBytes` are read for a review (including replay) | Each present key is a ceiling against its deployer maximum (below); a non-mapping value, an unknown sub-key, or a non-positive-integer value makes the whole file invalid |
 | `review_budget.max_files` | positive integer, at least 1 | `MAX_FILES` | How many changed files are sent to OpenCode for reviews in this repository | Ceiling: `MAX_FILES_MAX` (unset defaults to `MAX_FILES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
 | `review_budget.max_patch_bytes` | positive integer, at least 1 | `MAX_PATCH_BYTES` | How many patch bytes are sent to OpenCode for reviews in this repository | Ceiling: `MAX_PATCH_BYTES_MAX` (unset defaults to `MAX_PATCH_BYTES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
@@ -160,6 +161,7 @@ setup: # preparation command run once per job before the first engine spawn
 strict_branch_refresh: false # Gitea-only fallback when branch protection is unreadable (default false); GitHub ignores it
 review_carry: true # false turns off green-review carry across clean merges (default carries)
 worker_review_rules: true # false keeps implement/follow-up workers off the REVIEW.md rules (default shares them)
+retitle_adopted_prs: true # false never retitles an adopted PR (default retitles)
 ```
 
 ## Adding a setting
@@ -189,6 +191,14 @@ list:
 The legacy shared files (`repo_settings.test.ts`, the complete example)
 stay untouched: new keys add new files, so parallel additions merge without
 conflicts.
+
+Turning a new key on in this repository's own `.jumi.yml` is a separate pull,
+made after the release that knows the key is deployed. The parser that reads
+the default branch after merge is the deployed one: enabling the key here
+before that release lands leaves the head invalid, fails
+`jumi/opencode-review`, and stops runner jobs until the release deploys. Keep
+the parser change in the first pull, enable the key here in the later pull,
+and say so in that pull's body.
 
 ## Recipes
 
@@ -275,6 +285,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Strict branch refresh (`strict_branch_refresh`, Gitea only; GitHub ignores it) | No opt-in: unreadable protection means `unknown`, no refresh | No opt-in (the whole file is invalid, so no entry applies) | No opt-in (fail-open, logged); unreadable protection means `unknown`, no refresh |
 | Review carry (`review_carry`) | Carries (default on) | Carries (invalid never disables the carry by accident) | Carries (fail-open, logged) |
+| Retitle adopted PRs (`retitle_adopted_prs`) | Retitles (default on) | Never retitles (invalid never enables a write by accident) | Never retitles (fail-closed, logged) |
 | Worker review rules (`worker_review_rules`) | Share base-branch `REVIEW.md` rules with workers when the repo has one (nothing new when it does not) | Share when the file is valid; an invalid file starts no runner job, so nothing is shared (see Runners row) | Share (fail-open, logged); nothing new when the repo has no `REVIEW.md` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 | Setup (`setup`) | No setup: the job runs as today, with no extra log line and no prompt change | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No setup, logged; the job otherwise runs as today |

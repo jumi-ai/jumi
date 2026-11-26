@@ -22,6 +22,7 @@ describe("sentinels", () => {
         "JUMI_FEEDBACK.md",
         "JUMI_HANDOFF.md",
         "JUMI_PR.md",
+        "JUMI_PR_TITLE_ELIGIBLE",
         "JUMI_QUEUE.md",
         "JUMI_TASK.md",
       ].sort()

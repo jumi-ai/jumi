@@ -48,6 +48,7 @@ describe("allowed_runners parsing", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       },
     });
   });
@@ -75,6 +76,7 @@ describe("allowed_runners parsing", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       },
     });
   });

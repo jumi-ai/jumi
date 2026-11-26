@@ -43,6 +43,7 @@ import { modeSetting } from "./repo_settings_keys/mode.ts";
 import { noAutomergeLabelSetting } from "./repo_settings_keys/no_automerge_label.ts";
 import { pickupLabelSetting } from "./repo_settings_keys/pickup_label.ts";
 import { prTitleSetting } from "./repo_settings_keys/pr_title.ts";
+import { retitleAdoptedPrsSetting } from "./repo_settings_keys/retitle_adopted_prs.ts";
 import { reviewBudgetSetting } from "./repo_settings_keys/review_budget.ts";
 import { reviewCarrySetting } from "./repo_settings_keys/review_carry.ts";
 import { reviewDraftsSetting } from "./repo_settings_keys/review_drafts.ts";
@@ -162,6 +163,7 @@ export const REPO_SETTINGS_REGISTRY = [
   noAutomergeLabelSetting,
   pickupLabelSetting,
   prTitleSetting,
+  retitleAdoptedPrsSetting,
   reviewBudgetSetting,
   reviewCarrySetting,
   reviewDraftsSetting,
@@ -488,6 +490,18 @@ export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
 export function isReviewCarryEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;
   return (load as { reviewCarry?: boolean }).reviewCarry !== false;
+}
+
+/**
+ * Whether adopted PRs may be retitled when Jumi's commits change what they
+ * do. Default on: a missing file or missing key means on. An invalid or
+ * unreadable file means off, because the retitle is a write. No deployer
+ * setting.
+ */
+export function isRetitleAdoptedPrsEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state === "missing") return true;
+  if (load.state !== "valid") return false;
+  return (load as { retitleAdoptedPrs?: boolean }).retitleAdoptedPrs !== false;
 }
 
 /**
@@ -1239,6 +1253,54 @@ export function prTouchesRepoSettings(files: ReadonlyArray<{ filename: string }>
 /** Failure text for an invalid default-branch settings file. Names the parser error. */
 export function invalidRepoSettingsReason(error: string): string {
   return `${REPO_SETTINGS_PATH} is invalid: ${error}`;
+}
+
+/**
+ * True for a review skip reason produced when the pull head leaves
+ * `.jumi.yml` invalid (or sets `mode: off` where the base requires the
+ * review check). Both shapes start with the settings path, so one prefix
+ * check covers them. Used to keep the strict check (still a `failure`
+ * status) while giving the worker a path to fix the pull.
+ */
+export function isHeadSettingsFailureReason(reason: string | null | undefined): boolean {
+  if (typeof reason !== "string") return false;
+  return (
+    reason.trimStart().startsWith(`${REPO_SETTINGS_PATH} is invalid:`) ||
+    reason.trimStart().startsWith(`${REPO_SETTINGS_PATH} sets mode:`)
+  );
+}
+
+/**
+ * Worker-facing feedback for an invalid-head-settings failure. Carries the
+ * parser error verbatim (including any "did you mean" suggestion) and
+ * explains that merging the file as it is would turn Jumi off in the
+ * repository until a release that knows the key is deployed. Default
+ * guidance: for an unknown key the pull itself adds to the parser, take the
+ * settings-file change out of this pull and keep the code; enabling the key
+ * in this repository's own file is a separate pull after a release that
+ * knows the key is deployed (and the PR body says so). For a typo or a wrong
+ * value, fix the file. Never loosen the parser to get past the check.
+ */
+export function headSettingsFollowUpFeedback(failure: string): string {
+  const trimmed = failure.trim();
+  return [
+    `The pull head leaves \`.jumi.yml\` invalid:`,
+    ``,
+    `${trimmed}`,
+    ``,
+    `Merging the file as it is would turn Jumi off in the repository until a`,
+    `release that knows the key is deployed: the deployed parser reads the`,
+    `default branch after merge and rejects the same file, so no runner job`,
+    `would start.`,
+    ``,
+    `Default guidance:`,
+    `- If this is an unknown key the pull itself adds to the parser, take the`,
+    `  \`.jumi.yml\` change out of this pull and keep the code. Enabling the`,
+    `  key in this repository's own file is a separate pull after a release`,
+    `  that knows the key is deployed, and that pull's body says so.`,
+    `- If this is a typo or a wrong value, fix the file.`,
+    `- Never make the parser less strict to get past the check.`,
+  ].join("\n");
 }
 
 /**

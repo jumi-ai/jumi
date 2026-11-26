@@ -128,6 +128,7 @@ describe("effectiveTrustedSenderLogins", () => {
       strictBranchRefresh: false,
       reviewCarry: true,
       workerReviewRules: true,
+      retitleAdoptedPrs: true,
     });
     expect(narrowed).toEqual(["Alice"]);
     const widened = effectiveTrustedSenderLogins(["alice"], {
@@ -151,6 +152,7 @@ describe("effectiveTrustedSenderLogins", () => {
       strictBranchRefresh: false,
       reviewCarry: true,
       workerReviewRules: true,
+      retitleAdoptedPrs: true,
     });
     expect(widened).toEqual(["alice"]);
   });
@@ -177,6 +179,7 @@ describe("effectiveTrustedSenderLogins", () => {
       strictBranchRefresh: false,
       reviewCarry: true,
       workerReviewRules: true,
+      retitleAdoptedPrs: true,
     });
     expect(effective).toEqual(["carol"]);
     // Listing is the admit: no forge lookup, case-insensitive whole login.
@@ -207,6 +210,7 @@ describe("effectiveTrustedSenderLogins", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       })
     ).toBeUndefined();
   });
@@ -248,6 +252,7 @@ describe("effectiveTrustedSenderLogins", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       };
     }
     // Absent: neither deployment nor repository configures senders.
@@ -308,6 +313,7 @@ describe("effectiveTrustedSenderLogins", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       };
     }
     // Blank deployment entries are ignored: blank-only plus a valid repo list admits the repo list.
@@ -350,6 +356,7 @@ describe("effectiveFollowupIgnoreLogins", () => {
       strictBranchRefresh: false,
       reviewCarry: true,
       workerReviewRules: true,
+      retitleAdoptedPrs: true,
     });
     expect(merged).toEqual(["deployer-bot", "repo-bot"]);
     const missing = repoFileApi(undefined);
@@ -393,6 +400,7 @@ describe("effectiveIgnoreConflictsLabel", () => {
         strictBranchRefresh: false,
         reviewCarry: true,
         workerReviewRules: true,
+        retitleAdoptedPrs: true,
       })
     ).toBe("skip-me");
   });

@@ -667,6 +667,10 @@ export class GiteaAPI {
     return toPull(await this.patch<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
   }
 
+  async updatePullRequestTitle(owner: string, repo: string, index: number, title: string): Promise<Pull> {
+    return toPull(await this.patch<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { title }));
+  }
+
   /**
    * Best-effort delete of a git ref (checkpoint hidden refs). GitHub accepts
    * `DELETE /repos/{owner}/{repo}/git/refs/{ref}` with the `refs/` prefix
