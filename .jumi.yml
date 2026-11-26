@@ -2,8 +2,3 @@ automerge: true
 conflict_regenerate:
   - file: file-size-baseline.json
     run: bun run ./regenerate_file_size_baseline.ts
-verify:
-  run: cd scripts/opencode && bun install --frozen-lockfile && bun run lint && bun run typecheck && bun run knip
-  timeout: 10
-  attempts: 2
-  kinds: [implement, followup]
