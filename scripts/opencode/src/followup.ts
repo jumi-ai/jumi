@@ -96,7 +96,7 @@ import {
   workerPublishSecrets,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
-import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
+import { senderCanSteer, trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
   applyEffects,
@@ -714,6 +714,107 @@ export function openMaintainerQuestionsForReview(
     if (isMaintainerInline(inline, botUsername)) inlineCount++;
   }
   return bodyCount + inlineCount;
+}
+
+/**
+ * Open `❓ maintainer:` questions on one published review whatever the
+ * trailer state: the parsed body's `❓ maintainer:` count plus one per open
+ * Jumi `❓ maintainer:` inline belonging to that review. Only an incomplete
+ * review reads zero. Unlike `openMaintainerQuestionsForReview` (which the
+ * hold release relies on for success-only semantics) this helper feeds the
+ * post-cap answer-round gate, which must see the #7007 shape: a `failure`
+ * trailer with a `❓ maintainer:` finding published inline and in the body
+ * list. Pass only the inlines for this review (see `inlinesForReviewGroup`).
+ */
+export function openMaintainerQuestionsAnyTrailer(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername?: string
+): number {
+  const body = reviewBody ?? "";
+  if (!body.trim()) return 0;
+  let parsed: ReturnType<typeof parseReviewOutput>;
+  try {
+    parsed = parseReviewOutput(body);
+  } catch {
+    return 0;
+  }
+  if (parsed.verdict.incomplete) return 0;
+  const bodyCount = countMaintainerQuestionFindings(parsed.comment);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isMaintainerInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
+}
+
+export interface AnswerRoundReviewAssessment {
+  /** A Jumi review exists on the current head. */
+  foundOnHead: boolean;
+  /** Any Jumi review exists on any head (to tell head-moved from no review). */
+  hasAnyReview: boolean;
+  /** The current-head review parsed as incomplete. */
+  incomplete: boolean;
+  /** Open `❓ maintainer:` count on the current-head review, any trailer. */
+  openCount: number;
+  /** `Reviewed commit` of the current-head review, when present. */
+  reviewSha?: string;
+}
+
+/**
+ * Latest Jumi-authored review on the current head with its open
+ * `❓ maintainer:` count read whatever the trailer state. Inlines come from
+ * that review's publish group (`inlinesForReviewGroup`); a sticky (issue
+ * comment) review has no group and reads body-only, mirroring the hold
+ * settlement evidence path.
+ */
+export function assessAnswerRoundReview(
+  items: FollowUpItems,
+  headSha: string,
+  botUsername: string
+): AnswerRoundReviewAssessment {
+  const hasAnyReview = items.jumiReviews.length > 0 || items.jumiStickies.length > 0;
+  const candidates: Array<{ at: string; body: string; id: number; sha: string; summary?: PullReview }> = [];
+  for (const review of items.jumiReviews) {
+    const sha = pullReviewFindingSha(review);
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    candidates.push({
+      at: review.submitted_at ?? review.updated_at ?? review.created_at ?? "",
+      body: pullReviewBody(review),
+      id: review.id,
+      sha,
+      summary: review,
+    });
+  }
+  for (const comment of items.jumiStickies) {
+    const body = comment.body ?? "";
+    const sha = parseReviewedCommitSha(body);
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    candidates.push({ at: comment.created_at ?? "", body, id: comment.id, sha });
+  }
+  if (candidates.length === 0) {
+    return { foundOnHead: false, hasAnyReview, incomplete: false, openCount: 0 };
+  }
+  candidates.sort((a, b) => a.at.localeCompare(b.at));
+  const latest = candidates[candidates.length - 1]!;
+  let incomplete = false;
+  try {
+    incomplete = parseReviewOutput(latest.body).verdict.incomplete;
+  } catch {
+    incomplete = true;
+  }
+  const groupInlines =
+    latest.summary != null
+      ? inlinesForReviewGroup(latest.summary, items.allReviews ?? items.jumiReviews, items.jumiInlines, botUsername)
+      : [];
+  const openCount = incomplete ? 0 : openMaintainerQuestionsAnyTrailer(latest.body, groupInlines, botUsername);
+  return {
+    foundOnHead: true,
+    hasAnyReview,
+    incomplete,
+    openCount,
+    reviewSha: latest.sha,
+  };
 }
 
 /**
@@ -2245,6 +2346,174 @@ export async function implementFollowUp(
   }
   let leftToAuthorResolved: Resolved<LeftToAuthorInfo> | undefined;
   let diffHashResolved: Resolved<string | undefined> | undefined;
+  // One answer round past the cap: a trusted human comment/review answering
+  // an open `❓ maintainer:` on the current head admits exactly one worker
+  // round even when `stateRound >= maxFollowupRounds`. The trigger id stays
+  // handled through the existing latch, so one answer grants one round and a
+  // later review-failure wake stays capped. Refusals log a specific reason;
+  // trusted refusals also post a new PR comment (the stuck sticky edit alone
+  // is invisible), while bot/ignored/untrusted senders get the log line only.
+  let answerRoundPastCap = false;
+  {
+    const triggerCommentId = opts.job.trigger?.commentId;
+    const triggerReviewId = opts.job.trigger?.reviewId;
+    const triggerSender = opts.job.trigger?.sender;
+    const isHumanWake = triggerCommentId !== undefined || triggerReviewId !== undefined;
+    const roundCapped = snapshot.latch.followup.round >= snapshot.policy.maxFollowupRounds;
+    const triggerHandled =
+      (triggerCommentId !== undefined && snapshot.latch.followup.handledCommentIds.includes(triggerCommentId)) ||
+      (triggerReviewId !== undefined && snapshot.latch.followup.handledReviewIds.includes(triggerReviewId));
+    const markPostCapTriggerHandled = async (): Promise<void> => {
+      // A trusted refusal posts a new PR comment (the stuck-sticky edit alone
+      // is invisible). Record the trigger as handled without bumping the
+      // round so a redelivered/duplicated webhook for the same
+      // comment/review id hits `comment-already-handled` in `decide()` instead
+      // of posting a second refusal comment. Untrusted, bot, and ignored
+      // senders never reach here, so they cannot make Jumi write.
+      try {
+        const current = snapshot.latch.followup;
+        const handledCommentIds = [...current.handledCommentIds];
+        const handledReviewIds = [...current.handledReviewIds];
+        if (triggerCommentId !== undefined && !handledCommentIds.includes(triggerCommentId)) {
+          handledCommentIds.push(triggerCommentId);
+        }
+        if (triggerReviewId !== undefined && !handledReviewIds.includes(triggerReviewId)) {
+          handledReviewIds.push(triggerReviewId);
+        }
+        await writeFollowUpLatch(latches, latchKey, {
+          prNumber: pr.number,
+          round: current.round,
+          lastHeadSha: current.lastHeadSha,
+          handledCommentIds,
+          handledReviewIds,
+          handledReviewFindings: current.handledReviewFindings,
+          updatedAt: now().toISOString(),
+          ...(current.suggestionHold ? { suggestionHold: current.suggestionHold } : {}),
+        });
+      } catch (err) {
+        log(`post-cap handled latch update failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+      }
+    };
+    const handlePostCapHumanWake = async (
+      idLabel: string,
+      idForBody: number | undefined,
+      sender: string | undefined
+    ): Promise<void> => {
+      if (loginEquals(sender, opts.botUsername)) {
+        log(`post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: sender is bot`);
+        return;
+      }
+      if (loginInList(sender, effectiveFollowupIgnoreUpFront)) {
+        log(`post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: sender ignored`);
+        return;
+      }
+      let trusted = false;
+      try {
+        trusted = await senderCanSteer(opts.api, owner, repo, sender, effectiveTrustedUpFront);
+      } catch {
+        trusted = false;
+      }
+      if (!trusted) {
+        log(`post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: untrusted sender`);
+        return;
+      }
+      const assessment = assessAnswerRoundReview(snapshot.items, pr.head.sha, opts.botUsername);
+      if (!assessment.foundOnHead) {
+        const why = assessment.hasAnyReview
+          ? "the held review is on an older head"
+          : "no open ❓ maintainer: question on the current head";
+        log(`post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: ${why}`);
+        try {
+          await (
+            opts.api as {
+              createIssueComment: (o: string, r: string, n: number, b: string) => Promise<unknown>;
+            }
+          ).createIssueComment(
+            owner,
+            repo,
+            pr.number,
+            `Jumi did not act on your comment${idForBody !== undefined ? ` ${idForBody}` : ""}: ${why}, so the follow-up round cap still applies.`
+          );
+        } catch (err) {
+          log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+        }
+        await markPostCapTriggerHandled();
+        return;
+      }
+      if (assessment.incomplete) {
+        log(`post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: held review is incomplete`);
+        try {
+          await (
+            opts.api as {
+              createIssueComment: (o: string, r: string, n: number, b: string) => Promise<unknown>;
+            }
+          ).createIssueComment(
+            owner,
+            repo,
+            pr.number,
+            `Jumi did not act on your comment${idForBody !== undefined ? ` ${idForBody}` : ""}: the held review is incomplete, so the follow-up round cap still applies.`
+          );
+        } catch (err) {
+          log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+        }
+        await markPostCapTriggerHandled();
+        return;
+      }
+      if (assessment.openCount === 0) {
+        log(
+          `post-cap answer refused for ${owner}/${repo}#${pr.number} ${idLabel}: no open maintainer question on current head`
+        );
+        try {
+          await (
+            opts.api as {
+              createIssueComment: (o: string, r: string, n: number, b: string) => Promise<unknown>;
+            }
+          ).createIssueComment(
+            owner,
+            repo,
+            pr.number,
+            `Jumi did not act on your comment${idForBody !== undefined ? ` ${idForBody}` : ""}: no open ❓ maintainer: question on the current head, so the follow-up round cap still applies.`
+          );
+        } catch (err) {
+          log(`post-cap refusal comment failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+        }
+        await markPostCapTriggerHandled();
+        return;
+      }
+      answerRoundPastCap = true;
+      log(`answer round past cap for ${owner}/${repo}#${pr.number} ${idLabel}`);
+    };
+    if (roundCapped && isHumanWake && !ciWake && !triggerHandled && snapshot.hasFeedback) {
+      // Earlier decision gates win over the round cap: an unreadable
+      // ignore-authors list (`settings-unreadable`) and a hit conflict cap
+      // on a conflicted PR (`conflict-cap`) both precede the round-cap check
+      // in `decide()`. Leave those to the normal path so a conflicted PR at
+      // both caps still reports the conflict cap without a round-cap note.
+      if (snapshot.lists.ignoreAuthors === undefined) {
+        // Fall through to `decide()` with no answer logic.
+      } else if (snapshot.pr.mergeable === false) {
+        let conflictedLeftToAuthor = false;
+        try {
+          conflictedLeftToAuthor = (await snapshot.getLeftToAuthor()).conflictedLeftToAuthor;
+        } catch {
+          conflictedLeftToAuthor = false;
+        }
+        if (!conflictedLeftToAuthor && snapshot.latch.conflict.round >= snapshot.policy.maxConflictRounds) {
+          // Fall through to `decide()` with no answer logic.
+        } else {
+          const idLabel =
+            triggerCommentId !== undefined ? `(comment ${triggerCommentId})` : `(review ${triggerReviewId})`;
+          const idForBody = triggerCommentId !== undefined ? triggerCommentId : triggerReviewId;
+          await handlePostCapHumanWake(idLabel, idForBody, triggerSender);
+        }
+      } else {
+        const idLabel =
+          triggerCommentId !== undefined ? `(comment ${triggerCommentId})` : `(review ${triggerReviewId})`;
+        const idForBody = triggerCommentId !== undefined ? triggerCommentId : triggerReviewId;
+        await handlePostCapHumanWake(idLabel, idForBody, triggerSender);
+      }
+    }
+  }
   let preDecision: ReturnType<typeof decide>;
   for (;;) {
     const input: PrDecisionSnapshot = {
@@ -2262,6 +2531,7 @@ export async function implementFollowUp(
       hasFeedback: snapshot.hasFeedback,
       stateRound: snapshot.latch.followup.round,
       maxFollowupRounds: snapshot.policy.maxFollowupRounds,
+      ...(answerRoundPastCap ? { answerRoundPastCap: true as const } : {}),
       ciPending: ci.pending,
       ciUnhandled: ci.unhandled,
       ...(ciHashForDecision ? { ciHash: ciHashForDecision } : {}),
