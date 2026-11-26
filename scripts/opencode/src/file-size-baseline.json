@@ -213,7 +213,7 @@
   "util/login.ts": 8,
   "util/object.ts": 7,
   "verdict.ts": 1147,
-  "webfetch_probe.ts": 1006,
+  "webfetch_probe.ts": 1011,
   "webhook.ts": 154,
   "webhook_delivery.ts": 58,
   "worker.ts": 1394,

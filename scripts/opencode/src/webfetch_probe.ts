@@ -645,10 +645,15 @@ function judgeSearchDeny(label: string, result: string | undefined): { ok: boole
   // The installed binary removes a policy-denied tool from the request
   // ("Tool is not available for this request: <tool>") instead of returning
   // the permission-deny text; either wording proves the tool cannot be used.
-  // Anything else — including a ran-and-failed search — means the deny did
-  // not hold.
+  // Since 2.4.0 the tool is hidden entirely when every provider is denied
+  // ("When every provider is denied, the `websearch` tool is no longer
+  // offered", https://opencode.ai/docs/policies/#web-search), surfacing as
+  // `No tool named "websearch" is currently available` — that proves the deny
+  // too. Anything else — including a ran-and-failed search — means the deny
+  // did not hold.
   const unavailable = /not available for this request/i.test(result) && result.includes("websearch");
-  const ok = isPermissionDenyText(result) || unavailable;
+  const hidden = /no tool named\s+"?websearch"?/i.test(result);
+  const ok = isPermissionDenyText(result) || unavailable || hidden;
   return { ok, line: ok ? `${label}: denied` : `${label}: NOT DENIED: ${result.slice(0, 200)}` };
 }
 
