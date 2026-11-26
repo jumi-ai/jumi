@@ -405,6 +405,16 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
+  # Offline Pi plus legacy regressions (#940): same probe as the reviewer
+  # image (real Pi SDK sessions at in-container loopback, structured verdict
+  # plus worker diff and fixture test, legacy dispatch without Pi credentials,
+  # pi failure without rescue), as the image UID with a fresh HOME.
+  if ! buildah run --user 10001:10001 --env HOME=/tmp/probe-home --env TMPDIR=/tmp "${ctr}" -- \
+    sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "offline Pi/legacy probe failed against the installed components" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "installed-tools manifest missing in worker image" >&2
