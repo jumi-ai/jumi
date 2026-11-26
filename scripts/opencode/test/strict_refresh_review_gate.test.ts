@@ -324,6 +324,24 @@ describe("review gate on push, gitea fake (#900)", () => {
     expect(jobs[0]?.prNumber).toBe(101);
     expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(101);
   });
+
+  test("pending older plus green newer still admits the green head (suppression guard)", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const api = giteaApi({
+      pulls: [giteaPull(100), giteaPull(101)],
+      statuses: { "head-100": [reviewCheck("pending")], "head-101": [reviewCheck("success")] },
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(
+      giteaPushPayload(),
+      giteaPolicy,
+      api,
+      undefined,
+      slots,
+      1_000
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(101);
+  });
 });
 
 describe("review gate on PR activity (#900)", () => {
