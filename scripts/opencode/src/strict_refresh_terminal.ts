@@ -32,6 +32,7 @@ export function isStrictRefreshRetryableSkipReason(reason: string | undefined): 
   if (lower.startsWith(RETRYABLE_BUSY_PREFIX)) return true;
   if (lower.includes("pull request unreadable")) return true;
   if (lower.includes("strictness unknown")) return true;
+  if (lower.includes("review status unreadable")) return true;
   return (
     lower.includes("503") ||
     lower.includes("502") ||
@@ -473,6 +474,7 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
   enqueueIssue: (job: IssueJob) => Promise<unknown>;
   log?: (message: string) => void;
   nowMs?: number;
+  hasPendingFollowUp?: import("./strict_refresh.ts").StrictPendingFollowUp;
 }): Promise<{ expired: number; enqueued: number }> {
   const now = opts.nowMs ?? Date.now();
   const held = await opts.slots.listHeldSlots();
@@ -523,25 +525,41 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
       }
     }
   }
-  // Admit-next obligations: a released slot with possible ready waiters.
-  // One open-PR list per due branch, bounded by the stored obligation.
+  // Admit-next obligations: a released slot with possible ready waiters, or
+  // a review-green wake a forge error interrupted. One open-PR list per due
+  // branch, bounded by the stored obligation. A drain that hits a transient
+  // failure (unreadable repo or branch tip, queue outage) keeps the
+  // obligation for the next tick instead of consuming it: only a completed
+  // drain clears it, so the wake survives forge errors like the #894 slot
+  // obligation does. A completed drain with no ready candidate still
+  // consumes (empty drains must not poll every tick); a later push or stop
+  // re-creates the obligation.
   try {
     const dueAdmit = typeof opts.slots.listAdmitNextDue === "function" ? await opts.slots.listAdmitNextDue(now) : [];
     for (const target of dueAdmit) {
+      let keepObligation = false;
       try {
         let repo: { full_name: string; html_url: string; clone_url: string; default_branch: string };
         try {
           repo = await opts.api.getRepo(target.owner, target.repo);
         } catch (err) {
           opts.log?.(`strict refresh tick repo lookup failed for ${target.owner}/${target.repo}: ${errorMessage(err)}`);
+          keepObligation = true;
           continue;
         }
         const freshTip = await readFreshBranchTip(opts.api, target.owner, target.repo, target.baseBranch, opts.log);
+        if (!freshTip) {
+          opts.log?.(
+            `strict refresh tick branch tip unreadable for ${target.owner}/${target.repo}@${target.baseBranch}`
+          );
+          keepObligation = true;
+          continue;
+        }
         const { jobs } = await shouldEnqueueStrictRefreshOnPush(
           {
             ref: `refs/heads/${target.baseBranch}`,
-            before: freshTip ?? "",
-            after: freshTip ?? "",
+            before: freshTip,
+            after: freshTip,
             repository: {
               full_name: repo.full_name,
               default_branch: repo.default_branch,
@@ -555,7 +573,8 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
           opts.api,
           opts.log,
           opts.slots,
-          now
+          now,
+          opts.hasPendingFollowUp
         );
         for (const partial of jobs) {
           const job: IssueJob = {
@@ -567,6 +586,7 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
             await opts.enqueueIssue(job);
           } catch (err) {
             opts.log?.(`strict refresh tick enqueue failed: ${errorMessage(err)}`);
+            keepObligation = true;
             continue;
           }
           await opts.slots
@@ -579,19 +599,24 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
         }
       } catch (err) {
         opts.log?.(`strict refresh admit-next failed: ${errorMessage(err)}`);
-      } finally {
-        // One bounded drain per obligation: consume it whether or not a
-        // candidate was ready, so an empty drain (e.g. closed PR, deleted
-        // branch) does not poll the forge every tick. A later push or stop
-        // re-creates the obligation. Consuming a just-admitted holder is a
-        // no-op (Memory already deleted it; Pg only clears phase
-        // 'admit-next' rows in place so terminal evidence survives, and a
-        // fresh admission is 'held').
-        try {
-          await opts.slots.consumeAdmitNext(target.owner, target.repo, target.baseBranch);
-        } catch (err) {
-          opts.log?.(`strict refresh admit-next consume failed: ${errorMessage(err)}`);
-        }
+        keepObligation = true;
+      }
+      if (keepObligation) {
+        opts.log?.(
+          `strict refresh admit-next kept for ${target.owner}/${target.repo}#${target.baseBranch} (transient failure; tick retries)`
+        );
+        continue;
+      }
+      // One bounded drain per obligation: consume it whether or not a
+      // candidate was ready, so an empty drain (e.g. closed PR, deleted
+      // branch) does not poll the forge every tick. A later push or stop
+      // re-creates it. Consuming a just-admitted holder is a no-op (Memory
+      // already deleted it; Pg only clears phase 'admit-next' rows in place
+      // so terminal evidence survives, and a fresh admission is 'held').
+      try {
+        await opts.slots.consumeAdmitNext(target.owner, target.repo, target.baseBranch);
+      } catch (err) {
+        opts.log?.(`strict refresh admit-next consume failed: ${errorMessage(err)}`);
       }
     }
   } catch (err) {
@@ -629,7 +654,8 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
         opts.api,
         opts.log,
         opts.slots,
-        now
+        now,
+        opts.hasPendingFollowUp
       );
       for (const partial of jobs) {
         const job: IssueJob = {

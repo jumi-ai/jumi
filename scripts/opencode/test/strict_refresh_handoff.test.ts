@@ -55,6 +55,10 @@ function checkState(state: Check["state"]): Check {
   return { context: "ci", state, status: state };
 }
 
+function reviewGreen(): Check {
+  return { context: "jumi/opencode-review", state: "success", status: "success" };
+}
+
 /** GitHub-shaped fake: list carries no merge state; getPR hydrates per PR. */
 function githubApi(opts: {
   list: Pull[];
@@ -94,7 +98,10 @@ describe("strict timeout handoff hands the slot to the next ready PR (#893)", ()
       890: jumiPull(890, { mergeableState: "behind" }),
       891: jumiPull(891, { mergeableState: "behind" }),
     };
-    const statuses = { "head-890": [checkState("success")], "head-891": [checkState("success")] };
+    const statuses = {
+      "head-890": [checkState("success"), reviewGreen()],
+      "head-891": [checkState("success"), reviewGreen()],
+    };
     const { api } = githubApi({ list, fresh, statuses });
     const logs: string[] = [];
     const log = (m: string) => logs.push(m);
@@ -130,7 +137,10 @@ describe("strict timeout handoff hands the slot to the next ready PR (#893)", ()
       890: jumiPull(890, { mergeableState: "behind" }),
       891: jumiPull(891, { mergeableState: "behind" }),
     };
-    const statuses = { "head-890": [checkState("success")], "head-891": [checkState("success")] };
+    const statuses = {
+      "head-890": [checkState("success"), reviewGreen()],
+      "head-891": [checkState("success"), reviewGreen()],
+    };
     const { api } = githubApi({ list, fresh, statuses });
     await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1_000);
 
@@ -159,6 +169,8 @@ describe("strict newer-PR activity admits the oldest (#893)", () => {
     return {
       listOpenPulls: async () => pulls,
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
   }
 
@@ -219,6 +231,8 @@ describe("strict admission failure between admit and enqueue leaves no orphan (#
         clone_url: "https://github.com/o/r.git",
         default_branch: "main",
       }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
   }
 

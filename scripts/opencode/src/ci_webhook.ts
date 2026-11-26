@@ -362,3 +362,38 @@ export async function shouldEnqueueSiblingCheckReview(
   if (jobs.length === 0) return { type: "skip", reason: "no matching pull request" };
   return { type: "enqueue", jobs };
 }
+
+/**
+ * Jumi's own review turning green (issue #900). A commit status (or check
+ * run) on the `jumi/opencode-review` context with a success state means
+ * the head it names just earned a green review. Both forges post the
+ * verdict as a commit status, so both the Gitea `status` payload shape and
+ * the GitHub `check_run` shape are recognized. Any other context, any
+ * non-success state, or a malformed payload returns null: callers fall
+ * through to the sibling-check path, which skips the review's own status.
+ */
+export function parseJumiReviewSuccessFinish(rawBody: Uint8Array): { sha: string } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(rawBody));
+  } catch {
+    return null;
+  }
+  if (!isObjectLike(parsed)) return null;
+  const run = parsed.check_run;
+  if (isObjectLike(run)) {
+    const status = stringField(run.status) ?? "";
+    const conclusion = stringField(run.conclusion) ?? "";
+    const name = stringField(run.name) ?? "";
+    const sha = stringField(run.head_sha) ?? "";
+    if (!sha || !isJumiReviewContext(name)) return null;
+    if (status !== "completed" || conclusion.toLowerCase() !== "success") return null;
+    return { sha };
+  }
+  const sha = stringField(parsed.sha) ?? "";
+  const context = stringField(parsed.context) ?? stringField(parsed.name) ?? "";
+  const state = stringField(parsed.state) ?? stringField(parsed.status) ?? "";
+  if (!sha || !isJumiReviewContext(context)) return null;
+  if (state.toLowerCase() !== "success") return null;
+  return { sha };
+}

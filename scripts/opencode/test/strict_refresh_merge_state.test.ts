@@ -53,6 +53,10 @@ function checkState(state: Check["state"]): Check {
   return { context: "ci", state, status: state };
 }
 
+function reviewGreen(): Check {
+  return { context: "jumi/opencode-review", state: "success", status: "success" };
+}
+
 /**
  * GitHub-shaped fake: the open-pull list carries no merge state (as the live
  * list endpoint), while getPR returns the real merge state per PR.
@@ -98,7 +102,7 @@ describe("strict refresh real merge state (#876)", () => {
         101: jumiPull(101, { mergeableState: "blocked" }),
         102: jumiPull(102, { mergeableState: "behind" }),
       },
-      statuses: { "head-101": [checkState("failure")], "head-102": [checkState("success")] },
+      statuses: { "head-101": [checkState("failure")], "head-102": [checkState("success"), reviewGreen()] },
     });
     const slots = new MemoryStrictRefreshSlotStore();
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1000);
@@ -116,6 +120,7 @@ describe("strict refresh real merge state (#876)", () => {
         100: jumiPull(100, { mergeableState: "behind" }),
         101: jumiPull(101, { mergeableState: "behind" }),
       },
+      statuses: { "head-100": [reviewGreen()], "head-101": [reviewGreen()] },
     });
     const slots = new MemoryStrictRefreshSlotStore();
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1000);
@@ -131,7 +136,10 @@ describe("strict refresh real merge state (#876)", () => {
       100: jumiPull(100, { mergeableState: "behind" }),
       101: jumiPull(101, { mergeableState: "behind" }),
     };
-    const statuses: Record<string, Check[]> = {};
+    const statuses: Record<string, Check[]> = {
+      "head-100": [reviewGreen()],
+      "head-101": [reviewGreen()],
+    };
     const { api, counts } = githubApi({ list, fresh, statuses });
     const slots = new MemoryStrictRefreshSlotStore();
     const first = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1000);
@@ -146,8 +154,9 @@ describe("strict refresh real merge state (#876)", () => {
     expect(second.jobs).toHaveLength(0);
     expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(100);
     expect(await slots.getTerminal("o", "r", "main")).toBeUndefined();
-    // Only the holder is inspected; the waiting PR is never fetched.
-    expect(counts.getPR).toBe(1);
+    // The skipped holder plus the ready waiter are inspected (readiness now
+    // needs the review verdict); the holder keeps the slot regardless.
+    expect(counts.getPR).toBe(3);
   });
 
   test("holder with a failed required check releases as blocked; next ready PR is admitted", async () => {
@@ -156,13 +165,16 @@ describe("strict refresh real merge state (#876)", () => {
       100: jumiPull(100, { mergeableState: "behind" }),
       101: jumiPull(101, { mergeableState: "behind" }),
     };
-    const statuses: Record<string, Check[]> = {};
+    const statuses: Record<string, Check[]> = {
+      "head-100": [reviewGreen()],
+      "head-101": [reviewGreen()],
+    };
     const { api } = githubApi({ list, fresh, statuses });
     const slots = new MemoryStrictRefreshSlotStore();
     await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 1000);
 
     fresh[100] = jumiPull(100, { mergeableState: "blocked" });
-    statuses["head-100"] = [checkState("failure")];
+    statuses["head-100"] = [checkState("failure"), reviewGreen()];
     const next = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-2"), policy, api, undefined, slots, 2000);
     expect(next.jobs).toHaveLength(1);
     expect(next.jobs[0]?.prNumber).toBe(101);

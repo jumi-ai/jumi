@@ -60,6 +60,8 @@ function strictApi(pulls: Pull[], strict: boolean | undefined = true) {
     listOpenPulls: async () => pulls,
     getBranch: async () =>
       strict === undefined ? ({ protected: true } as never) : ({ protected: true, strict } as never),
+    listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+    listCheckRuns: async () => [],
   } as never;
 }
 
@@ -342,6 +344,8 @@ describe("strict single-slot admission across events and branches", () => {
     const api = {
       listOpenPulls: async () => [mainFirst, mainSecond, developFirst],
       getBranch: async () => ({ protected: true, strict: true }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
     const mainPush = {
       ...pushPayload("base-2"),
