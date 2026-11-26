@@ -147,6 +147,11 @@ function isHeadMovedIncompleteReason(reason: string): boolean {
   return reason.trim() === "Incomplete review: HEAD moved";
 }
 
+function isHeadSettingsFailureReason(reason: string): boolean {
+  const trimmed = reason.trimStart();
+  return trimmed.startsWith(".jumi.yml is invalid:") || trimmed.startsWith(".jumi.yml sets mode:");
+}
+
 /**
  * Terminal review failures that must stay status lines. Returns the `why`
  * for the 422, or undefined when the reason may be kicked.
@@ -192,6 +197,12 @@ export function disabledKickWhy(reason: string): string | undefined {
     return (
       "No kick: the review stopped because the head moved mid-run; " +
       "requeueing this stale commit would review an old SHA."
+    );
+  }
+  if (isHeadSettingsFailureReason(reason)) {
+    return (
+      "No kick: the pull's `.jumi.yml` is invalid on this head; " +
+      "requeueing the same commit would fail the same way. Push a fix to the pull."
     );
   }
   return undefined;

@@ -1,13 +1,14 @@
 import { hasLabel, isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS, readFollowUpLatch } from "./followup.ts";
-import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
+import { extractWorkingIssueNumber, isAssignedForeignPR, isInScopeJumiPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
 import {
   effectivePickupLabel,
+  isHeadSettingsFailureReason,
   isMaintainerQuestionsHoldEnabled,
   type RepoSettingsLoad,
   repoMode,
@@ -236,6 +237,25 @@ export async function enqueueFollowUpFromReview(
     opts.logger?.(`persist-insert skipped: ${reason}`);
     return undefined;
   };
+
+  // Invalid head settings still fail the review check, but on a pull Jumi
+  // works on the failure is unhandled feedback for follow-up, not a terminal
+  // skip. A pull Jumi does not work on keeps today's behavior: a failing
+  // status with no follow-up.
+  if (opts.published.status === "skipped" && isHeadSettingsFailureReason(opts.published.reason)) {
+    return enqueueFollowUpFromHeadSettings({
+      store: opts.store,
+      api: opts.api,
+      row: opts.row,
+      failure: (opts.published.reason ?? "").trim(),
+      botUsername: opts.botUsername,
+      maxFollowupRounds: opts.maxFollowupRounds,
+      maxConflictRounds: opts.maxConflictRounds,
+      blockingQuestionAuthors: opts.blockingQuestionAuthors,
+      logger: opts.logger,
+      ...(opts.isPickedUp ? { isPickedUp: opts.isPickedUp } : {}),
+    });
+  }
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
 
@@ -539,5 +559,128 @@ export async function enqueueFollowUpFromReview(
   const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown, record) ? "review-suggestions" : "review-failure";
   return opts.store.enqueueIssue(
     followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `${triggerEvent}-${opts.row.id}`, triggerEvent)
+  );
+}
+
+/**
+ * Follow-up for a head that leaves `.jumi.yml` invalid. The strict check
+ * stays: the review already failed with the parser error. On a pull Jumi
+ * works on (its own closer, or a handed-over / taken-over pull) that failure
+ * is unhandled feedback, so a follow-up is queued with the parser error plus
+ * the merge-off guidance. A pull Jumi does not work on keeps today's
+ * behavior: a failing status and no follow-up. Round caps and stuck handling
+ * apply unchanged.
+ */
+async function enqueueFollowUpFromHeadSettings(
+  opts: {
+    store: ReviewJobStore;
+    api: Pick<
+      ReviewApi,
+      | "getPR"
+      | "getIssue"
+      | "getRepo"
+      | "getRepoFile"
+      | "findStickyIssueComment"
+      | "createIssueComment"
+      | "updateIssueComment"
+      | "createCommitStatus"
+    >;
+    row: ReviewJobRecord;
+    failure: string;
+    botUsername: string;
+    maxFollowupRounds?: number;
+    maxConflictRounds?: number;
+    blockingQuestionAuthors?: readonly string[];
+    logger?: (message: string) => void;
+  } & PickupPolicy
+): Promise<EnqueueResult | undefined> {
+  const logSkip = (reason: string): undefined => {
+    opts.logger?.(`persist-insert skipped: ${reason}`);
+    return undefined;
+  };
+  const repo = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+  let repoSettings: RepoSettingsLoad = { state: "missing" };
+  let maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
+  let maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  try {
+    const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
+    if (defaultBranch) {
+      const repoPolicy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.row.owner, repo: opts.row.repo, ref: defaultBranch },
+        {
+          trustedSenderLogins: undefined,
+          followupIgnoreLogins: undefined,
+          ignoreConflictsLabel: undefined,
+          blockingQuestionAuthors: opts.blockingQuestionAuthors,
+          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+        },
+        { onUnreadable: "throw" }
+      );
+      repoSettings = repoPolicy.load;
+      if (repoPolicy.status !== "invalid") {
+        maxFollowupRounds = repoPolicy.maxFollowupRounds;
+        maxConflictRounds = repoPolicy.maxConflictRounds;
+      }
+    }
+  } catch (err) {
+    opts.logger?.(`repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${errorMessage(err)}`);
+  }
+  if (repoMode(repoSettings) !== "full") return logSkip("repository mode is restricted");
+  const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
+  if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
+  const effectivePickup =
+    repoSettings.state === "valid" && repoSettings.pickupLabel
+      ? repoSettings.pickupLabel
+      : effectivePickupLabel(repoSettings);
+  const usesGithubPickup = Boolean(opts.isPickedUp);
+  const effectivePickupPolicy: PickupPolicy = usesGithubPickup
+    ? { botUsername: opts.botUsername, isPickedUp: (issue) => hasLabel(issue, effectivePickup) }
+    : { botUsername: opts.botUsername };
+  const closer = extractWorkingIssueNumber(pr);
+  const inScopeCloser = closer !== undefined && isInScopeJumiPR(pr, opts.row.owner, opts.row.repo, opts.botUsername);
+  const foreign =
+    closer === undefined &&
+    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, effectivePickupPolicy) &&
+    !isJumiPrIdentity(pr, opts.botUsername);
+  if (closer === undefined && !foreign) {
+    await rememberSitBestEffort(
+      opts.store.sits,
+      opts.row.owner,
+      opts.row.repo,
+      opts.row.prNumber,
+      "no closing issue",
+      opts.logger
+    );
+    return logSkip("no closer");
+  }
+  if (!inScopeCloser && !foreign) {
+    // The head is invalid but Jumi does not work on this pull: today's
+    // failing status stands with no follow-up.
+    return logSkip("not a jumi pull request");
+  }
+  const issueNumber = closer ?? pr.number;
+  const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);
+  if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, effectivePickupPolicy))) {
+    return logSkip("unassigned");
+  }
+  const followUpLatch = await readFollowUpLatch(opts.store.skipLatches, {
+    owner: opts.row.owner,
+    repo: opts.row.repo,
+    issueNumber,
+  });
+  if (followUpLatch.round >= maxFollowupRounds) {
+    await upsertStuckText(
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      pr.number,
+      opts.botUsername,
+      TOO_MANY_FOLLOWUP_ROUNDS
+    );
+    return logSkip("round cap");
+  }
+  return opts.store.enqueueIssue(
+    followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `review-failure-${opts.row.id}`, "review-failure")
   );
 }

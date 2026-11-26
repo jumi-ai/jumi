@@ -187,6 +187,13 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   // Push-confirmation exhaustion: Jumi pushed but the forge never registered it.
   if (text.startsWith("forge did not register push ")) return "push-unregistered";
 
+  // Invalid head settings: requeueing the same commit can only skip the same
+  // way, so the board shows it as waiting on a change to the pull instead of
+  // offering a same-commit requeue.
+  if (text.startsWith(".jumi.yml is invalid:") || text.startsWith(".jumi.yml sets mode:")) {
+    return "terminal-result";
+  }
+
   return undefined;
 }
 
