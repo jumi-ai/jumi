@@ -42,6 +42,7 @@ import { noAutomergeLabelSetting } from "./repo_settings_keys/no_automerge_label
 import { pickupLabelSetting } from "./repo_settings_keys/pickup_label.ts";
 import { prTitleSetting } from "./repo_settings_keys/pr_title.ts";
 import { reviewBudgetSetting } from "./repo_settings_keys/review_budget.ts";
+import { reviewCarrySetting } from "./repo_settings_keys/review_carry.ts";
 import { reviewDraftsSetting } from "./repo_settings_keys/review_drafts.ts";
 import { reviewExcludeSetting } from "./repo_settings_keys/review_exclude.ts";
 import { setupSetting } from "./repo_settings_keys/setup.ts";
@@ -158,6 +159,7 @@ export const REPO_SETTINGS_REGISTRY = [
   pickupLabelSetting,
   prTitleSetting,
   reviewBudgetSetting,
+  reviewCarrySetting,
   reviewDraftsSetting,
   reviewExcludeSetting,
   setupSetting,
@@ -472,6 +474,16 @@ export function isStrictBranchRefreshEnabled(load: RepoSettingsLoad): boolean {
 export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return false;
   return load.reviewDrafts === true;
+}
+
+/**
+ * Whether a green review is carried across a clean target-branch merge
+ * without running a model. Default on: missing, invalid, or unreadable files
+ * behave as `true`. The repository opts out with `review_carry: false`.
+ */
+export function isReviewCarryEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return (load as { reviewCarry?: boolean }).reviewCarry !== false;
 }
 
 /**
