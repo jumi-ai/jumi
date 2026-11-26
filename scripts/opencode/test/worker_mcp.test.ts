@@ -145,7 +145,7 @@ describe("worker MCP server", () => {
 
   test("tool list names all five worker tools", async () => {
     expect(new Set(WORKER_MCP_TOOL_NAMES)).toEqual(
-      new Set(["blocked_on", "no_changes", "set_handoff", "set_pr_body", "skip"])
+      new Set(["blocked_on", "finding_response", "no_changes", "set_handoff", "set_pr_body", "skip"])
     );
     const store = new WorkerResultStore();
     const server = await startWorkerMcpServer({ store, token: "tok" });
@@ -157,7 +157,7 @@ describe("worker MCP server", () => {
       });
       const payload = (await res.json()) as { result?: { tools?: Array<{ name?: string }> } };
       const names = (payload.result?.tools ?? []).map((t) => t.name).sort();
-      expect(names).toEqual(["blocked_on", "no_changes", "set_handoff", "set_pr_body", "skip"]);
+      expect(names).toEqual(["blocked_on", "finding_response", "no_changes", "set_handoff", "set_pr_body", "skip"]);
     } finally {
       server.close();
     }
