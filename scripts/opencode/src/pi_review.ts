@@ -33,9 +33,9 @@
  *   rescues to legacy.
  */
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createAgentSession,
   createExtensionRuntime,
@@ -45,7 +45,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineFailedError } from "./engine.ts";
-import { findReviewEnvViolations } from "./review_sandbox.ts";
+import {
+  allowUnsandboxedReviews,
+  ensureSandboxedShellHome,
+  findReviewEnvViolations,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  reviewShellSandboxRules,
+  wrapShellCommand,
+} from "./review_sandbox.ts";
 import { REVIEW_VERDICT_CONTRACT_REQUIRED, type ReviewVerdictContract } from "./review_verdict_contract.ts";
 import type { ReviewVerdictStore } from "./review_verdict_store.ts";
 
@@ -158,9 +166,16 @@ export function buildPiSessionEnv(input: {
 }
 
 const PI_BASH_DENY_RE =
-  /(^|[;\s&|])(rm|mv|mkdir|touch|tee|chmod|chown|truncate)\b|>|>>|\|\s*tee\b|git\s+push|git\s+commit/i;
+  /(^|[^A-Za-z0-9_])(rm|mv|mkdir|touch|tee|chmod|chown|truncate)\b|>|>>|\|\s*tee\b|git\s+push|git\s+commit/i;
+
+// Command substitution smuggles writes through an allowlisted outer verb
+// (`echo $(touch pwned)`, backticks, `<(...)`). Simple `$VAR`/`${VAR}`
+// expansion stays allowed; `$(...)`, `$((...))`, backticks, and `<(...)`
+// process substitution do not.
+const PI_BASH_SUBSTITUTION_RE = /\$\(|`|<\([^)]*\)/;
 
 function isPiBashDenied(command: string): boolean {
+  if (PI_BASH_SUBSTITUTION_RE.test(command)) return true;
   return PI_BASH_DENY_RE.test(command);
 }
 
@@ -192,12 +207,49 @@ export function createGuardedPiReadTool(opts: {
     parameters: Type.Object({ path: Type.String() }),
     execute: async (_toolCallId, params) => {
       const raw = String((params as { path?: unknown }).path ?? "");
-      const resolved = raw.startsWith("/") ? raw : `${opts.cwd}/${raw}`;
-      const normalized = resolved.replace(/\/+/g, "/").replace(/\/$/, "");
-      const insideCwd = normalized === opts.cwd || normalized.startsWith(`${opts.cwd}/`);
-      const denied =
-        !insideCwd ||
-        opts.deniedPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+      if (!raw.trim()) {
+        opts.onCall?.(raw, true);
+        return {
+          content: [{ type: "text", text: "denied: pi review read denies empty path" }],
+          details: {},
+          isError: true,
+        };
+      }
+      // Lexical canonicalization: `resolve` collapses `.`/`..`/duplicate
+      // slashes, so `../outside` no longer smuggles past the prefix check
+      // by string-matching `cwd + "/"`.
+      const resolved = resolve(opts.cwd, raw);
+      const cwdResolved = resolve(opts.cwd);
+      const insideCwd = resolved === cwdResolved || resolved.startsWith(`${cwdResolved}/`);
+      const normalizedPrefixes = opts.deniedPrefixes.map((prefix) => resolve(prefix));
+      let denied =
+        !insideCwd || normalizedPrefixes.some((prefix) => resolved === prefix || resolved.startsWith(`${prefix}/`));
+      let effectivePath = resolved;
+      if (!denied) {
+        try {
+          // Symlink confinement: the checkout is head-supplied, so a link
+          // inside it can point outside. `readFile` follows links, so the
+          // containment check must run on the real path too.
+          const effective = await realpath(resolved);
+          const realCwd = await realpath(cwdResolved).catch(() => cwdResolved);
+          const realPrefixes = await Promise.all(
+            normalizedPrefixes.map(async (prefix) => realpath(prefix).catch(() => prefix))
+          );
+          const insideReal = effective === realCwd || effective.startsWith(`${realCwd}/`);
+          if (
+            !insideReal ||
+            realPrefixes.some((prefix) => effective === prefix || effective.startsWith(`${prefix}/`))
+          ) {
+            denied = true;
+          } else {
+            effectivePath = effective;
+          }
+        } catch {
+          // Unresolvable (missing file): the lexical decision stands and the
+          // `readFile` below fails closed. A dangling link cannot leak
+          // content because there is nothing to read.
+        }
+      }
       opts.onCall?.(raw, denied);
       if (denied) {
         return {
@@ -207,7 +259,7 @@ export function createGuardedPiReadTool(opts: {
         };
       }
       try {
-        const content = await readFile(normalized, "utf8");
+        const content = await readFile(effectivePath, "utf8");
         return { content: [{ type: "text", text: content.slice(0, 8000) }], details: {} };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -222,6 +274,15 @@ export function createGuardedPiBashTool(opts: {
   cwd: string;
   env: Record<string, string>;
   onCall?: (command: string, denied: boolean) => void;
+  /**
+   * Landlock confinement for the production path (`runPiReviewAttempt`
+   * supplies it; direct unit calls omit it and exercise only the deny
+   * predicate). When present, the allowed command runs inside the shell
+   * Landlock domain built from `reviewShellSandboxRules`, so an allowed
+   * verb cannot reach the harness temp, the agent HOME, or the shared
+   * `/tmp` outside the checkout.
+   */
+  sandbox?: { scratchDir: string; gitDirs?: readonly string[]; wrapperPath?: string };
 }): {
   name: string;
   label: string;
@@ -255,7 +316,21 @@ export function createGuardedPiBashTool(opts: {
         };
       }
       opts.onCall?.(command, false);
-      const proc = Bun.spawn(["sh", "-c", command], {
+      // The deny predicate above cannot parse shell syntax, so confinement
+      // is defense in depth: allowed verbs run inside the Landlock domain.
+      let spawnCommand = command;
+      if (opts.sandbox) {
+        const rules = reviewShellSandboxRules({
+          workdir: opts.cwd,
+          scratchDir: opts.sandbox.scratchDir,
+          gitDirs: [...(opts.sandbox.gitDirs ?? [])],
+        });
+        spawnCommand = wrapShellCommand(command, rules, {
+          wrapperPath: opts.sandbox.wrapperPath ?? reviewSandboxWrapperPath(),
+          scratchDir: opts.sandbox.scratchDir,
+        });
+      }
+      const proc = Bun.spawn(["sh", "-c", spawnCommand], {
         cwd: opts.cwd,
         env: opts.env as Record<string, string>,
         stdout: "pipe",
@@ -403,6 +478,17 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
   assertPiSandboxAvailable(opts.sandboxProbe ?? { available: true });
   const shellHome = join(opts.workdir, ".jumi-tmp", "pi-shell-home");
   const scratchDir = join(opts.workdir, ".jumi-tmp", "scratch");
+  // Landlock `RW` paths must exist (the wrapper requires them). Create the
+  // shell HOME, the scratch dir, and the wrapper-owned sandbox HOME up
+  // front so an allowed shell never fails on a missing allow-listed path.
+  try {
+    await mkdir(scratchDir, { recursive: true });
+    await mkdir(shellHome, { recursive: true });
+    await ensureSandboxedShellHome(scratchDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new EngineFailedError(`pi review refused: cannot create shell scratch dirs: ${message}`, false);
+  }
   const sessionEnv =
     opts.shellEnv ?? buildPiSessionEnv({ home: shellHome, scratchDir, gitHost: opts.gitHost, extra: opts.extraEnv });
   const violations = findReviewEnvViolations(sessionEnv);
@@ -443,12 +529,22 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
       toolCalls.push({ name: "read", args: { path }, ok: !denied, text: denied ? "denied" : "ran" });
     },
   });
+  const sandboxed = !allowUnsandboxedReviews();
   const guardedBash = createGuardedPiBashTool({
     cwd: opts.workdir,
     env: sessionEnv,
     onCall: (command, denied) => {
       toolCalls.push({ name: "bash", args: { command }, ok: !denied, text: denied ? "denied" : "ran" });
     },
+    ...(sandboxed
+      ? {
+          sandbox: {
+            scratchDir,
+            gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+            wrapperPath: reviewSandboxWrapperPath(),
+          },
+        }
+      : {}),
   });
 
   const resourceLoader = createTrustedPiResourceLoader(opts.baseInstructions);
@@ -474,6 +570,7 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
       settingsManager,
     });
     session = created.session;
+    const running = created.session;
     const active = new Set(session.getActiveToolNames());
     for (const required of ["read", "bash", ...PI_REVIEW_TOOL_NAMES]) {
       if (!active.has(required)) {
@@ -484,16 +581,51 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
       throw new EngineFailedError("pi review refused: write tools must stay disabled", false);
     }
 
+    // `session.prompt` takes no signal: cancellation is `session.abort()`.
+    // Wire the caller signal and the timeout to it so a stuck run cannot
+    // hang the attempt (every wait has a wake). The timer and listener are
+    // always cleaned up below.
     const timeoutMs = opts.timeoutMs ?? 120_000;
-    const abort = new AbortController();
-    const onAbort = () => abort.abort();
-    opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    let timedOut = false;
+    let callerAborted = opts.abortSignal?.aborted ?? false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void running.abort().catch(() => undefined);
+    }, timeoutMs);
+    const onAbort = () => {
+      callerAborted = true;
+      void running.abort().catch(() => undefined);
+    };
+    if (!callerAborted) {
+      opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    } else {
+      void running.abort().catch(() => undefined);
+    }
     try {
-      await session.prompt(opts.prompt);
+      if (!callerAborted) {
+        await running.prompt(opts.prompt);
+      }
     } finally {
       clearTimeout(timer);
       opts.abortSignal?.removeEventListener("abort", onAbort);
+    }
+    if (callerAborted) {
+      return {
+        status: "incomplete",
+        markdown: opts.store.toMarkdown(),
+        reason: "Incomplete review: aborted",
+        destinations,
+        toolCalls,
+      };
+    }
+    if (timedOut) {
+      return {
+        status: "incomplete",
+        markdown: opts.store.toMarkdown(),
+        reason: "Incomplete review: timed out",
+        destinations,
+        toolCalls,
+      };
     }
 
     const ambient = destinations.filter((destination) => {

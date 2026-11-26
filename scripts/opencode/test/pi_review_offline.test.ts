@@ -602,4 +602,112 @@ describe("pi offline structured review", () => {
       await rm(workdir, { recursive: true, force: true });
     }
   });
+
+  test("guarded read denies dot-dot escape and head-supplied symlinks", async () => {
+    const outer = await mkdtemp(join(tmpdir(), "jumi-pi-outer-"));
+    const workdir = join(outer, "work");
+    const { mkdir, symlink } = await import("node:fs/promises");
+    await mkdir(workdir, { recursive: true });
+    await writeFile(join(outer, "secret.txt"), "outside-secret\n");
+    await writeFile(join(workdir, "inside.txt"), "inside-content\n");
+    await symlink(join(outer, "secret.txt"), join(workdir, "link.txt"));
+    try {
+      const seen: Array<{ path: string; denied: boolean }> = [];
+      const tool = createGuardedPiReadTool({
+        cwd: workdir,
+        deniedPrefixes: [],
+        onCall: (path, denied) => seen.push({ path, denied }),
+      });
+      const dotdot = await tool.execute("1", { path: "../secret.txt" }, undefined, undefined, undefined);
+      expect(dotdot.isError).toBe(true);
+      const sibling = await tool.execute("1", { path: "sub/../../secret.txt" }, undefined, undefined, undefined);
+      expect(sibling.isError).toBe(true);
+      const absolute = await tool.execute("1", { path: join(outer, "secret.txt") }, undefined, undefined, undefined);
+      expect(absolute.isError).toBe(true);
+      const link = await tool.execute("1", { path: "link.txt" }, undefined, undefined, undefined);
+      expect(link.isError).toBe(true);
+      expect(link.content.map((part) => part.text).join("\n")).not.toContain("outside-secret");
+      const ok = await tool.execute("1", { path: "inside.txt" }, undefined, undefined, undefined);
+      expect(ok.isError).toBeUndefined();
+      expect(ok.content.map((part) => part.text).join("\n")).toContain("inside-content");
+      expect(seen.filter((call) => call.denied).length).toBeGreaterThanOrEqual(4);
+    } finally {
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("bash denies command substitution smuggled through allowlisted verbs", async () => {
+    const workdir = await tempWorkdir();
+    try {
+      const tool = createGuardedPiBashTool({ cwd: workdir, env: { PATH: "/usr/bin:/bin" } });
+      for (const command of [
+        "echo $(touch pwned.txt)",
+        "echo `touch pwned2.txt`",
+        "echo $(mkdir -p sub/dir)",
+        "echo hi | tee pwned3.txt",
+      ]) {
+        const denied = await tool.execute("1", { command }, undefined, undefined, undefined);
+        expect(denied.isError).toBe(true);
+      }
+      await expect(readFile(join(workdir, "pwned.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(workdir, "pwned2.txt"), "utf8")).rejects.toThrow();
+      const ok = await tool.execute("1", { command: "echo hello" }, undefined, undefined, undefined);
+      expect(ok.isError).toBeUndefined();
+      expect(ok.content.map((part) => part.text).join("\n")).toContain("hello");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("allowed bash runs inside the Landlock sandbox", async () => {
+    const workdir = await tempWorkdir();
+    try {
+      const { runtime, model } = await makeLoopback({
+        steps: [
+          { tool: "bash", args: { command: "echo sandboxed-hello" } },
+          { tool: "jumi_set_verdict", args: { state: "failure", reason: "could not finish: probe" } },
+        ],
+      });
+      const store = changedStore();
+      const result = await runPiReviewAttempt({
+        workdir,
+        prompt: "sandbox probe",
+        store,
+        modelRuntime: runtime,
+        model,
+        timeoutMs: 15_000,
+      });
+      const bashCall = result.toolCalls.find((call) => call.name === "bash");
+      expect(bashCall?.ok).toBe(true);
+      expect(store.hasVerdict()).toBe(true);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("pre-aborted signal fails the attempt without prompting", async () => {
+    const workdir = await tempWorkdir();
+    try {
+      const { runtime, model } = await makeLoopback({
+        steps: [{ tool: "jumi_set_verdict", args: { state: "success" } }],
+      });
+      const controller = new AbortController();
+      controller.abort();
+      const store = changedStore();
+      const result = await runPiReviewAttempt({
+        workdir,
+        prompt: "aborted",
+        store,
+        modelRuntime: runtime,
+        model,
+        abortSignal: controller.signal,
+        timeoutMs: 15_000,
+      });
+      expect(result.status).toBe("incomplete");
+      expect(result.reason).toMatch(/abort/i);
+      expect(store.hasVerdict()).toBe(false);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
 });
