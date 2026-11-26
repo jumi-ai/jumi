@@ -124,6 +124,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      reviewCarry: true,
       workerReviewRules: true,
     });
     expect(narrowed).toEqual(["Alice"]);
@@ -144,6 +145,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      reviewCarry: true,
       workerReviewRules: true,
     });
     expect(widened).toEqual(["alice"]);
@@ -167,6 +169,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      reviewCarry: true,
       workerReviewRules: true,
     });
     expect(effective).toEqual(["carol"]);
@@ -194,6 +197,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        reviewCarry: true,
         workerReviewRules: true,
       })
     ).toBeUndefined();
@@ -232,6 +236,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        reviewCarry: true,
         workerReviewRules: true,
       };
     }
@@ -289,6 +294,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        reviewCarry: true,
         workerReviewRules: true,
       };
     }
@@ -328,6 +334,7 @@ describe("effectiveFollowupIgnoreLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      reviewCarry: true,
       workerReviewRules: true,
     });
     expect(merged).toEqual(["deployer-bot", "repo-bot"]);
@@ -368,6 +375,7 @@ describe("effectiveIgnoreConflictsLabel", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        reviewCarry: true,
         workerReviewRules: true,
       })
     ).toBe("skip-me");
