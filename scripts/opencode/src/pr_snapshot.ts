@@ -147,6 +147,14 @@ export interface PrSnapshot {
   items: FollowUpItems;
   /** `hasFeedback` after the maintainer-only filter, before the round-cap adjustment. */
   hasFeedback: boolean;
+  /**
+   * Head `.jumi.yml` failure for this PR head, when the pull touches the
+   * settings file and the head copy is invalid (or sets `mode: off` where the
+   * base requires the check). Counts as unhandled feedback like a failing
+   * review finding; the worker feedback file carries it plus the merge-off
+   * guidance.
+   */
+  headSettingsFailure?: string | undefined;
   pendingTriggerBody: string;
   pendingLastReview: Comment | undefined;
   requiredContexts: readonly string[] | undefined;
@@ -271,6 +279,35 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
   let hasFeedback = hasUnhandledFollowUpItems(items, followupLatch);
   if (hasFeedback && onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername)) {
     hasFeedback = false;
+  }
+  // An invalid head settings file counts as unhandled feedback like a failing
+  // review finding. The strict check stays (the review already failed); this
+  // gives the worker a path to fix the pull instead of sitting on a terminal
+  // skip. Fail-open: unreadable head or pull files leave today's decision.
+  // Only checked when no other feedback exists so the steady-state read
+  // pattern (and the thunk memoisation tests) stays as today; the worker
+  // re-reads the head file when staging JUMI_FEEDBACK.md, so a head failure
+  // that arrives alongside other feedback is still surfaced there.
+  let headSettingsFailure: string | undefined;
+  if (!hasFeedback) {
+    try {
+      const { invalidHeadSettingsFailure } = await import("./review.ts");
+      const failure = await invalidHeadSettingsFailure({
+        api,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.pr.number,
+        headSha: opts.pr.head.sha,
+        baseBranch: opts.pr.base.ref,
+        log: log ?? (() => undefined),
+      });
+      if (failure) {
+        headSettingsFailure = failure;
+        hasFeedback = true;
+      }
+    } catch {
+      headSettingsFailure = undefined;
+    }
   }
 
   const resolveRequiredCiContexts = memoize(async (): Promise<readonly string[] | undefined> => {
@@ -475,6 +512,7 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
     getLeftToAuthor,
     getSameFinding,
     getStuck,
+    ...(headSettingsFailure ? { headSettingsFailure } : {}),
   };
 }
 
@@ -610,6 +648,26 @@ export async function buildCloserSnapshot(
     hasUnhandledFeedback = hasUnhandledFollowUpItems(items, followupLatch);
     if (hasUnhandledFeedback) {
       maintainerOnlyPending = onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername);
+    }
+    if (!hasUnhandledFeedback) {
+      try {
+        const { invalidHeadSettingsFailure } = await import("./review.ts");
+        const failure = await invalidHeadSettingsFailure({
+          api,
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: opts.pr.number,
+          headSha: opts.pr.head.sha,
+          baseBranch: opts.pr.base.ref,
+          log: log ?? (() => undefined),
+        });
+        if (failure) {
+          hasUnhandledFeedback = true;
+          maintainerOnlyPending = false;
+        }
+      } catch {
+        // Fail-open: keep today's decision.
+      }
     }
   }
   const followUp = followupLatch.round < maxFollowupRounds && hasUnhandledFeedback && !maintainerOnlyPending;
