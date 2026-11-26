@@ -15,6 +15,7 @@ import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import {
+  assessAnswerRoundReview,
   blockingOpenQuestionCountWithInlines,
   buildFeedbackMarkdown,
   CI_PENDING_RETRY_MS,
@@ -26,6 +27,7 @@ import {
   isBlockingQuestionInline,
   isJumiPullReviewFinding,
   isJumiReviewFinding,
+  openMaintainerQuestionsAnyTrailer,
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
   pickLatestJumiReview,
@@ -1082,6 +1084,65 @@ describe("implementFollowUp", () => {
       });
       expect(result.status).not.toBe("skipped");
       expect(openCode).toBe(1);
+    });
+  });
+
+  test("post-cap trusted maintainer answer runs one round past the cap", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const answerReview = makeReview({
+        id: 38024,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?",
+          "<!-- jumi-check: success -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+        state: "APPROVED",
+        commit_id: "headsha",
+      });
+      const api = followupApi({ listPullReviews: async () => [answerReview] });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const logs: string[] = [];
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: (message: string) => {
+          logs.push(message);
+        },
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+      expect(logs.some((line) => line.includes("answer round past cap for kirmanak/demo#127 (comment 55)"))).toBe(true);
     });
   });
 
@@ -6454,6 +6515,164 @@ describe("strict refresh merge-only writer races", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "strict refresh: competing head update" });
+    });
+  });
+});
+
+describe("openMaintainerQuestionsAnyTrailer", () => {
+  const HEAD = "a62c750c0ffee000000000000000000000000000";
+  const sticky = (finding: string, trailer: string) =>
+    ["<!-- jumi-review:kirmanak/demo#127 -->", `Reviewed commit: \`${HEAD}\``, "", finding, trailer].join("\n");
+
+  test("counts a maintainer question under a success trailer", () => {
+    expect(
+      openMaintainerQuestionsAnyTrailer(
+        sticky("src/foo.ts:12: ❓ maintainer: please file it?", "<!-- jumi-check: success -->"),
+        [],
+        "jumi"
+      )
+    ).toBe(1);
+  });
+
+  test("counts a maintainer question under a failure trailer, body plus inline", () => {
+    const review: GiteaPullReview = makeReview({
+      id: 91,
+      body: sticky("src/foo.ts:12: ❓ maintainer: merge now?", "<!-- jumi-check: failure; 1 open question -->"),
+      commit_id: HEAD,
+    });
+    const inline = {
+      id: 500,
+      body: "❓ maintainer: merge now?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+      path: "src/foo.ts",
+      user: makeUser({ login: "jumi" }),
+      pull_request_review_id: 91,
+      resolved: false,
+      resolver: null,
+    } as never;
+    const items = {
+      comments: [],
+      inlines: [],
+      reviews: [],
+      jumiStickies: [],
+      jumiInlines: [inline],
+      jumiReviews: [review],
+      jumiFindingReviews: [review],
+      allReviews: [review],
+    } as unknown as FollowUpItems;
+    expect(assessAnswerRoundReview(items, HEAD, "jumi")).toEqual({
+      foundOnHead: true,
+      hasAnyReview: true,
+      incomplete: false,
+      openCount: 2,
+      reviewSha: HEAD,
+    });
+  });
+
+  test("an incomplete review never grants the round", () => {
+    expect(openMaintainerQuestionsAnyTrailer("half written", [], "jumi")).toBe(0);
+    const items = {
+      comments: [],
+      inlines: [],
+      reviews: [],
+      jumiStickies: [makeComment({ id: 1, body: "half written", user: makeUser({ login: "jumi" }) })],
+      jumiInlines: [],
+      jumiReviews: [],
+      jumiFindingReviews: [],
+      allReviews: [],
+    } as unknown as FollowUpItems;
+    const assessment = assessAnswerRoundReview(items, HEAD, "jumi");
+    expect(assessment.foundOnHead).toBe(false);
+    expect(assessment.openCount).toBe(0);
+    const incompleteReview = makeReview({ id: 93, body: "half written", commit_id: HEAD });
+    const incompleteItems = {
+      comments: [],
+      inlines: [],
+      reviews: [],
+      jumiStickies: [],
+      jumiInlines: [],
+      jumiReviews: [incompleteReview],
+      jumiFindingReviews: [],
+      allReviews: [incompleteReview],
+    } as unknown as FollowUpItems;
+    const incompleteAssessment = assessAnswerRoundReview(incompleteItems, HEAD, "jumi");
+    expect(incompleteAssessment.foundOnHead).toBe(true);
+    expect(incompleteAssessment.incomplete).toBe(true);
+    expect(incompleteAssessment.openCount).toBe(0);
+  });
+
+  test("a review on an older head reports no current-head question", () => {
+    const items = {
+      comments: [],
+      inlines: [],
+      reviews: [],
+      jumiStickies: [
+        makeComment({
+          id: 2,
+          body: sticky("src/foo.ts:12: ❓ maintainer: please file it?", "<!-- jumi-check: success -->"),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+      jumiInlines: [],
+      jumiReviews: [],
+      jumiFindingReviews: [],
+      allReviews: [],
+    } as unknown as FollowUpItems;
+    const assessment = assessAnswerRoundReview(items, "b".repeat(40), "jumi");
+    expect(assessment.foundOnHead).toBe(false);
+    expect(assessment.hasAnyReview).toBe(true);
+  });
+});
+
+describe("post-cap refusal idempotency", () => {
+  test("trusted refusal marks trigger handled so redelivery is comment-already-handled", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = followupApi();
+      const gitRunner: GitRunner = async () => {
+        throw new Error("git should not run");
+      };
+      const logs: string[] = [];
+      const baseOpts = {
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" as const }),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+      };
+      const first = await implementFollowUp(baseOpts);
+      expect(first).toEqual({ status: "skipped", reason: "stuck: too many follow-up rounds" });
+      expect(logs.some((line) => line.includes("post-cap answer refused for kirmanak/demo#127 (comment 55)"))).toBe(
+        true
+      );
+      expect(api.comments.filter((body) => body.includes("Jumi did not act")).length).toBe(1);
+      const latchAfterFirst = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
+      expect(latchAfterFirst.handledCommentIds).toContain(55);
+      const secondLogs: string[] = [];
+      const second = await implementFollowUp({
+        ...baseOpts,
+        logger: (message: string) => {
+          secondLogs.push(message);
+        },
+      });
+      expect(second).toEqual({ status: "skipped", reason: "comment already handled" });
+      expect(api.comments.filter((body) => body.includes("Jumi did not act")).length).toBe(1);
     });
   });
 });

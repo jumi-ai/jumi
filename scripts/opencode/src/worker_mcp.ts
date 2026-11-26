@@ -17,7 +17,7 @@
  *   for this repo), feeding the dependency/blocked path;
  * - `set_handoff(notes)`: notes for the next round, size-capped, never secrets.
  * - `finding_response(finding, status, reason?)`: structured answer to one
- *   blocking finding (`fixed`, or `unchanged` with a reason).
+ *   blocking finding (`fixed`, `unchanged` with a reason, or `needs_maintainer` with a reason).
  *
  * The parent reads the small result store after the run and prefers the tool
  * value over the legacy `JUMI_*.md` file fallback for one transition period.
@@ -267,7 +267,7 @@ export interface WorkerBlockedOn {
 
 export interface WorkerFindingResponse {
   finding: string;
-  status: "fixed" | "unchanged";
+  status: "fixed" | "unchanged" | "needs_maintainer";
   reason: string;
 }
 
@@ -559,7 +559,7 @@ function toolSchemas(opts?: {
     {
       name: "finding_response",
       description:
-        "Answer one reviewer blocking finding in a structured way: fixed, or unchanged with a reason. The answer is recorded against the finding so pushback is a signal rather than free text.",
+        "Answer one reviewer blocking finding in a structured way: fixed, unchanged with a reason, or needs_maintainer with a reason when the only fix would narrow the scope. The answer is recorded against the finding so pushback is a signal rather than free text.",
       inputSchema: {
         type: "object",
         properties: {
