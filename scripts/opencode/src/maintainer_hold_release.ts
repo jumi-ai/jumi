@@ -8,6 +8,7 @@ import {
   pickLatestJumiFinding,
 } from "./followup.ts";
 import { loginInList } from "./followup_webhook.ts";
+import { resolveSettledHoldThreads } from "./hold_resolve.ts";
 import { hasTrustedSenders, type PermissionApi, senderCanSteer } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
@@ -201,6 +202,18 @@ export async function tryReleaseMaintainerHold(opts: {
     log(
       `maintainer hold released for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${assessment.openMaintainers} answered`
     );
+    // Status first, then threads: a resolve failure never undoes the
+    // release. The next wake re-lists the still-open threads and retries.
+    const inlinesToResolve = summaryReview != null || reviewInlines.length > 0 ? reviewInlines : rawInlines;
+    await resolveSettledHoldThreads({
+      api,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: opts.prNumber,
+      inlines: inlinesToResolve,
+      botUsername: opts.botUsername,
+      log,
+    });
     return { outcome: "released", prNumber: opts.prNumber, headSha, openMaintainers: assessment.openMaintainers };
   }
   if (assessment.keepReason === "hold disabled") {
