@@ -94,6 +94,7 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
 
+import { PR_TITLE_ELIGIBLE_FILE } from "./implement.ts";
 import { withInstalledTools } from "./installed_tools.ts";
 import { TOOL_INSTALL_RULE } from "./prompt.ts";
 import { engineExitMessage } from "./util/engine.ts";
@@ -178,17 +179,24 @@ Do not call \`blocked_on\` unless the id is on JUMI_QUEUE.md. Do not commit a bl
 ${IMPLEMENT_FINISH}`;
 }
 
-export function buildFollowupPrompt(runnerType?: string, opts?: { prBodyFenced?: boolean }): string {
+export function buildFollowupPrompt(
+  runnerType?: string,
+  opts?: { prBodyFenced?: boolean; prTitleEligible?: boolean }
+): string {
   // On a maintainer-written body (no Jumi fence) the worker markdown becomes
   // a fenced Jumi section below it, not a full replacement description.
   const addendumLine = opts?.prBodyFenced === false ? `\n${UNFENCED_PR_BODY_ADDENDUM_NOTE}` : "";
+  const titleLine =
+    opts?.prTitleEligible === true
+      ? "\nThis is an adopted pull request (not opened by Jumi) whose commits changed what it does. When the title no longer describes the branch tip, call `set_pr_title` with the new title (one line, at most 255 characters) and the reason."
+      : "";
   return `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
 A transient or infrastructure failure is something to fix when the repo can reasonably make it robust: a retry or wait around a flaky network step, a pinned mirror or version, a cache. Do not rerun CI yourself and do not ask for a rerun; you hold no forge credentials and cannot trigger one. Call \`no_changes\` only for causes outside the repo that are already gone, and say what was checked in the reason.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
 A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).
-${PR_DESCRIPTION_RULE}${addendumLine}
+${PR_DESCRIPTION_RULE}${addendumLine}${titleLine}
 ${WORKER_DONE_WHEN_RULE}
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
@@ -327,15 +335,19 @@ export async function resolveOpenCodePrompt(opts: OpenCodeRunOptions): Promise<s
   if (kind === "follow-up") {
     // JUMI_PR.md is written only when the live body is fenced; its absence
     // means a maintainer-written body, so the worker gets the addendum note
-    // and knows which case it is in.
+    // and knows which case it is in. JUMI_PR_TITLE_ELIGIBLE (written by the
+    // follow-up parent when the PR is eligible for a retitle) decides whether
+    // the `set_pr_title` line is mentioned.
     const fenced = await pathExists(join(opts.workdir, "JUMI_PR.md"));
-    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced ? true : false });
+    const prTitleEligible = await pathExists(join(opts.workdir, PR_TITLE_ELIGIBLE_FILE));
+    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced, prTitleEligible });
   } else if (kind === "conflict") base = buildConflictPrompt(runnerType);
   else if (kind === "implement") base = buildImplementPrompt(runnerType);
   else if (await pathExists(join(opts.workdir, "JUMI_CONFLICT.md"))) base = buildConflictPrompt(runnerType);
   else if (await pathExists(join(opts.workdir, "JUMI_FEEDBACK.md"))) {
     const fenced = await pathExists(join(opts.workdir, "JUMI_PR.md"));
-    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced ? true : false });
+    const prTitleEligible = await pathExists(join(opts.workdir, PR_TITLE_ELIGIBLE_FILE));
+    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced, prTitleEligible });
   } else base = buildImplementPrompt(runnerType);
   return withBoth(base);
 }

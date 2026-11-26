@@ -70,25 +70,29 @@ import {
 } from "./followup_ci_refresh.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
-import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { isEligibleWorkerPR, isJumiPrIdentity, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import { settleFollowUpHold } from "./hold_settlement.ts";
+import { hasJumiCommit } from "./ignore_conflicts.ts";
 import {
   buildFollowupPullRequestBody,
   buildTaskMarkdown,
   confirmProvenancePublication,
   ensureProvenanceIntent,
+  extractOriginalTitle,
   failProvenanceIntent,
   hasJumiPrBodyFence,
   type ImplementOptions,
   jumiPrBodyRegion,
   noteProvenanceRunners,
   PR_DESCRIPTION_FILE,
+  PR_TITLE_ELIGIBLE_FILE,
   provenanceForgeFor,
   replaceJumiPrBodyRegion,
   resolveWorkerPrBody,
   saveWorkerHandoff,
   seedPullRequestDescription,
+  withOriginalTitleMarker,
   workerPublishSecrets,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
@@ -117,6 +121,7 @@ import {
   failOpenLoadFromSnapshot,
   headSettingsFollowUpFeedback,
   isAutoRerunFlakesEnabled,
+  isRetitleAdoptedPrsEnabled,
   isRiskFollowupEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
@@ -175,6 +180,47 @@ export const CI_PENDING_RETRY_MS = 2000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Setting gate for adopted-PR retitles: missing means on, invalid/unreadable means off. */
+export function isRetitleSettingOn(snapshot: SettingsSnapshot): boolean {
+  if (snapshot.state === "loaded") return isRetitleAdoptedPrsEnabled(snapshot.load);
+  // Threw (unreadable) or no-branch: the retitle is a write, so fail closed.
+  return false;
+}
+
+/** Whether the branch carries a commit authored by Jumi's git identity. Fail-closed. */
+export async function hasJumiAuthoredCommit(
+  api: Partial<Pick<IssueApi, "listPullCommits">>,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  botUsername: string
+): Promise<boolean> {
+  const listCommits = (api as { listPullCommits?: unknown }).listPullCommits;
+  if (typeof listCommits !== "function") return false;
+  try {
+    const commits = await (
+      listCommits as (owner: string, repo: string, index: number) => Promise<import("./ports.ts").PullCommit[]>
+    ).call(api, owner, repo, prNumber);
+    return hasJumiCommit(commits, { botUsername });
+  } catch {
+    return false;
+  }
+}
+
+/** Adopted-PR retitle eligibility (item 3): not a Jumi PR, setting on, Jumi commit present. */
+export async function isPrTitleRetitleEligible(
+  api: Partial<Pick<IssueApi, "listPullCommits">>,
+  pr: Pull,
+  opts: { botUsername: string; branchPrefix?: string },
+  snapshot: SettingsSnapshot,
+  owner: string,
+  repo: string
+): Promise<boolean> {
+  if (isJumiPrIdentity(pr, opts.botUsername, opts.branchPrefix)) return false;
+  if (!isRetitleSettingOn(snapshot)) return false;
+  return hasJumiAuthoredCommit(api, owner, repo, pr.number, opts.botUsername);
 }
 
 export type FollowUpResult =
@@ -2427,6 +2473,9 @@ export async function implementFollowUp(
   // and timestamp from the same `getPR` so a body-only requeue never enqueues
   // the stale snapshot with no `prUpdatedAt` (which would cancel a newer
   // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
+  // The original-title marker (`<!-- jumi-original-title: … -->`) is preserved
+  // across refreshes: a fresh `set_pr_body` rewrite keeps the first original.
+  const initialTitle = pr.title;
   const refreshPullRequestBody = async (
     description: string | null,
     remaining?: readonly string[] | null | undefined,
@@ -2442,18 +2491,18 @@ export async function implementFollowUp(
       const liveHeadSha = live.head?.sha ?? fallback;
       const liveUpdatedAt = typeof live.updated_at === "string" && live.updated_at ? live.updated_at : undefined;
       const seen = { headSha: liveHeadSha, ...(liveUpdatedAt ? { prUpdatedAt: liveUpdatedAt } : {}) };
-      const body = replaceJumiPrBodyRegion(
+      const built = buildFollowupPullRequestBody(
+        issueNumber,
+        description,
         live.body,
-        buildFollowupPullRequestBody(
-          issueNumber,
-          description,
-          live.body,
-          runner,
-          workerPublishSecrets(loop.auth.token, jobChain),
-          followupConventions.closingKeyword,
-          remaining
-        )
+        runner,
+        workerPublishSecrets(loop.auth.token, jobChain),
+        followupConventions.closingKeyword,
+        remaining
       );
+      const existingMarker = extractOriginalTitle(live.body);
+      const inner = existingMarker !== undefined ? withOriginalTitleMarker(built, existingMarker) : built;
+      const body = replaceJumiPrBodyRegion(live.body, inner);
       if (body === live.body) {
         log("PR body not refreshed: identical text");
         return { changed: false, ...seen };
@@ -2464,6 +2513,90 @@ export async function implementFollowUp(
       log(`PR body not refreshed: forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
       return { changed: false, headSha: fallback };
     }
+  };
+
+  // Adopted-PR retitle next to the body refresh (item 4). The recorded
+  // `set_pr_title` applies only when the PR is not Jumi's, the
+  // `retitle_adopted_prs` setting is on, and the branch carries a Jumi commit.
+  // Re-reads the live PR first: a person-edited title skips, an identical
+  // title skips, a forge error is logged and never fails the round. The first
+  // retitle records the original title in a hidden marker inside the Jumi
+  // fenced section; later refreshes preserve it and a second retitle never
+  // replaces the first original.
+  const refreshPullRequestTitle = async (
+    recordedTitle: string | null | undefined,
+    fallbackHeadSha?: string
+  ): Promise<{ changed: boolean }> => {
+    const fallback = fallbackHeadSha || pr.head.sha;
+    void fallback;
+    if (recordedTitle == null || !recordedTitle.trim()) {
+      log("worker result: pr_title missing");
+      return { changed: false };
+    }
+    const trimmed = recordedTitle.trim();
+    if (isJumiPrIdentity(pr, opts.botUsername, followupPrefix)) {
+      log("worker result: pr_title skipped (jumi PR)");
+      return { changed: false };
+    }
+    if (!isRetitleSettingOn(settingsSnapshot)) {
+      log("worker result: pr_title skipped (setting off)");
+      return { changed: false };
+    }
+    if (!(await hasJumiAuthoredCommit(opts.api, owner, repo, pr.number, opts.botUsername))) {
+      log("worker result: pr_title skipped (no Jumi commit)");
+      return { changed: false };
+    }
+    const updateTitle = (opts.api as { updatePullRequestTitle?: unknown }).updatePullRequestTitle;
+    if (typeof updateTitle !== "function") {
+      log("worker result: pr_title skipped (no title API)");
+      return { changed: false };
+    }
+    let live: Pull;
+    try {
+      live = await opts.api.getPR(owner, repo, pr.number);
+    } catch (err) {
+      log(`worker result: pr_title forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+      return { changed: false };
+    }
+    if (live.title !== initialTitle) {
+      log("worker result: pr_title skipped (live title changed)");
+      return { changed: false };
+    }
+    if (trimmed === live.title) {
+      log("worker result: pr_title skipped (identical)");
+      return { changed: false };
+    }
+    try {
+      await (updateTitle as (owner: string, repo: string, index: number, title: string) => Promise<Pull>).call(
+        opts.api,
+        owner,
+        repo,
+        pr.number,
+        trimmed
+      );
+    } catch (err) {
+      log(`worker result: pr_title forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+      return { changed: false };
+    }
+    log("worker result: pr_title from tool");
+    // Record the original title once. A second retitle keeps the first original.
+    try {
+      const after = await opts.api.getPR(owner, repo, pr.number);
+      if (extractOriginalTitle(after.body) === undefined) {
+        const region = jumiPrBodyRegion(after.body);
+        const markerInner =
+          region !== undefined
+            ? withOriginalTitleMarker(region, initialTitle)
+            : withOriginalTitleMarker("", initialTitle);
+        const nextBody = replaceJumiPrBodyRegion(after.body, markerInner);
+        if (nextBody !== after.body) {
+          await opts.api.updatePullRequestBody(owner, repo, pr.number, nextBody);
+        }
+      }
+    } catch (err) {
+      log(`worker result: pr_title marker not written: ${errorMessage(err)}`);
+    }
+    return { changed: true };
   };
 
   // A body-only round never pushes, so GitHub `edited` never wakes the
@@ -2509,10 +2642,22 @@ export async function implementFollowUp(
   // in-memory state and fails open when the model never calls it.
   // `prBodyFenced` tells the `set_pr_body` result which case the worker is
   // in: on a maintainer-written body its markdown becomes a fenced addendum.
+  // `set_pr_title` is offered only when the PR is eligible for a retitle
+  // (adopted, setting on, Jumi commit present); otherwise the tool is hidden
+  // and the worker prompt does not mention it.
+  const prTitleEligibleUpFront = await isPrTitleRetitleEligible(
+    opts.api,
+    pr,
+    { botUsername: opts.botUsername, branchPrefix: followupPrefix },
+    settingsSnapshot,
+    owner,
+    repo
+  );
   let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({
     store: workerStore,
     prBodyFenced: hasJumiPrBodyFence(pr.body),
+    prTitleEligible: prTitleEligibleUpFront,
   });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let followUpResult: FollowUpResult;
@@ -2900,12 +3045,37 @@ export async function implementFollowUp(
         runner = undefined;
         await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
+        const syncPrTitleEligibility = async (): Promise<boolean> => {
+          const eligible = await isPrTitleRetitleEligible(
+            opts.api,
+            pr,
+            { botUsername: opts.botUsername, branchPrefix: followupPrefix },
+            settingsSnapshot,
+            owner,
+            repo
+          );
+          try {
+            if (eligible) await writeFile(join(worktree, PR_TITLE_ELIGIBLE_FILE), "eligible\n");
+            else await rm(join(worktree, PR_TITLE_ELIGIBLE_FILE), { force: true }).catch(() => undefined);
+          } catch {
+            // Best-effort prompt signal; the MCP gate still decides.
+          }
+          try {
+            workerServer.setPrTitleEligible?.(eligible);
+          } catch {
+            // Best-effort.
+          }
+          return eligible;
+        };
+        await syncPrTitleEligibility();
+
         const runEngine = async (
           label: string,
           extra?: { continueSession?: boolean }
         ): Promise<{ status: "skipped"; reason: string } | undefined> => {
           throwIfAborted(opts.abortSignal);
           workerStore = rotateResultScope(log, workerStore, workerServer);
+          await syncPrTitleEligibility();
           log(label);
           const runOpts: EngineRunOptions = {
             model: opts.model,
@@ -3173,6 +3343,7 @@ export async function implementFollowUp(
               if (budget.exhausted.length > 0) parts.push(rerunExhaustedComment(budget.exhausted));
               for (const failure of failures) parts.push(rerunFailedComment([failure.check], failure.error));
               const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
+              await refreshPullRequestTitle(workerStore.getPrTitle(), sha || pr.head.sha);
               await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
               await sticky(parts.join("\n\n"), pr.number);
               await recordAttempt(sha || pr.head.sha);
@@ -3197,6 +3368,7 @@ export async function implementFollowUp(
                 return { status: "skipped", reason };
               }
               const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
+              await refreshPullRequestTitle(workerStore.getPrTitle(), sha || pr.head.sha);
               await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
               await sticky(`${noChangesSticky}\n\n${rerunExhaustedComment(budget.exhausted)}`, pr.number);
               await recordAttempt(sha || pr.head.sha);
@@ -3224,6 +3396,7 @@ export async function implementFollowUp(
             return { status: "skipped", reason };
           }
           const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
+          await refreshPullRequestTitle(workerStore.getPrTitle(), sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
           await sticky(noChangesSticky, pr.number);
           await recordAttempt(sha || pr.head.sha);
@@ -3290,6 +3463,7 @@ export async function implementFollowUp(
         await persistConflictAttempt(mergeResult);
 
         await refreshPullRequestBody(prFileContents, prRemaining);
+        await refreshPullRequestTitle(workerStore.getPrTitle());
 
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
         await confirmProvenancePublication(

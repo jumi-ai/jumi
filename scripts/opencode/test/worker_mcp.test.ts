@@ -11,6 +11,7 @@ import {
   MAX_WORKER_PR_BODY_CHARS,
   MAX_WORKER_PR_REMAINING_ITEM_CHARS,
   MAX_WORKER_PR_REMAINING_ITEMS,
+  MAX_WORKER_PR_TITLE_CHARS,
   MAX_WORKER_SKIP_REASON_CHARS,
   openCodeWorkerMcpEntry,
   parseBlockedOnRef,
@@ -23,6 +24,7 @@ import {
   validateNoChangesReason,
   validatePrBody,
   validatePrRemaining,
+  validatePrTitle,
   validateSkipReason,
   WORKER_HANDOFF_MAX_BYTES,
   WORKER_MCP_SERVER_NAME,
@@ -143,9 +145,9 @@ describe("worker MCP server", () => {
     }
   });
 
-  test("tool list names all five worker tools", async () => {
+  test("tool list names all worker tools", async () => {
     expect(new Set(WORKER_MCP_TOOL_NAMES)).toEqual(
-      new Set(["blocked_on", "finding_response", "no_changes", "set_handoff", "set_pr_body", "skip"])
+      new Set(["blocked_on", "finding_response", "no_changes", "set_handoff", "set_pr_body", "set_pr_title", "skip"])
     );
     const store = new WorkerResultStore();
     const server = await startWorkerMcpServer({ store, token: "tok" });
@@ -160,6 +162,28 @@ describe("worker MCP server", () => {
       expect(names).toEqual(["blocked_on", "finding_response", "no_changes", "set_handoff", "set_pr_body", "skip"]);
     } finally {
       server.close();
+    }
+    const eligibleStore = new WorkerResultStore();
+    const eligibleServer = await startWorkerMcpServer({ store: eligibleStore, token: "tok", prTitleEligible: true });
+    try {
+      const res = await fetch(eligibleServer.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: "Bearer tok" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      const payload = (await res.json()) as { result?: { tools?: Array<{ name?: string }> } };
+      const names = (payload.result?.tools ?? []).map((t) => t.name).sort();
+      expect(names).toEqual([
+        "blocked_on",
+        "finding_response",
+        "no_changes",
+        "set_handoff",
+        "set_pr_body",
+        "set_pr_title",
+        "skip",
+      ]);
+    } finally {
+      eligibleServer.close();
     }
   });
 
@@ -344,6 +368,59 @@ describe("worker MCP server", () => {
       }
     } finally {
       closedServer.close();
+    }
+    const closedTitle = new WorkerResultStore();
+    const closedTitleServer = await startWorkerMcpServer({
+      store: closedTitle,
+      token: "tok",
+      prTitleEligible: true,
+    });
+    closedTitle.close();
+    try {
+      const out = await probeWorkerMcpServer(closedTitleServer.url, "tok", "set_pr_title", {
+        title: "New title",
+      });
+      expect(out.ok).toBe(false);
+      expect(out.text).toMatch(/spawn ended/);
+    } finally {
+      closedTitleServer.close();
+    }
+  });
+
+  test("set_pr_title round-trips, validates, and gates on eligibility", async () => {
+    expect(validatePrTitle(undefined).ok).toBe(false);
+    expect(validatePrTitle("   ").ok).toBe(false);
+    expect(validatePrTitle("one\ntwo").ok).toBe(false);
+    expect(validatePrTitle("New title").ok).toBe(true);
+    expect(validatePrTitle("x".repeat(MAX_WORKER_PR_TITLE_CHARS + 1)).ok).toBe(false);
+    const gated = new WorkerResultStore();
+    const gatedServer = await startWorkerMcpServer({ store: gated, token: "tok" });
+    try {
+      const out = await probeWorkerMcpServer(gatedServer.url, "tok", "set_pr_title", { title: "New title" });
+      expect(out.ok).toBe(false);
+      expect(gated.hasPrTitle()).toBe(false);
+    } finally {
+      gatedServer.close();
+    }
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok", prTitleEligible: true });
+    try {
+      const bad = await probeWorkerMcpServer(server.url, "tok", "set_pr_title", { title: "" });
+      expect(bad.ok).toBe(false);
+      const multi = await probeWorkerMcpServer(server.url, "tok", "set_pr_title", { title: "a\nb" });
+      expect(multi.ok).toBe(false);
+      const out = await probeWorkerMcpServer(server.url, "tok", "set_pr_title", {
+        title: "Pin to v11.3.118",
+        reason: "commits changed scope",
+      });
+      expect(out.ok).toBe(true);
+      expect(store.getPrTitle()).toBe("Pin to v11.3.118");
+      expect(store.hasPrTitle()).toBe(true);
+      const second = await probeWorkerMcpServer(server.url, "tok", "set_pr_title", { title: "Second title" });
+      expect(second.ok).toBe(true);
+      expect(store.getPrTitle()).toBe("Second title");
+    } finally {
+      server.close();
     }
   });
 
