@@ -10,7 +10,7 @@ import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
-const UNKNOWN_KEY_FAILURE = '.jumi.yml is invalid: unknown key "verify" (did you mean "review_exclude"?)';
+const UNKNOWN_KEY_FAILURE = '.jumi.yml is invalid: unknown key "bogus_key"';
 
 function reviewLeaseApi(overrides: Parameters<typeof makeReviewApi>[0] = {}) {
   const comments: string[] = [];
@@ -46,7 +46,7 @@ describe("invalid head .jumi.yml routes to follow-up (#915)", () => {
     // The strict check is unchanged: the head failure names the parser error.
     const failure = await invalidHeadSettingsFailure({
       api: {
-        getRepoFile: async () => ({ found: true, content: "verify: true\n" }),
+        getRepoFile: async () => ({ found: true, content: "bogus_key: true\n" }),
       },
       owner: "kirmanak",
       repo: "demo",
@@ -57,7 +57,7 @@ describe("invalid head .jumi.yml routes to follow-up (#915)", () => {
       log: () => undefined,
     });
     expect(failure).toContain(".jumi.yml is invalid:");
-    expect(failure).toContain('unknown key "verify"');
+    expect(failure).toContain('unknown key "bogus_key"');
     expect(isHeadSettingsFailureReason(failure)).toBe(true);
 
     const store = new MemoryReviewJobStore();
@@ -97,7 +97,7 @@ describe("invalid head .jumi.yml routes to follow-up (#915)", () => {
         ],
         getRepoFile: async () => {
           headReads++;
-          return { found: true, content: "verify: true\n" };
+          return { found: true, content: "bogus_key: true\n" };
         },
       },
       owner: "kirmanak",
@@ -184,7 +184,7 @@ describe("invalid head .jumi.yml routes to follow-up (#915)", () => {
     } as unknown as Parameters<typeof buildFollowUpSnapshot>[0]["pr"];
     const api = {
       getRepoFile: async (_owner: string, _repo: string, _path: string, ref: string) => {
-        if (ref === "headsha") return { found: true, content: "verify: true\n" };
+        if (ref === "headsha") return { found: true, content: "bogus_key: true\n" };
         return { found: false };
       },
       listIssueComments: async () => [],
