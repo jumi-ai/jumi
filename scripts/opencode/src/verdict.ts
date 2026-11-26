@@ -734,6 +734,52 @@ export function describeSuccessReason(suggestions: number, maintainerQuestions: 
   return parts.join(", ");
 }
 
+/** From a PR's third review on, new unproven 🟡 risks are advisory, never blocking. */
+export const THIRD_REVIEW_ADVISORY_ROUND = 3;
+
+/**
+ * Structural proof check for a blocking finding body (never a model-rated
+ * score). A finding carries proof when it names a concrete failure scenario
+ * (`Proof:` with text after the colon) plus either a `file:line` reference
+ * or a command with its output (a fenced block or a `$ ` command line after
+ * the `Proof:` marker).
+ */
+export function hasFindingProof(body: string): boolean {
+  if (!body || !/proof\s*:\s*\S/i.test(body)) return false;
+  const idx = body.search(/proof\s*:/i);
+  const tail = idx >= 0 ? body.slice(idx) : body;
+  if (/```/.test(tail)) return true;
+  if (/^\s*\$ /m.test(tail)) return true;
+  if (/[\w.~/+-]+\.[A-Za-z0-9-]+\s*:\s*\d+/.test(tail)) return true;
+  return false;
+}
+
+/** Count the `N non-blocking risk(s)` fragment in a status reason. Never consults model prose. */
+export function trailerNonBlockingRiskCount(reason: string): number {
+  const match = /\b(\d+)\s+non-blocking risks?\b/i.exec(reason);
+  if (!match) return 0;
+  const n = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+/** Canonical status fragment for risks that publish but do not block. */
+function describeNonBlockingRisksReason(count: number): string {
+  return `${count} non-blocking risk${count === 1 ? "" : "s"}`;
+}
+
+/** Canonical success reason with advisory risks: suggestions, non-blocking risks, maintainer questions. */
+export function describeSuccessWithNonBlockingRisks(
+  suggestions: number,
+  nonBlockingRisks: number,
+  maintainerQuestions: number
+): string {
+  const parts: string[] = [];
+  if (suggestions > 0) parts.push(describeSuggestionsReason(suggestions));
+  if (nonBlockingRisks > 0) parts.push(describeNonBlockingRisksReason(nonBlockingRisks));
+  if (maintainerQuestions > 0) parts.push(describeMaintainerQuestionReason(maintainerQuestions));
+  return parts.join(", ");
+}
+
 /** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
 export function formatSuggestionCapNote(dropped: number, cap: number = MAX_SUGGESTION_FINDINGS): string {
   return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${cap}).`;

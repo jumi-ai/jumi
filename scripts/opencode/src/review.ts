@@ -82,6 +82,7 @@ import {
   isMaintainerQuestionsHoldEnabled,
   isReviewCarryEnabled,
   isReviewDraftsEnabled,
+  isRiskBlockingEnabled,
   isSuggestionFollowupEnabled,
   isSuggestionHoldEnabled,
   loadEffectiveBlockingQuestionAuthors,
@@ -95,6 +96,7 @@ import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.t
 import { attachCarryNote, tryCarryReview } from "./review_carry.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
+import { parseBlockingFindings, partitionRisksForAdvisoryRule } from "./review_findings.ts";
 import { recordBlockingFindingOutcomes, resolveFindingWriterRunner } from "./review_findings_publish.ts";
 import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
@@ -161,6 +163,7 @@ import {
   countSuggestionFindings,
   describeBlockingReason,
   describeSuccessReason,
+  describeSuccessWithNonBlockingRisks,
   findingFingerprint,
   hasBlockingFindings,
   hasColonEndingFinding,
@@ -175,6 +178,7 @@ import {
   parseReviewFindings,
   parseReviewOutput,
   stripFindingLines,
+  THIRD_REVIEW_ADVISORY_ROUND,
 } from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
@@ -1886,23 +1890,58 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // while the store holds two open bugs (or only a stale summary) would
   // otherwise fail the check with a count that matches no open finding.
   const publishedBugs = countBugFindings(comment, { singleFilePath });
-  const publishedRisks = countRiskFindings(comment, { singleFilePath });
+  const publishedRisksTotal = countRiskFindings(comment, { singleFilePath });
   const publishedSuggestions = countSuggestionFindings(comment, { singleFilePath });
-  const publishedFailureReason = describeBlockingReason(publishedBugs, publishedRisks);
+  // Per-repo choice of what blocks: `blocking_risks: false` leaves every 🟡
+  // advisory (still published, still a follow-up candidate). Otherwise every
+  // 🟡 blocks until the third-review rule below downgrades the new unproven
+  // ones. 🔴 always blocks.
+  const risksBlock = isRiskBlockingEnabled(settingsForHold ?? { state: "missing" });
+  const reviewRound = Math.max(1, Math.floor(opts.reviewRound ?? 1));
+  let blockingRisks = risksBlock ? publishedRisksTotal : 0;
+  let nonBlockingRisks = risksBlock ? 0 : publishedRisksTotal;
+  if (risksBlock && publishedRisksTotal > 0 && reviewRound >= THIRD_REVIEW_ADVISORY_ROUND) {
+    const currRisks = parseBlockingFindings(comment, { singleFilePath }).filter(
+      (finding) => finding.severity === "risk"
+    );
+    const prevText = (opts.previousFindings ?? []).join("\n\n");
+    const prevBlocking = prevText ? parseBlockingFindings(prevText, { singleFilePath }) : [];
+    const split = partitionRisksForAdvisoryRule(currRisks, prevBlocking);
+    blockingRisks = split.blocking.length;
+    nonBlockingRisks = split.advisory.length;
+    if (split.advisory.length > 0) {
+      logDiagnostic(log, "review_risk_advisory", {
+        review: reviewLabel,
+        round: reviewRound,
+        advisory: split.advisory.length,
+        blocking: split.blocking.length,
+      });
+    }
+  }
+  const publishedFailureReason = describeBlockingReason(publishedBugs, blockingRisks);
   // The success trailer names open maintainer questions next to suggestions
   // when the maintainer hold applies, built from the published findings like
   // the suggestion count is. The status description stays the pending hold
   // note; the failure trailer stays blocking-only.
   const publishedMaintainers = countMaintainerQuestionFindings(comment, { singleFilePath });
   const countedMaintainers = isMaintainerQuestionsHoldEnabled(settingsForHold) ? publishedMaintainers : 0;
-  const publishedSuccessReason = describeSuccessReason(publishedSuggestions, countedMaintainers);
+  const publishedSuccessReason =
+    nonBlockingRisks > 0
+      ? describeSuccessWithNonBlockingRisks(publishedSuggestions, nonBlockingRisks, countedMaintainers)
+      : describeSuccessReason(publishedSuggestions, countedMaintainers);
   const effectiveVerdict =
     blockingQuestions > 0
       ? { state: "failure" as const, description: openQuestionDescription(blockingQuestions), incomplete: false }
       : parsed.verdict.incomplete
         ? parsed.verdict
         : parsed.verdict.state === "failure"
-          ? { state: "failure" as const, description: publishedFailureReason, incomplete: false }
+          ? publishedBugs > 0 || blockingRisks > 0
+            ? { state: "failure" as const, description: publishedFailureReason, incomplete: false }
+            : {
+                state: "success" as const,
+                description: publishedSuccessReason || "No blocking issues",
+                incomplete: false as const,
+              }
           : {
               state: "success" as const,
               description: publishedSuccessReason || "No blocking issues",
@@ -1925,8 +1964,14 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const modelReason = parsed.checkLine ? (parseCheckLine(parsed.checkLine)?.reason ?? "") : "";
   const needsMaintainerTrailer =
     countedMaintainers > 0 && !parsed.verdict.incomplete && parsed.verdict.state === "success";
+  // A downgrade (failure with only advisory risks) or a bare trailer on a
+  // success review that now names non-blocking risks must rebuild the trailer
+  // so the posted check matches the effective verdict.
+  const needsDowngradeTrailer =
+    !parsed.verdict.incomplete &&
+    (effectiveVerdict.state !== parsed.verdict.state || (effectiveVerdict.state === "success" && nonBlockingRisks > 0));
   const publishedCheckLine =
-    modelReason.trim() !== "" || needsMaintainerTrailer
+    modelReason.trim() !== "" || needsMaintainerTrailer || needsDowngradeTrailer
       ? buildCheckTrailer(effectiveVerdict.state, effectiveVerdict.description)
       : parsed.checkLine;
   if (blockingQuestions > 0) {

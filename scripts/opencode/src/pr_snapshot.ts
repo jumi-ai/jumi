@@ -35,6 +35,7 @@ import {
   effectiveIgnoreConflictsLabel,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
+  isRiskFollowupEnabled,
   isSuggestionFollowupEnabled,
   type SettingsSnapshot,
 } from "./repo_settings.ts";
@@ -88,6 +89,7 @@ interface PrSnapshotPolicy {
   maxFollowupRounds: number;
   maxConflictRounds: number;
   followupOnSuggestions: boolean;
+  followupOnRisks: boolean;
 }
 
 interface PrSnapshotLists {
@@ -231,6 +233,7 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
     maxFollowupRounds: effectiveFollowupRounds(opts.deployment.maxFollowupRounds, failOpen),
     maxConflictRounds: effectiveConflictRounds(opts.deployment.maxConflictRounds, failOpen),
     followupOnSuggestions: isSuggestionFollowupEnabled(failOpen),
+    followupOnRisks: isRiskFollowupEnabled(failOpen),
   };
   const lists: PrSnapshotLists = {
     blockingAuthors: effectiveBlockingQuestionAuthors(opts.deployment.blockingQuestionAuthors, failOpen),
@@ -249,7 +252,8 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
     opts.pr.head.sha,
     opts.pr.user?.login,
     lists.blockingAuthors,
-    policy.followupOnSuggestions
+    policy.followupOnSuggestions,
+    policy.followupOnRisks
   );
   const items = await collectFollowUpItems(
     api,
@@ -549,6 +553,7 @@ export async function buildCloserSnapshot(
   const trusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpen);
   const ignoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, failOpen);
   const followupOnSuggestions = isSuggestionFollowupEnabled(failOpen);
+  const followupOnRisks = isRiskFollowupEnabled(failOpen);
   const ciGateWait = effectiveCiGateWait(failOpen);
   const ignoreAuthors = opts.ignoreConflictsAuthors ?? ignoreConflictsAuthorsFromSnapshot(settings);
   const ignoreAuthorsUnreadable = ignoreAuthors === undefined;
@@ -598,6 +603,7 @@ export async function buildCloserSnapshot(
         prAuthor: opts.pr.user?.login,
         ...(blockingAuthors ? { blockingQuestionAuthors: blockingAuthors } : {}),
         ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
+        ...(followupOnRisks ? {} : { followupOnRisks: false as const }),
       },
       trusted
     );

@@ -1,5 +1,5 @@
 import { isSameSuggestion, runnerLabelForStamp } from "./review_suggestions.ts";
-import { findingFingerprint, parseReviewFindings, type ReviewFinding } from "./verdict.ts";
+import { findingFingerprint, hasFindingProof, parseReviewFindings, type ReviewFinding } from "./verdict.ts";
 
 /**
  * Per-blocking-finding outcome ledger (issue #902).
@@ -166,6 +166,33 @@ export function classifyBlockingFindings(
       fingerprint,
     };
   });
+}
+
+/**
+ * Split the current review's 🟡 risks into blocking vs advisory for the
+ * third-review rule. A risk still blocks when it carries structural proof
+ * (`hasFindingProof`) or repeats an earlier finding the follow-up didn't
+ * address (same-file similar-text match against any previous blocking
+ * finding). A new risk without proof is advisory: still published, never a
+ * status failure. Callers apply this only when `reviewRound >=
+ * THIRD_REVIEW_ADVISORY_ROUND`; 🔴 findings never pass through here.
+ */
+export function partitionRisksForAdvisoryRule(
+  currentRisks: readonly BlockingFinding[],
+  previousBlocking: readonly BlockingFinding[]
+): { blocking: BlockingFinding[]; advisory: BlockingFinding[] } {
+  const blocking: BlockingFinding[] = [];
+  const advisory: BlockingFinding[] = [];
+  for (const curr of currentRisks) {
+    if (hasFindingProof(curr.body)) {
+      blocking.push(curr);
+      continue;
+    }
+    const repeated = previousBlocking.some((prev) => isSameBlockingFinding(prev, curr));
+    if (repeated) blocking.push(curr);
+    else advisory.push(curr);
+  }
+  return { blocking, advisory };
 }
 
 /** One ledger row per previous-review blocking finding. */
