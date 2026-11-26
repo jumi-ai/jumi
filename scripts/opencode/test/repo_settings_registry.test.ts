@@ -211,7 +211,7 @@ describe("repo_settings registry", () => {
   });
 
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(37);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(38);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);
