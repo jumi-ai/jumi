@@ -426,7 +426,7 @@ describe("Go transport wrapper enforces headers at the provider boundary", () =>
     }
   });
 
-  test("an explicit session header is respected; a missing session id adds none", async () => {
+  test("loop session id wins over a pre-set header; a header alone is validated; missing adds none", async () => {
     const captured: Array<Record<string, unknown>> = [];
     const inner = {
       stream: async (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
@@ -437,10 +437,14 @@ describe("Go transport wrapper enforces headers at the provider boundary", () =>
     };
     const wrapped = withPiGoTransport(inner);
     await wrapped.stream({}, {}, { sessionId: "agent-session-1", headers: { [PI_GO_SESSION_HEADER]: "keep-me" } });
+    await wrapped.stream({}, {}, { headers: { [PI_GO_SESSION_HEADER]: "keep-me" } });
     await wrapped.stream({}, {}, {});
-    expect((captured[0]!.headers as Record<string, string>)[PI_GO_SESSION_HEADER]).toBe("keep-me");
+    expect((captured[0]!.headers as Record<string, string>)[PI_GO_SESSION_HEADER]).toBe("agent-session-1");
     expect((captured[0]!.headers as Record<string, string>)["User-Agent"]).toBe(PI_GO_USER_AGENT);
-    expect((captured[1]!.headers as Record<string, string>)[PI_GO_SESSION_HEADER]).toBeUndefined();
+    expect((captured[1]!.headers as Record<string, string>)[PI_GO_SESSION_HEADER]).toBe("keep-me");
+    expect((captured[2]!.headers as Record<string, string>)[PI_GO_SESSION_HEADER]).toBeUndefined();
+    expect(() => wrapped.stream({}, {}, { sessionId: "../repo" })).toThrow();
+    expect(() => wrapped.stream({}, {}, { headers: { [PI_GO_SESSION_HEADER]: "../repo" } })).toThrow();
   });
 });
 

@@ -299,11 +299,13 @@ export function buildPiGoStreamOptions(input: PiGoStreamOptionsInput): {
 /**
  * Wrap a provider API surface (for example the `opencode-go` entry from
  * `opencodeGoProvider()`) so every request carries the Go routing header
- * from the loop's stable session id plus the actual-agent identity. An
- * explicitly set `x-opencode-session` is respected (Console also recognizes
+ * from the loop's stable session id plus the actual-agent identity. The
+ * loop's `sessionId` is the single source of truth: when present it is
+ * validated and overwrites any pre-set `x-opencode-session` so affinity
+ * stays stable for the whole conversation. When no loop id is present, a
+ * pre-set header is validated in place and kept (Console also recognizes
  * Pi's native session header); the agent User-Agent and client attribution
- * are enforced. The loop's `sessionId` passes through untouched, so affinity
- * stays stable for the whole conversation.
+ * are always enforced.
  */
 export function withPiGoTransport<TStreams>(streams: TStreams): TStreams {
   const source = streams as {
@@ -317,8 +319,15 @@ export function withPiGoTransport<TStreams>(streams: TStreams): TStreams {
       const current = { ...(options ?? {}) };
       const headers = { ...((current.headers as Record<string, string> | undefined) ?? {}) };
       const sessionId = current.sessionId;
-      if (typeof sessionId === "string" && sessionId && !hasHeader(headers, PI_GO_SESSION_HEADER)) {
+      if (typeof sessionId === "string" && sessionId) {
+        assertPiGoSessionId(sessionId);
+        for (const key of Object.keys(headers)) {
+          if (key.toLowerCase() === PI_GO_SESSION_HEADER) delete headers[key];
+        }
         headers[PI_GO_SESSION_HEADER] = sessionId;
+      } else {
+        const existing = Object.entries(headers).find(([key]) => key.toLowerCase() === PI_GO_SESSION_HEADER);
+        if (existing) assertPiGoSessionId(existing[1]);
       }
       headers["User-Agent"] = formatUserAgent(identity);
       const attribution = getAttributionHeaders({ provider: PI_GO_PROVIDER_ID, baseUrl: PI_GO_BASE_URL }, identity);
@@ -331,11 +340,6 @@ export function withPiGoTransport<TStreams>(streams: TStreams): TStreams {
     ...(source.stream ? { stream: wrap(source.stream) } : {}),
     ...(source.streamSimple ? { streamSimple: wrap(source.streamSimple) } : {}),
   } as TStreams;
-}
-
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  const expected = name.toLowerCase();
-  return Object.keys(headers).some((key) => key.toLowerCase() === expected);
 }
 
 // --- Error contract (shared kinds; entitlement is denied, never quota) ---
@@ -397,7 +401,6 @@ export interface PiGoChatCompletionInput {
   apiKey: string | undefined;
   /** Opaque conversation id. Invalid fails closed with no fetch. */
   sessionId: string;
-  model?: string;
   messages?: Array<{ role: string; content: string }>;
   fetchImpl?: typeof fetch;
   identity?: ClientIdentity;
@@ -423,7 +426,7 @@ export async function postPiGoChatCompletion(input: PiGoChatCompletionInput): Pr
     "content-type": "application/json",
   };
   const body = JSON.stringify({
-    model: input.model ?? PI_GO_MODEL_ID,
+    model: PI_GO_MODEL_ID,
     messages: input.messages ?? [{ role: "user", content: "hi" }],
   });
   let response: Response;
