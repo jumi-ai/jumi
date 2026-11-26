@@ -457,23 +457,198 @@ export function createGuardedPiWorkerWriteTool(opts: {
 
 // --- Guarded bash with destination guard, owned group, bound output/time ---
 
-const PI_WORKER_GIT_WRITE_RE = /git\s+(push|commit)\b/i;
+const PI_WORKER_GIT_WRITE_SUBCOMMANDS = new Set(["push", "commit", "fetch", "pull", "clone", "ls-remote"]);
+const PI_WORKER_NETWORK_COMMANDS = new Set([
+  "curl",
+  "wget",
+  "ssh",
+  "scp",
+  "sftp",
+  "ftp",
+  "lftp",
+  "rsync",
+  "nc",
+  "ncat",
+  "socat",
+  "telnet",
+  "aria2c",
+  "axel",
+  "dig",
+  "nslookup",
+]);
+const PI_WORKER_NETWORK_SCRIPT_RE = /urllib|requests|http\.client|socket|fetch\(|axios|XMLHttpRequest/i;
 const PI_WORKER_SUBSTITUTION_RE = /\$\(|`|<\([^)]*\)/;
 
-function piWorkerBashDenied(command: string): boolean {
-  if (PI_WORKER_SUBSTITUTION_RE.test(command)) return true;
-  if (PI_WORKER_GIT_WRITE_RE.test(command)) return true;
+interface PiWorkerShellWord {
+  text: string;
+  quoted: boolean;
+}
+
+/** Split a shell command into words, tracking quoting so `"git push"` stays data. */
+function piWorkerShellWords(command: string): PiWorkerShellWord[] {
+  const out: PiWorkerShellWord[] = [];
+  let current = "";
+  let currentQuoted = false;
+  let quote: "'" | '"' | null = null;
+  const flush = () => {
+    if (current) {
+      out.push({ text: current, quoted: currentQuoted });
+      current = "";
+      currentQuoted = false;
+    }
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === "\\" && i + 1 < command.length) current += command[++i];
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch as "'" | '"';
+      currentQuoted = true;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      current += command[++i];
+      continue;
+    }
+    if (
+      ch === " " ||
+      ch === "\t" ||
+      ch === "\n" ||
+      ch === ";" ||
+      ch === "&" ||
+      ch === "|" ||
+      ch === "(" ||
+      ch === ")"
+    ) {
+      flush();
+      continue;
+    }
+    current += ch;
+  }
+  flush();
+  return out;
+}
+
+function piWorkerBasename(word: string): string {
+  const base = word.split("/").pop() ?? word;
+  return base.toLowerCase();
+}
+
+/** Deny `git` write/network subcommands, skipping global flags (`-c k=v`, `-C dir`, `--no-pager`). */
+function piWorkerGitWriteDenied(command: string): boolean {
+  const words = piWorkerShellWords(command);
+  for (let i = 0; i < words.length; i++) {
+    if (words[i].quoted) continue;
+    if (piWorkerBasename(words[i].text) !== "git") continue;
+    let j = i + 1;
+    while (j < words.length) {
+      if (words[j].quoted) break;
+      const flag = words[j].text;
+      if (!flag.startsWith("-") || flag === "-") break;
+      // `-c <k=v>` and `-C <path>` consume the next word.
+      if ((flag === "-c" || flag === "-C") && j + 1 < words.length) j += 2;
+      else j += 1;
+    }
+    if (j >= words.length || words[j].quoted) continue;
+    if (PI_WORKER_GIT_WRITE_SUBCOMMANDS.has(words[j].text.toLowerCase())) return true;
+  }
   return false;
 }
 
-const REDIRECT_TARGET_RE = /(^|[^0-9a-zA-Z_])(>>?)\s*(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"']+))/g;
+/** Split a command on unquoted shell operators so quoted `;`/`|` stay data. */
+function piWorkerSplitSegments(command: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote === "'") {
+      current += ch;
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      current += ch;
+      if (ch === "\\" && i + 1 < command.length) current += command[++i];
+      else if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch as "'" | '"';
+      current += ch;
+      continue;
+    }
+    if (ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")" || ch === "\n") {
+      out.push(current);
+      current = "";
+      // Skip the second char of `&&`/`||`.
+      if ((ch === "&" || ch === "|") && command[i + 1] === ch) i++;
+      continue;
+    }
+    current += ch;
+  }
+  out.push(current);
+  return out;
+}
+
+/** Deny shell network exfil verbs (`curl`, `wget`, `ssh`, ..., `/dev/tcp/`, scripted urllib). */
+function piWorkerNetworkDenied(command: string): boolean {
+  if (/\/dev\/tcp\//.test(command)) return true;
+  const segments = piWorkerSplitSegments(command);
+  for (const segment of segments) {
+    const words = piWorkerShellWords(segment.trim()).filter((word) => word.text.length > 0);
+    if (words.length === 0) continue;
+    const first = words.find((word) => word.text.length > 0) ?? words[0];
+    if (!first.quoted && PI_WORKER_NETWORK_COMMANDS.has(piWorkerBasename(first.text))) return true;
+    for (const word of words) {
+      if (word.quoted) continue;
+      const base = piWorkerBasename(word.text);
+      if (
+        base === "python" ||
+        base.startsWith("python") ||
+        base === "perl" ||
+        base === "ruby" ||
+        base === "node" ||
+        base === "bun" ||
+        base === "php"
+      ) {
+        // The program text is data even when quoted (`-c "import urllib..."`),
+        // so scan quoted words too: they are code for the interpreter.
+        const rest = words.map((other) => other.text).join(" ");
+        if (PI_WORKER_NETWORK_SCRIPT_RE.test(rest)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function piWorkerBashDenied(command: string): boolean {
+  if (PI_WORKER_SUBSTITUTION_RE.test(command)) return true;
+  if (piWorkerGitWriteDenied(command)) return true;
+  if (piWorkerNetworkDenied(command)) return true;
+  return false;
+}
+
+// Matches `>file`, `>>file`, `2>file`, `2>>file`, and `&>file`: an optional
+// fd/`&` prefix before the operator. Bare fd dupes (`>&2`, `2>&1`) carry no
+// path target and are filtered below.
+const REDIRECT_TARGET_RE = /(?:\d*|&)?(>>?)\s*(?:"([^"]+)"|'([^']+)'|([^\s;|&<>"']+))/g;
 const TEE_TARGET_RE = /\|\s*tee\s+(?:-[a-z]+\s+)*"?([^"\s;|&<>]+)"?/gi;
 
 function extractWorkerBashTargets(command: string): string[] {
   const out: string[] = [];
   REDIRECT_TARGET_RE.lastIndex = 0;
   for (const match of command.matchAll(REDIRECT_TARGET_RE)) {
-    const target = match[3] ?? match[4] ?? match[5];
+    const target = match[2] ?? match[3] ?? match[4];
     // `/dev/null` and bare fd dupes (`>&2`, `2>`) are not filesystem writes.
     if (!target || target === "/dev/null" || /^\d+$/.test(target) || target.startsWith("&")) continue;
     out.push(target);
