@@ -12,6 +12,8 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 
 `JUMI_HARNESS_MODE` is deployment-only (`legacy` or `pi`) for reviewer, worker, and one-shot Jobs. Unset or empty is `legacy`; any other value fails process start. The two factories are independent deployments of the same release: never infer the mode from forge, never allow a repository override, and never change live config. `legacy` follows the existing runner dispatch with unchanged catalogs and no Pi import, initialization, or credentials; explicit `pi` fails clearly without spawning legacy until the Pi harness lands.
 
+`JUMI_PI_ALLOWED_ROUTES` is the deployment-owned Pi route allowlist (CSV of profile names) for reviewer, worker, and one-shot Jobs. Unset or blank means all Pi production routes stay off; having a profile, key, installed adapter, or discovered model never enables a route. A repository may narrow the list, never add to it.
+
 ### reviewer
 
 #### required env
@@ -83,6 +85,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `BOARD_MCP_KICK_TOKEN`
 - `JUMI_ALLOW_UNSANDBOXED_REVIEWS`
 - `JUMI_HARNESS_MODE`
+- `JUMI_PI_ALLOWED_ROUTES`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
@@ -183,6 +186,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_CHECKPOINT_INTERVAL_MS`
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
 - `JUMI_HARNESS_MODE`
+- `JUMI_PI_ALLOWED_ROUTES`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
@@ -347,6 +351,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `JUMI_CHECKPOINT_INTERVAL_MS`
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
 - `JUMI_HARNESS_MODE`
+- `JUMI_PI_ALLOWED_ROUTES`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
