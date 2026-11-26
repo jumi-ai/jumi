@@ -186,7 +186,7 @@
   "runtime_docker.ts": 230,
   "searxng.ts": 342,
   "searxng_server.ts": 75,
-  "sentinels.ts": 69,
+  "sentinels.ts": 72,
   "server.ts": 1799,
   "server_mailbox.ts": 77,
   "shared_failure.ts": 135,

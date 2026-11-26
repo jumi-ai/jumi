@@ -124,7 +124,7 @@ import {
 
 const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
-export const PR_TITLE_ELIGIBLE_FILE = "JUMI_PR_TITLE_ELIGIBLE";
+export { PR_TITLE_ELIGIBLE_FILE } from "./sentinels.ts";
 export const SKIP_FILE = "JUMI_SKIP.md";
 export const INCOMPLETE_IMPLEMENT = "Incomplete implement: no skip artifact";
 
