@@ -1,4 +1,4 @@
-import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import { JUMI_REVIEW_CONTEXT, latestStatuses } from "./ci.ts";
 import { isJumiWorkerBody } from "./followup_webhook.ts";
 import { resolveSettledHoldThreads } from "./hold_resolve.ts";
 import { senderCanSteer } from "./permissions.ts";
@@ -31,7 +31,7 @@ import {
   isBlockingQuestionAuthor,
   isBugFindingFirstLine,
   isMaintainerQuestionInline,
-  isQuestionInline,
+  isNonMaintainerQuestionInline,
   isRiskFindingFirstLine,
   parseCheckLine,
   parseReviewOutput,
@@ -277,7 +277,7 @@ function isOpenJumiInlineLocal(inline: InlineComment, botUsername?: string): boo
 
 function isBlockingQuestionInlineLocal(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
-  return isQuestionInline(inline.path, inline.body ?? "");
+  return isNonMaintainerQuestionInline(inline.path, inline.body ?? "");
 }
 
 function isBugInlineLocal(inline: InlineComment, botUsername?: string): boolean {
@@ -295,7 +295,7 @@ function isRiskInlineLocal(inline: InlineComment, botUsername?: string): boolean
 }
 
 function isMaintainerInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  if (!isBlockingQuestionInlineLocal(inline, botUsername)) return false;
+  if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
   return isMaintainerQuestionInline(inline.path, inline.body ?? "");
 }
 
@@ -576,24 +576,15 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
       if (ours.length === 0) {
         statusInput = { kind: "known", state: "missing" };
       } else {
-        const pendings = ours.filter((status) => (status.state ?? status.status) === "pending");
-        if (pendings.length === 0) {
-          const first = ours[0]!;
-          statusInput = {
-            kind: "known",
-            state: (first.state ?? first.status ?? "unknown") as string,
-            description: first.description,
-          };
+        // Newest entry only: an older `pending` must not shadow a newer
+        // `failure`/`success`, and an older failure must not shadow a newer
+        // maintainer or suggestion hold.
+        const newest = latestStatuses(ours)[0] ?? ours[0]!;
+        const newestState = (newest.state ?? newest.status ?? "unknown") as string;
+        if (newestState !== "pending") {
+          statusInput = { kind: "known", state: newestState, description: newest.description };
         } else {
-          const matching =
-            pendings.find((status) => isMaintainerHoldPendingDescription(status.description)) ??
-            pendings.find((status) => isSuggestionHoldPendingDescription(status.description));
-          if (!matching) {
-            const first = pendings[0]!;
-            statusInput = { kind: "known", state: "pending", description: first.description };
-          } else {
-            statusInput = { kind: "known", state: "pending", description: matching.description };
-          }
+          statusInput = { kind: "known", state: "pending", description: newest.description };
         }
       }
     } catch (err) {
