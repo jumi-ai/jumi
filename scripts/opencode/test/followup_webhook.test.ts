@@ -9,6 +9,8 @@ import {
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
+import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import type { IssueJob } from "../src/types.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
 import {
   makeIssue,
@@ -1027,6 +1029,29 @@ describe("createWorkerFetchHandler follow-up events", () => {
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs[0]?.mode).toBe("follow-up");
     expect(queue.jobs[0]?.prNumber).toBe(127);
+  });
+
+  test("headerless issue_comment redelivery dedupes on the stable body digest", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
+      api: writeApi,
+    });
+    const headerlessRequest = () =>
+      workerIssueCommentRequest(makeIssueCommentPayload(), { event: "issue_comment" }).then((signed) => {
+        signed.headers.delete("x-gitea-delivery");
+        return signed;
+      });
+    const first = await handler(await headerlessRequest());
+    expect(first.status).toBe(202);
+    expect(await responseJson(first)).toEqual({ key: "follow-up:kirmanak/demo#127:", queued: true });
+    // Same bytes, still no header: the fallback digest is identical, so this
+    // is a replay of the initial cause, not a distinct wake.
+    const replay = await handler(await headerlessRequest());
+    expect(replay.status).toBe(202);
+    expect(await responseJson(replay)).toEqual({ key: "follow-up:kirmanak/demo#127:", queued: false });
+    expect(store.rows).toHaveLength(1);
+    expect(await store.wakeCauses.list("follow-up:kirmanak/demo#127:")).toHaveLength(1);
   });
 
   test("enqueues X-Gitea-Event: pull_request_rejected for a jumi PR", async () => {

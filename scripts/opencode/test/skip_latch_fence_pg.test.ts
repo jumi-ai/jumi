@@ -21,7 +21,9 @@ describePg("skip latch fence against real postgres", () => {
     sqlB = openTestSqlClient(pgDatabaseUrl);
     storeA = new PgReviewJobStore(sqlA);
     storeB = new PgReviewJobStore(sqlB);
-    await sqlA.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
+    await sqlA.unsafe(
+      `DROP TABLE IF EXISTS review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage, role_gates`
+    );
     await storeA.migrate();
   });
 
@@ -32,7 +34,9 @@ describePg("skip latch fence against real postgres", () => {
 
   beforeEach(async () => {
     if (!pgDatabaseUrl) return;
-    await sqlA.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
+    await sqlA.unsafe(
+      `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage RESTART IDENTITY`
+    );
     await sqlA.unsafe(`TRUNCATE role_gates`);
     await storeA.migrate();
   });

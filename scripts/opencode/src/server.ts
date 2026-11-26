@@ -25,6 +25,7 @@ import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { thrownRunner } from "./engine.ts";
 import { resolveExhaustedFollowUpHoldOrThrow } from "./exhausted_hold.ts";
+import { webhookWakeDeliveryFallback } from "./followup_wake_causes.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { upsertWorkerComment } from "./gitea_issues.ts";
@@ -602,7 +603,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                   });
                   if (strictJob) {
                     const receivedAt = new Date().toISOString();
-                    const workerJob = { ...strictJob, delivery, receivedAt };
+                    const followupDelivery = deliveryHeader ?? webhookWakeDeliveryFallback("pull_request", rawBody);
+                    const workerJob = { ...strictJob, delivery: followupDelivery, receivedAt };
                     const workerResult = await deps.worker.queue.enqueue(workerJob);
                     if (strictSlots && strictJob.prNumber && strictJob.headSha) {
                       const baseBranch = fullPr.base?.ref?.trim() ? fullPr.base.ref.trim() : "";
@@ -650,7 +652,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                             botUsername: config.botUsername,
                             trustedSenderLogins: config.trustedSenderLogins,
                             action: payload.action,
-                            delivery: `takeover-${delivery}`,
+                            delivery: `takeover-${deliveryHeader ?? webhookWakeDeliveryFallback("pull_request", rawBody)}`,
                             queue: deps.worker.queue,
                             log: (message) => logger(message),
                           });
@@ -709,7 +711,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                   botUsername: config.botUsername,
                   trustedSenderLogins: config.trustedSenderLogins,
                   action: payload.action,
-                  delivery: `takeover-${delivery}`,
+                  delivery: `takeover-${deliveryHeader ?? webhookWakeDeliveryFallback("pull_request", rawBody)}`,
                   queue: deps.worker.queue,
                   log: (message) => logger(message),
                 });

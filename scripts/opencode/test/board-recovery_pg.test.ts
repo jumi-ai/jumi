@@ -11,7 +11,9 @@ describePg("recovery board latest-per-item on postgres (#708)", () => {
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
-      await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, review_kicks RESTART IDENTITY`);
+      await sql.unsafe(
+        `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, review_kicks RESTART IDENTITY`
+      );
       await sql.unsafe(
         `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, kind, result_reason)
          VALUES ('kirmanak/demo#7:${HEAD_SHA}:old', 'kirmanak', 'demo', 7, '${HEAD_SHA}', 'd-old', 'failed', 'review', 'boom')`
@@ -37,7 +39,9 @@ describePg("recovery board latest-per-item on postgres (#708)", () => {
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
-      await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, review_kicks RESTART IDENTITY`);
+      await sql.unsafe(
+        `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, review_kicks RESTART IDENTITY`
+      );
       await sql.unsafe(
         `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, kind, result_reason)
          VALUES ('kirmanak/demo#7:${HEAD_SHA}:old', 'kirmanak', 'demo', 7, '${HEAD_SHA}', 'd-old', 'failed', 'review', 'boom')`
@@ -61,7 +65,9 @@ describePg("recovery board latest-per-item on postgres (#708)", () => {
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
-      await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, review_kicks RESTART IDENTITY`);
+      await sql.unsafe(
+        `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, review_kicks RESTART IDENTITY`
+      );
       const total = BOARD_NEEDS_KICK_PAGE_SIZE + 1;
       await sql.unsafe(
         `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, kind, result_reason)
