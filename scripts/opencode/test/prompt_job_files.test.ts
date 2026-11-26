@@ -15,7 +15,7 @@ import {
   WORKER_INJECTED_FILES,
 } from "../src/git.ts";
 import { buildPROpenedPrompt } from "../src/prompt.ts";
-import { JUMI_SENTINEL_FILES } from "../src/sentinels.ts";
+import { JUMI_SENTINEL_FILES, PR_TITLE_ELIGIBLE_FILE } from "../src/sentinels.ts";
 import { makePR, makeRepo } from "./fixtures.ts";
 
 function reviewerPrompt(): string {
@@ -82,7 +82,12 @@ function injectedLine(prompt: string): string {
 
 describe("worker injected files", () => {
   test("injected list matches the sentinel set", () => {
-    expect([...WORKER_INJECTED_FILES].sort() as string[]).toEqual([...JUMI_SENTINEL_FILES].sort() as string[]);
+    // The retitle-eligibility signal is a parent/child coordination sentinel
+    // (stripped before porcelain/commit like the rest), but it is not a
+    // task file the worker reads, so it stays out of the injected list.
+    expect([...JUMI_SENTINEL_FILES].sort() as string[]).toEqual(
+      [...WORKER_INJECTED_FILES, PR_TITLE_ELIGIBLE_FILE].sort() as string[]
+    );
   });
 
   test("worker prompt lists exactly the JUMI_*.md files present", async () => {

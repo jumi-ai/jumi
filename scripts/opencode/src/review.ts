@@ -31,6 +31,7 @@ import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { extractClosingIssueNumbers, extractWorkingIssueNumber, isWipOrDraft } from "./gitea_issues.ts";
+import { extractOriginalTitle } from "./implement.ts";
 import {
   isIndependentReviewRefusal,
   provenanceLookupFailureReason,
@@ -2943,6 +2944,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       // rewords the file's guidance per attempt from the actual runner.
       runnerType: effectiveChain?.[0]?.type,
       ...(repoSetupBlock ? { repoSetupBlock } : {}),
+      ...(extractOriginalTitle(pr.body) !== undefined
+        ? { originalTitle: extractOriginalTitle(pr.body) as string }
+        : {}),
     });
 
     logDiagnostic(log, "review_prompt", {

@@ -43,6 +43,7 @@ import { modeSetting } from "./repo_settings_keys/mode.ts";
 import { noAutomergeLabelSetting } from "./repo_settings_keys/no_automerge_label.ts";
 import { pickupLabelSetting } from "./repo_settings_keys/pickup_label.ts";
 import { prTitleSetting } from "./repo_settings_keys/pr_title.ts";
+import { retitleAdoptedPrsSetting } from "./repo_settings_keys/retitle_adopted_prs.ts";
 import { reviewBudgetSetting } from "./repo_settings_keys/review_budget.ts";
 import { reviewCarrySetting } from "./repo_settings_keys/review_carry.ts";
 import { reviewDraftsSetting } from "./repo_settings_keys/review_drafts.ts";
@@ -162,6 +163,7 @@ export const REPO_SETTINGS_REGISTRY = [
   noAutomergeLabelSetting,
   pickupLabelSetting,
   prTitleSetting,
+  retitleAdoptedPrsSetting,
   reviewBudgetSetting,
   reviewCarrySetting,
   reviewDraftsSetting,
@@ -488,6 +490,18 @@ export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
 export function isReviewCarryEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;
   return (load as { reviewCarry?: boolean }).reviewCarry !== false;
+}
+
+/**
+ * Whether adopted PRs may be retitled when Jumi's commits change what they
+ * do. Default on: a missing file or missing key means on. An invalid or
+ * unreadable file means off, because the retitle is a write. No deployer
+ * setting.
+ */
+export function isRetitleAdoptedPrsEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state === "missing") return true;
+  if (load.state !== "valid") return false;
+  return (load as { retitleAdoptedPrs?: boolean }).retitleAdoptedPrs !== false;
 }
 
 /**

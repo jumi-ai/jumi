@@ -490,6 +490,36 @@ describe("GithubAPI", () => {
     ]);
   });
 
+  test("updates only the pull request title", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({
+        number: 127,
+        title: "New title",
+        body: "body",
+        state: "open",
+        html_url: "https://github.com/owner/repo/pull/127",
+        user: { login: "jumi" },
+        head: { ref: "jumi/issue-12-fix", sha: "abc", repo: { full_name: "owner/repo" } },
+        base: { ref: "main", sha: "def" },
+        merged: false,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:00Z",
+      });
+    }) as unknown as typeof fetch;
+
+    const pull = await api().updatePullRequestTitle!("owner", "repo", 127, "New title");
+    expect(pull.title).toBe("New title");
+    expect(requests).toEqual([
+      {
+        url: `${GITHUB_API_URL}/repos/owner/repo/pulls/127`,
+        method: "PATCH",
+        body: JSON.stringify({ title: "New title" }),
+      },
+    ]);
+  });
+
   test("findStickyIssueComment returns the matching id and body", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
