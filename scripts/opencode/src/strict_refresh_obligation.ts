@@ -34,21 +34,6 @@ export function strictRetryBackoffMs(count: number): number {
   return STRICT_REFRESH_RETRY_BACKOFFS_MS[idx] ?? 300_000;
 }
 
-/**
- * Forge/API/network failure that must retry, never blacklist.
- * Matches HTTP 5xx, timeouts, network errors, and unreadable-entity reads
- * (e.g. a 503 `pull request unreadable` during the strict re-check).
- * Real ineligibility (conflict, failing checks, strictness off, competing
- * head, left-to-author, not eligible) is not retryable.
- */
-const RETRYABLE_FORGE_RE =
-  /\b(?:50[0-4]|502|503|504)\b|bad gateway|gateway timeout|service unavailable|internal server error|timeout|timed out|fetch failed|network|ECONN|ENOTFOUND|EAI_AGAIN|socket|rate limit|too many requests|unreadable|unknown/i;
-
-export function isStrictRetryableForgeErrorText(text: string | null | undefined): boolean {
-  if (!text) return false;
-  return RETRYABLE_FORGE_RE.test(text);
-}
-
 /** Next retry state, or null when the bounded budget is exhausted. */
 export function nextStrictRetry(
   retryMarker: string | null | undefined,
@@ -156,6 +141,16 @@ export async function transferStrictSlotOnEnqueue(
     if (!slot) return;
     const headSha = job.headSha ?? slot.headSha;
     const baseSha = job.strictBaseSha ?? slot.baseSha;
+    // Same-head re-queue (for example the tick retry drain re-enqueues the
+    // stored intent): the slot already names this head, so a handoff would
+    // clear the bounded retry budget (retryMarker/dueAt/lastError) and bump
+    // the generation, letting retries loop forever without exhausting.
+    // No-op to keep the budget intact.
+    if (
+      (slot.headSha ?? "").toLowerCase() === (headSha ?? "").toLowerCase() &&
+      (slot.baseSha ?? "").toLowerCase() === (baseSha ?? "").toLowerCase()
+    )
+      return;
     await transferStrictObligationToReplacement(slots, {
       owner: slot.owner,
       repo: slot.repo,

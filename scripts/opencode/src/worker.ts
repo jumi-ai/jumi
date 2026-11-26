@@ -42,7 +42,13 @@ import {
   type RepoSettingsLoad,
   resolveRepoMode,
 } from "./repo_settings.ts";
-import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
+import {
+  HEARTBEAT_MS,
+  issueJobFromRecord,
+  type ReviewJobStore,
+  WORKER_JOB_KINDS,
+  workerJobKey,
+} from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
 import { runnerAuthFingerprints } from "./runner_cooldown.ts";
@@ -1170,14 +1176,21 @@ export async function processWorkerTick(
         typeof job.prNumber === "number"
       ) {
         try {
-          const { settleStrictSlotForCancelledJob } = await import("./strict_refresh_terminal.ts");
+          const { selectStrictRefreshSuccessor, settleStrictSlotForCancelledJob } = await import(
+            "./strict_refresh_terminal.ts"
+          );
           const held = await store.strictSlots.listHeldSlots().catch(() => []);
           const slot = held.find((s) => s.owner === job.owner && s.repo === job.repo && s.prNumber === job.prNumber);
           if (slot && (slot.headSha ?? "").toLowerCase() === (job.headSha ?? "").toLowerCase()) {
             const inflight = await store.listInflight(500).catch(() => []);
-            const successor = inflight.find(
-              (r) => r.owner === job.owner && r.repo === job.repo && r.prNumber === job.prNumber
-            );
+            const successor = selectStrictRefreshSuccessor(inflight, {
+              owner: job.owner,
+              repo: job.repo,
+              prNumber: job.prNumber,
+              excludeJobKey: workerJobKey(job),
+              fallbackHeadSha: slot.headSha,
+              fallbackBaseSha: slot.baseSha,
+            });
             if (successor) {
               await settleStrictSlotForCancelledJob({
                 slots: store.strictSlots,
@@ -1187,7 +1200,7 @@ export async function processWorkerTick(
                 prNumber: slot.prNumber,
                 headSha: slot.headSha,
                 hasSuccessor: true,
-                successor: { headSha: successor.headSha ?? slot.headSha, baseSha: slot.baseSha },
+                successor,
                 log: logger,
               });
             } else {

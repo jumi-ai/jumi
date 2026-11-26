@@ -685,7 +685,10 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     const strictNeeds = (await store.strictSlots?.listNeedsKick()) ?? [];
     for (const slot of strictNeeds) {
       const key = `${slot.owner.toLowerCase()}/${slot.repo.toLowerCase()}#${slot.prNumber}`;
-      if (inflightKeys.has(key)) continue;
+      // Follow-up rows key by issueNumber in inflightKeys, so a strict slot
+      // (keyed by PR number) must also check the PR-numbered pull keys or a
+      // needs-kick row shows next to its own inflight follow-up.
+      if (inflightKeys.has(key) || inflightPullKeys.has(key)) continue;
       if (closedKeys.has(key)) continue;
       const err = (slot.lastError ?? "refresh retries exhausted").trim().slice(0, 300);
       const message = `Strict refresh needs attention on ${slot.owner}/${slot.repo}#${slot.baseBranch} (holder #${slot.prNumber}): ${err}`;

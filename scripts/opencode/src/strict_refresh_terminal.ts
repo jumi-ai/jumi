@@ -260,6 +260,90 @@ export async function settleStrictSlotForWorkerRow(opts: {
   });
 }
 
+/** Inflight ledger row shape needed to find the replacing strict-refresh job. */
+export interface StrictRefreshSuccessorRow {
+  id: number;
+  jobKey: string;
+  kind: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  issueNumber: number | null;
+  payload: {
+    strictRefresh?: boolean;
+    mergeOnly?: boolean;
+    strictBaseSha?: string;
+    title?: string;
+    body?: string;
+    htmlUrl?: string;
+    issueUpdatedAt?: string;
+    defaultBranch?: string;
+    cloneUrl?: string;
+    issueNumber?: number;
+  } | null;
+}
+
+/**
+ * Find the replacing strict-refresh follow-up for a cancelled merge-only job.
+ *
+ * Only a queued/leased `follow-up` row carrying the strict-refresh merge-only
+ * flags counts: an unrelated `implement`/`review` row for the same PR must not
+ * keep the slot held. The newest row wins; the cancelled job itself is
+ * excluded by job key. Reads the base from the successor's `strictBaseSha`
+ * payload and rebuilds the durable enqueue intent from the successor row so
+ * the tick re-queues the new head instead of the old intent.
+ */
+export function selectStrictRefreshSuccessor(
+  inflight: readonly StrictRefreshSuccessorRow[],
+  opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    excludeJobKey?: string;
+    fallbackHeadSha: string;
+    fallbackBaseSha: string;
+  }
+): { headSha: string; baseSha: string; pendingJob: StrictRefreshPendingJob } | undefined {
+  const candidates = inflight.filter(
+    (row) =>
+      row.owner === opts.owner &&
+      row.repo === opts.repo &&
+      row.prNumber === opts.prNumber &&
+      row.kind === "follow-up" &&
+      row.payload?.strictRefresh === true &&
+      row.payload?.mergeOnly === true &&
+      (opts.excludeJobKey === undefined || row.jobKey !== opts.excludeJobKey)
+  );
+  if (candidates.length === 0) return undefined;
+  const successor = candidates.reduce((a, b) => (b.id > a.id ? b : a));
+  const payload = successor.payload;
+  const headSha = successor.headSha || opts.fallbackHeadSha;
+  const baseSha = payload?.strictBaseSha ?? opts.fallbackBaseSha;
+  const issueNumber =
+    typeof successor.issueNumber === "number" && successor.issueNumber > 0
+      ? successor.issueNumber
+      : (payload?.issueNumber ?? opts.prNumber);
+  return {
+    headSha,
+    baseSha,
+    pendingJob: {
+      owner: successor.owner,
+      repo: successor.repo,
+      issueNumber,
+      prNumber: opts.prNumber,
+      headSha,
+      baseSha,
+      title: payload?.title ?? "",
+      body: payload?.body ?? "",
+      htmlUrl: payload?.htmlUrl ?? "",
+      issueUpdatedAt: payload?.issueUpdatedAt ?? new Date().toISOString(),
+      defaultBranch: payload?.defaultBranch ?? "",
+      cloneUrl: payload?.cloneUrl ?? "",
+    },
+  };
+}
+
 /**
  * Settle a cancelled strict-refresh merge-only job.
  *
