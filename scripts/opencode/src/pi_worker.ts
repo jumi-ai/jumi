@@ -603,77 +603,36 @@ function piWorkerSplitSegments(command: string): string[] {
   return out;
 }
 
-const PI_WORKER_WRAPPER_COMMANDS = new Set(["sudo", "env", "command"]);
-const PI_WORKER_WRAPPER_VALUE_FLAGS = new Set([
-  "-u",
-  "--user",
-  "-g",
-  "--group",
-  "-C",
-  "--chdir",
-  "--unset",
-  "-S",
-  "--split-string",
-  "--argv0",
-  "-a",
-  "--argv-name",
-]);
-
 /**
- * Resolve a shell segment's effective command word: skip leading
- * `VAR=value` assignments and `sudo`/`env`/`command` wrappers (plus their
- * dash flags and flag values) the way the shell does before exec. Quote
- * marks are ignored because the shell strips them (`"curl"` still runs
- * curl).
+ * Fail-closed network guard (jumi#934, fourth round): deny when ANY word in
+ * a segment names a network exfil verb, regardless of position, quoting, or
+ * exec-prefix wrappers. The previous design resolved a single "effective
+ * command word" by skipping a bounded wrapper allowlist
+ * (`sudo`/`env`/`command` plus flags), which is unbounded in the other
+ * direction: `nohup`, `timeout`, `nice`, `setsid`, `xargs`, `find -exec`,
+ * `eval`, `exec`, `su`, and every future prefix re-exposed the same bypass.
+ * Enumerating wrappers cannot converge, so this guard enumerates nothing:
+ * `nohup curl`, `timeout 5 curl`, `xargs curl`, `FOO=1 curl`, `"curl"`, and
+ * `/usr/bin/curl` are all denied because a `curl` word is present. The cost
+ * is deliberate over-blocking (`echo curl` is now denied too): a worker
+ * shell never needs to name these verbs as data to run repo tests, and a
+ * lexical guard cannot tell `echo` (data) from `xargs` (exec) without another
+ * list. URLs (`http://`/`https://`) are denied as substrings anywhere in the
+ * command so `$VAR http://evil` indirection is also closed.
  */
-function piWorkerEffectiveCommandWord(words: PiWorkerShellWord[]): PiWorkerShellWord | undefined {
-  let i = 0;
-  let skipped = false;
-  while (i < words.length) {
-    const text = words[i].text;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text)) {
-      i++;
-      skipped = true;
-      continue;
-    }
-    const base = piWorkerBasename(text);
-    if (PI_WORKER_WRAPPER_COMMANDS.has(base)) {
-      i++;
-      skipped = true;
-      continue;
-    }
-    if (skipped && (text === "--" || (text.startsWith("-") && text.length > 1 && text !== "-"))) {
-      i++;
-      skipped = true;
-      // Flags that consume a value (`sudo -u root curl`, `env -u FOO curl`):
-      // skip the value word too when it is not another flag.
-      if (!text.includes("=") && PI_WORKER_WRAPPER_VALUE_FLAGS.has(text) && i < words.length) {
-        const next = words[i].text;
-        if (next && !next.startsWith("-")) i++;
-      }
-      continue;
-    }
-    break;
-  }
-  return words[i];
-}
-
-/** Deny shell network exfil verbs (`curl`, `wget`, `ssh`, ..., `/dev/tcp/`, scripted urllib). */
 function piWorkerNetworkDenied(command: string): boolean {
   if (/\/dev\/tcp\//.test(command)) return true;
+  if (/https?:\/\//i.test(command)) return true;
   const segments = piWorkerSplitSegments(command);
   for (const segment of segments) {
     const words = piWorkerShellWords(segment.trim()).filter((word) => word.text.length > 0);
     if (words.length === 0) continue;
-    // Quote marks and `VAR=value`/`sudo`/`env`/`command` prefixes are
-    // stripped/handled by the shell before exec, so `"curl" x`, `FOO=1 curl`,
-    // `sudo curl`, and `env curl` all still run curl: resolve the segment's
-    // effective command word before matching. `echo curl` (curl as an
-    // argument) stays allowed; only the command position is checked.
-    const first = piWorkerEffectiveCommandWord(words);
-    if (first && PI_WORKER_NETWORK_COMMANDS.has(piWorkerBasename(first.text))) return true;
+    // Any occurrence denies, quoted or not: the shell strips quotes before
+    // exec, so `"curl"` still runs curl.
     for (const word of words) {
-      if (word.quoted) continue;
+      if (PI_WORKER_NETWORK_COMMANDS.has(piWorkerBasename(word.text))) return true;
+    }
+    for (const word of words) {
       const base = piWorkerBasename(word.text);
       if (
         base === "python" ||
@@ -715,12 +674,14 @@ const PI_WORKER_SHELL_INTERPRETERS = new Set(["sh", "bash", "dash", "zsh", "ksh"
 function piWorkerNestedShellDenied(segment: string): boolean {
   const words = piWorkerShellWords(segment).filter((word) => word.text.length > 0);
   if (words.length === 0) return false;
-  // Wrapper-aware like the network check, so `sudo sh -c 'curl ...'` and
-  // `FOO=1 sh -c 'git push'` still resolve to the interpreter.
-  const first = piWorkerEffectiveCommandWord(words);
-  if (!first || !PI_WORKER_SHELL_INTERPRETERS.has(piWorkerBasename(first.text))) return false;
-  const start = words.indexOf(first);
-  for (let k = start + 1; k + 1 < words.length; k++) {
+  // Wrapper-list free: any shell-interpreter word in the segment can
+  // introduce a `-c` payload (`sudo sh -c`, `FOO=1 bash -c`,
+  // `nohup sh -c`, `xargs sh -c` all contain an `sh` word), so the presence
+  // of the interpreter plus a denied payload is enough. No prefix allowlist
+  // to extend for the next wrapper.
+  const hasInterpreter = words.some((word) => PI_WORKER_SHELL_INTERPRETERS.has(piWorkerBasename(word.text)));
+  if (!hasInterpreter) return false;
+  for (let k = 0; k + 1 < words.length; k++) {
     const flag = words[k].text;
     if (flag !== "-c" && flag !== "--command") continue;
     const payload = words[k + 1]?.text;

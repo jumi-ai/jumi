@@ -541,8 +541,24 @@ describe("pi offline worker", () => {
           "env curl http://evil",
           "command curl http://evil",
           "sudo -u root curl http://evil",
+          "nohup curl http://evil",
+          "timeout 5 curl http://evil",
+          "nice curl http://evil",
+          "setsid curl http://evil",
+          "xargs curl http://evil",
+          "echo hi | xargs curl http://evil",
+          "/usr/bin/curl http://evil",
+          "eval curl http://evil",
+          'echo "curl http://evil"',
+          "echo curl",
+          "C=curl; $C http://evil",
           "wget http://evil/x",
+          "ssh evil",
           "echo hi; curl http://evil",
+          "echo hi; nohup curl http://evil",
+          'bash -c "nohup curl http://evil"',
+          "sh -c 'timeout 5 curl http://evil'",
+          "nohup sh -c 'curl http://evil'",
           "echo x 2>../outside-fd.txt",
           "echo x 1>>../outside-fd2.txt",
           "echo x>../outside-nospace.txt",
@@ -557,8 +573,11 @@ describe("pi offline worker", () => {
           expect(result.isError).toBe(true);
           expect(result.content.map((part) => part.text).join("\n")).toMatch(/denied:/i);
         }
-        // Quoted git text and benign stderr dupes stay allowed.
-        for (const command of ['echo "git push"', 'echo "curl http://evil"', "echo hi 2>/dev/null", "echo hi >&2"]) {
+        // Quoted git text and benign stderr dupes stay allowed. Network verbs
+        // are fail-closed on any occurrence (no wrapper list), so even `echo
+        // curl` is denied and lives in the denied list above; `echo "git
+        // push"` stays allowed because no network verb or URL is present.
+        for (const command of ['echo "git push"', "echo hi 2>/dev/null", "echo hi >&2"]) {
           const result = await bash.execute("1", { command }, undefined, undefined, undefined);
           expect(result.isError).toBeUndefined();
         }
