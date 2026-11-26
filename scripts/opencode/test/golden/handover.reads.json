@@ -123,29 +123,29 @@
   },
   "handover.test.ts::24": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {}
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1,
+      "getRepoFile": 1
+    }
   },
   "handover.test.ts::25": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
       "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1
+      "getRepo": 1,
+      "getRepoFile": 1
     }
   },
   "handover.test.ts::26": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {
-      "findStickyIssueComment": 1,
-      "getIssue": 1,
-      "getPR": 1,
-      "getRepo": 1
-    }
+    "reads": {}
   },
   "handover.test.ts::27": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
@@ -153,11 +153,21 @@
   },
   "handover.test.ts::28": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {}
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
   },
   "handover.test.ts::29": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {}
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
   },
   "handover.test.ts::3": {
     "name": "enqueueFollowUpFromReview",
@@ -173,21 +183,11 @@
   },
   "handover.test.ts::31": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {
-      "findStickyIssueComment": 1,
-      "getIssue": 1,
-      "getPR": 1,
-      "getRepo": 1
-    }
+    "reads": {}
   },
   "handover.test.ts::32": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {
-      "findStickyIssueComment": 1,
-      "getIssue": 1,
-      "getPR": 1,
-      "getRepo": 1
-    }
+    "reads": {}
   },
   "handover.test.ts::33": {
     "name": "enqueueFollowUpFromReview",
@@ -201,6 +201,7 @@
   "handover.test.ts::34": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
@@ -209,14 +210,16 @@
   "handover.test.ts::35": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1,
-      "getRepoFile": 1
+      "getRepo": 1
     }
   },
   "handover.test.ts::36": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -224,15 +227,14 @@
   "handover.test.ts::37": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1
+      "getRepo": 1,
+      "getRepoFile": 1
     }
   },
   "handover.test.ts::38": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -240,6 +242,7 @@
   "handover.test.ts::39": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -255,6 +258,7 @@
   "handover.test.ts::40": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -262,7 +266,6 @@
   "handover.test.ts::41": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -270,7 +273,6 @@
   "handover.test.ts::42": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -292,6 +294,22 @@
     }
   },
   "handover.test.ts::45": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::46": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::47": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
       "getPR": 1,

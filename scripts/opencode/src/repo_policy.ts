@@ -13,6 +13,8 @@ import {
   effectivePickupLabel,
   effectiveTrustedSenderLogins,
   isReviewDraftsEnabled,
+  isRiskBlockingEnabled,
+  isRiskFollowupEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type RepoMode,
@@ -58,6 +60,8 @@ export interface RepoPolicy {
   maxFollowupRounds: number;
   maxConflictRounds: number;
   followupOnSuggestions: boolean;
+  followupOnRisks: boolean;
+  blockingRisks: boolean;
   pickupLabel: string;
   ciGateWait: CiGateWait;
   mode: RepoMode;
@@ -109,6 +113,8 @@ export function deriveRepoPolicy(
     maxFollowupRounds: effectiveFollowupRounds(deployment.maxFollowupRounds, load),
     maxConflictRounds: effectiveConflictRounds(deployment.maxConflictRounds, load),
     followupOnSuggestions: isSuggestionFollowupEnabled(load),
+    followupOnRisks: isRiskFollowupEnabled(load),
+    blockingRisks: isRiskBlockingEnabled(load),
     pickupLabel: effectivePickupLabel(load),
     ciGateWait: effectiveCiGateWait(load),
     mode: repoMode(load),

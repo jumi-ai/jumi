@@ -116,6 +116,7 @@ import {
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
   isAutoRerunFlakesEnabled,
+  isRiskFollowupEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type SettingsSnapshot,
@@ -159,6 +160,7 @@ import {
   isRiskFindingFirstLine,
   parseCheckLine,
   parseReviewOutput,
+  trailerNonBlockingRiskCount,
   trailerSuggestionCount,
 } from "./verdict.ts";
 import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
@@ -411,7 +413,8 @@ export function lastCheckTrailer(body: string): { state: "success" | "failure"; 
 function isFindingCheck(check: { state: "success" | "failure"; reason: string } | undefined): boolean {
   if (!check) return false;
   if (check.state === "failure") return true;
-  return trailerSuggestionCount(check.reason) > 0;
+  if (trailerSuggestionCount(check.reason) > 0) return true;
+  return trailerNonBlockingRiskCount(check.reason) > 0;
 }
 
 export function parseReviewedCommitSha(body: string): string | undefined {
@@ -519,7 +522,7 @@ export function isJumiPullReviewFinding(
   const body = pullReviewBody(review);
   if (!isFindingCheck(lastCheckTrailer(body)) && !isBlockingQuestionFinding(body, opts, inlines, botUsername))
     return false;
-  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(body, opts, inlines, botUsername)) return false;
+  if (isIgnoredSuccessBody(body, opts, inlines, botUsername)) return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -556,6 +559,12 @@ export interface ReviewFindingMatchOpts {
    * blocking questions still count. Unset preserves today's behavior.
    */
   followupOnSuggestions?: boolean;
+  /**
+   * Per-repository risk switch from `.jumi.yml`. `false` ignores a `success`
+   * review whose only findings are non-blocking 🟡 risks; failures and
+   * blocking questions still count. Unset preserves today's behavior (wake).
+   */
+  followupOnRisks?: boolean;
 }
 
 /**
@@ -808,12 +817,14 @@ function isBlockingQuestionFinding(
 }
 
 /**
- * A `success` trailer that carries suggestions and no open blocking
- * questions. Failures never count here; with `followup_on_suggestions: false`
- * these reviews stop counting as findings while everything else runs as
- * today.
+ * Whether a `success` review body should not wake a follow-up worker under
+ * the repository switches: no open blocking questions, and every wake
+ * category it carries (💡 suggestions, non-blocking 🟡 risks) is switched
+ * off. A success carrying suggestions wakes when `followup_on_suggestions`
+ * is on; a success carrying non-blocking risks wakes when `followup_on_risks`
+ * is on. Failures never count here.
  */
-function isSuggestionOnlyBody(
+function isIgnoredSuccessBody(
   body: string,
   opts: ReviewFindingMatchOpts = {},
   inlines: readonly InlineComment[] = [],
@@ -821,8 +832,13 @@ function isSuggestionOnlyBody(
 ): boolean {
   const trailer = lastCheckTrailer(body);
   if (trailer?.state !== "success") return false;
-  if (trailerSuggestionCount(trailer.reason) === 0) return false;
-  return !isBlockingQuestionFinding(body, opts, inlines, botUsername);
+  if (isBlockingQuestionFinding(body, opts, inlines, botUsername)) return false;
+  const hasSuggestions = trailerSuggestionCount(trailer.reason) > 0;
+  const hasRisks = trailerNonBlockingRiskCount(trailer.reason) > 0;
+  if (!hasSuggestions && !hasRisks) return false;
+  if (hasSuggestions && opts.followupOnSuggestions !== false) return false;
+  if (hasRisks && opts.followupOnRisks !== false) return false;
+  return true;
 }
 
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
@@ -847,8 +863,7 @@ export function isJumiReviewFinding(
     !isBlockingQuestionFinding(comment.body ?? "", opts, inlines, botUsername)
   )
     return false;
-  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(comment.body ?? "", opts, inlines, botUsername))
-    return false;
+  if (isIgnoredSuccessBody(comment.body ?? "", opts, inlines, botUsername)) return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -1212,6 +1227,7 @@ export async function needsFollowUp(opts: {
   const failOpen = failOpenLoadFromSnapshot(settings);
   const effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, failOpen);
   const followupOnSuggestions = isSuggestionFollowupEnabled(failOpen);
+  const followupOnRisks = isRiskFollowupEnabled(failOpen);
   const effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, failOpen);
   const effectiveIgnore = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, failOpen);
   const effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpen);
@@ -1228,6 +1244,7 @@ export async function needsFollowUp(opts: {
       prAuthor: opts.pr.user?.login,
       ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
       ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
+      ...(followupOnRisks ? {} : { followupOnRisks: false as const }),
     },
     effectiveTrusted
   );
@@ -1541,7 +1558,8 @@ export function reviewFindingMatchOptsForJob(
   headSha: string,
   prAuthor?: string | undefined | null,
   blockingQuestionAuthors?: readonly string[] | undefined | null,
-  followupOnSuggestions?: boolean
+  followupOnSuggestions?: boolean,
+  followupOnRisks?: boolean
 ): ReviewFindingMatchOpts {
   const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
   return {
@@ -1550,6 +1568,7 @@ export function reviewFindingMatchOptsForJob(
     ...(prAuthor ? { prAuthor } : {}),
     ...(blockingQuestionAuthors ? { blockingQuestionAuthors } : {}),
     ...(followupOnSuggestions === false ? { followupOnSuggestions: false as const } : {}),
+    ...(followupOnRisks === false ? { followupOnRisks: false as const } : {}),
   };
 }
 
@@ -2142,7 +2161,8 @@ export async function implementFollowUp(
     pr.head.sha,
     pr.user?.login,
     snapshot.lists.blockingAuthors,
-    snapshot.policy.followupOnSuggestions
+    snapshot.policy.followupOnSuggestions,
+    snapshot.policy.followupOnRisks
   );
   const ciHashForDecision = fingerprintCiChecks(ci.unhandled);
   const displayForDecision = sameFindingDisplayFromParts(
