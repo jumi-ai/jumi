@@ -91,6 +91,7 @@ const expectedNoneKeys = [
   "reviewDrafts",
   "reviewBudget",
   "strictBranchRefresh",
+  "reviewCarry",
   "workerReviewRules",
 ];
 
@@ -127,6 +128,7 @@ const expectedFullKeys = [
   "setup",
   "verify",
   "strictBranchRefresh",
+  "reviewCarry",
   "workerReviewRules",
   "suggestionsHoldMerge",
   "maintainerQuestionsHoldMerge",
@@ -187,6 +189,7 @@ const invalidPerKey: Array<[string, string, string]> = [
   ["setup", "setup: {}\n", '"setup.run" must be a non-blank string'],
   ["verify", "verify: {}\n", '"verify.run" must be a non-blank string'],
   ["strict_branch_refresh", 'strict_branch_refresh: "yes"\n', '"strict_branch_refresh" must be a boolean'],
+  ["review_carry", 'review_carry: "yes"\n', '"review_carry" must be a boolean'],
   ["worker_review_rules", 'worker_review_rules: "yes"\n', '"worker_review_rules" must be a boolean'],
 ];
 
