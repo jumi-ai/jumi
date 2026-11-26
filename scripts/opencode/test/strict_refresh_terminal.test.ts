@@ -96,10 +96,9 @@ function strictJob(prNumber: number, headSha: string, baseSha: string): IssueJob
 
 const TERMINAL_SKIP_REASONS = [
   "strict refresh: competing head update",
-  "strict refresh: strictness off or unknown",
+  "strict refresh: strictness off",
   "strict refresh: auto-merge no longer armed",
   "strict refresh: closing issue not picked up or closed",
-  "strict refresh: pull request unreadable",
   "strict refresh: not eligible",
   "strict refresh: left to author (ignore-conflicts)",
   "strict refresh: not behind",

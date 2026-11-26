@@ -62,6 +62,7 @@ import {
   type SkipLatchStore,
 } from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import { transferStrictSlotOnEnqueue } from "./strict_refresh_obligation.ts";
 import {
   MemoryStrictRefreshSlotStore,
   PgStrictRefreshSlotStore,
@@ -364,8 +365,8 @@ export interface ReviewJobStore {
    */
   markFindingsOpenAtMerge(owner: string, repo: string, prNumber: number): Promise<number>;
   /**
-   * Structured worker pushback for one finding: `fixed`, or `unchanged` with
-   * a reason. Recorded on the matching ledger row (by fingerprint, else by
+   * Structured worker pushback for one finding: `fixed`, `unchanged` with a reason, or `needs_maintainer`
+   * with a reason. Recorded on the matching ledger row (by fingerprint, else by
    * path+line); returns true when a row was updated.
    */
   recordFindingResponse(opts: {
@@ -1755,6 +1756,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
               generation: entry.generation + 1,
             });
           }
+          if (kind === "follow-up" && job.prNumber && superseded.length > 0) {
+            await transferStrictSlotOnEnqueue(this.strictSlots, job, Date.now()).catch(() => undefined);
+          }
         }
         await this.sits.clear(job.owner, job.repo, job.issueNumber);
         return { key, queued: true };
@@ -1808,6 +1812,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
             await this.wakeCauses.parkPendingForKey(entry.key, WAKE_PARK_OBSOLETE_HEAD, {
               generation: entry.generation + 1,
             });
+          }
+          if (job.prNumber && superseded.length > 0) {
+            await transferStrictSlotOnEnqueue(this.strictSlots, job, Date.now()).catch(() => undefined);
           }
         }
       }
@@ -4390,6 +4397,14 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
         await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS laps INTEGER NOT NULL DEFAULT 0`);
         await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS pending_job JSONB`);
+        await tx.unsafe(
+          `ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 1`
+        );
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'held'`);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ`);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS retry_marker TEXT`);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS last_error TEXT`);
+        await tx.unsafe(`CREATE SEQUENCE IF NOT EXISTS strict_refresh_generation_seq`);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
         await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
         await tx.unsafe(PUSH_CONFIRM_SCHEMA_SQL);
@@ -4577,7 +4592,8 @@ export class PgReviewJobStore implements ReviewJobStore {
     assertValidIssueJobForEnqueue(job);
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
-    return this.sql.begin(async (tx) => {
+    let followUpSupersededCount = 0;
+    const result = await this.sql.begin(async (tx) => {
       if (isFollowUpKind(kind)) {
         if (job.prNumber) {
           const oldKeys = asRows<{ job_key: unknown }>(
@@ -4736,6 +4752,7 @@ export class PgReviewJobStore implements ReviewJobStore {
               [job.owner, job.repo, job.prNumber, kind, key]
             )
           );
+          followUpSupersededCount = superseded.length;
           if (superseded.length > 0) {
             const sorted = [...superseded].sort((a, b) => {
               const ka = str(a.job_key);
@@ -4868,6 +4885,10 @@ export class PgReviewJobStore implements ReviewJobStore {
       await this.clearSitTx(tx, job.owner, job.repo, job.issueNumber);
       return { key, queued: true };
     });
+    if (result.queued && job.prNumber && isFollowUpKind(kind) && followUpSupersededCount > 0) {
+      await transferStrictSlotOnEnqueue(this.strictSlots, job, Date.now()).catch(() => undefined);
+    }
+    return result;
   }
 
   async drop(key: string): Promise<boolean> {
