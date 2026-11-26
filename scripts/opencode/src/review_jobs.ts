@@ -199,6 +199,14 @@ export interface ReviewJobRecord {
    * publish failure path bumps it, and a terminal settle ends its use.
    */
   reclaimPublishFailures?: number | null;
+  /**
+   * Additive attempt-mode stamp (`legacy` today, `pi` in the future).
+   * Absent (NULL) on rows written before the harness-mode rollout and read
+   * as `legacy` for compatibility. Set on `saveResult`; never inferred from
+   * forge and never changed for a live session (a mode change needs a fresh,
+   * fenced attempt).
+   */
+  harnessMode?: string | null;
   pendingStatusAt: number | null;
   publishedAt: number | null;
   prUpdatedAt: number | null;
@@ -860,6 +868,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_json JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS reclaim_publish_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS harness_mode TEXT;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -2066,6 +2075,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot save result for job ${id}`);
+      const mode = (result as { harnessMode?: unknown }).harnessMode;
+      const normalizedMode = typeof mode === "string" && mode !== "" ? mode : undefined;
       if (result.kind === "markdown") {
         row.resultMarkdown = result.markdown;
         row.resultRunner = result.runner ?? null;
@@ -2086,6 +2097,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         row.resultMarkdown = null;
         delete row.resultJson;
       }
+      // Additive attempt-mode stamp: only carry non-legacy so old whole-row
+      // assertions keep passing. Absent reads as legacy.
+      if (normalizedMode !== undefined && normalizedMode !== "legacy") row.harnessMode = normalizedMode;
+      else if (normalizedMode === "legacy") delete row.harnessMode;
       row.updatedAt = Date.now();
     });
   }
@@ -3976,6 +3991,7 @@ type ReviewJobRow = {
   rewake_requested?: unknown;
   cancel_requested?: unknown;
   reclaim_publish_failures?: unknown;
+  harness_mode?: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -4110,6 +4126,11 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     // Old rows predate the #810 column and read as absent: only carry a
     // nonzero count so existing whole-row assertions do not change.
     ...(reclaimFailures > 0 ? { reclaimPublishFailures: reclaimFailures } : {}),
+    // Old rows predate the harness-mode stamp and read as absent (legacy).
+    // Only carry a non-legacy value so existing whole-row assertions do not change.
+    ...(row.harness_mode == null || String(row.harness_mode) === "" || String(row.harness_mode) === "legacy"
+      ? {}
+      : { harnessMode: String(row.harness_mode) }),
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
@@ -4167,6 +4188,7 @@ const REQUIRED_REVIEW_JOB_COLUMNS = [
   "result_json",
   "rewake_requested",
   "cancel_requested",
+  "harness_mode",
 ] as const;
 
 /**
@@ -5236,6 +5258,10 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void> {
+    const modeRaw = (result as { harnessMode?: unknown }).harnessMode;
+    // Additive stamp: `pi` persists, legacy (or absent) clears to NULL so old
+    // rows and new legacy rows read identically as legacy.
+    const modeValue = modeRaw === "pi" ? "pi" : null;
     let rows: { id: unknown }[];
     if (result.kind === "markdown") {
       // A record serialization problem degrades to NULL: it must never turn
@@ -5252,30 +5278,30 @@ export class PgReviewJobStore implements ReviewJobStore {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_markdown = $3, result_runner = $4, result_json = $5::jsonb, result_reason = NULL, error = NULL, updated_at = NOW()
+           SET result_markdown = $3, result_runner = $4, harness_mode = $5, result_json = $6::jsonb, result_reason = NULL, error = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.markdown, result.runner ?? null, recordJson]
+          [id, leasedBy, result.markdown, result.runner ?? null, modeValue, recordJson]
         )
       );
     } else if (result.kind === "skip") {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_reason = $3, result_markdown = NULL, result_json = NULL, updated_at = NOW()
+           SET result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.reason]
+          [id, leasedBy, result.reason, modeValue]
         )
       );
     } else {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET error = $3, result_reason = $3, result_markdown = NULL, result_json = NULL, updated_at = NOW()
+           SET error = $3, result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.error]
+          [id, leasedBy, result.error, modeValue]
         )
       );
     }
