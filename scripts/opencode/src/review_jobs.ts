@@ -5278,10 +5278,10 @@ export class PgReviewJobStore implements ReviewJobStore {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_markdown = $3, result_runner = $4, result_json = $5::jsonb, result_reason = NULL, error = NULL, harness_mode = $6, updated_at = NOW()
+           SET result_markdown = $3, result_runner = $4, harness_mode = $5, result_json = $6::jsonb, result_reason = NULL, error = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.markdown, result.runner ?? null, recordJson, modeValue]
+          [id, leasedBy, result.markdown, result.runner ?? null, modeValue, recordJson]
         )
       );
     } else if (result.kind === "skip") {
