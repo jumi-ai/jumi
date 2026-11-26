@@ -585,6 +585,29 @@ export async function handleGithubWebhookEvent(
   if (event === "status" || event === "check_run") {
     if (!deps.review || !deps.worker?.api) return skipped(`unsupported event ${event}`, logger);
     try {
+      // Jumi's own review turning green on a behind PR wakes the refresh
+      // without waiting for the next target-branch push (issue #900). Any
+      // other finish falls through to the sibling-check path, which skips
+      // the review's own status. The wake is durable before the 202.
+      const { enqueueStrictRefreshForGreenReview } = await import("./strict_refresh.ts");
+      const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
+      const strictSlots = strictSlotsFor(deps);
+      const greenWake = await enqueueStrictRefreshForGreenReview({
+        rawBody,
+        delivery,
+        api: deps.worker.api as never,
+        policy: policy as never,
+        ...(strictSlots ? { slots: strictSlots } : {}),
+        followUpLedgers: [deps.worker.review, deps.review, deps.worker.queue],
+        log: logger,
+        enqueue: async (job) => {
+          const result = await deps.worker!.queue.enqueue(job);
+          return { queued: result.queued, key: result.key };
+        },
+      });
+      if (greenWake.outcome === "queued" || greenWake.outcome === "deferred") {
+        return json(202, { queued: greenWake.outcome === "queued", ...(greenWake.key ? { key: greenWake.key } : {}) });
+      }
       const decision = await shouldEnqueueSiblingCheckReview(rawBody, event, policy, deps.worker.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
@@ -704,6 +727,7 @@ export async function handleGithubWebhookEvent(
           try {
             const {
               shouldEnqueueStrictRefreshForPR,
+              strictPendingFollowUpChecker,
               isStrictRefreshBehind,
               encodeStrictRefreshWait,
               STRICT_REFRESH_WAIT_FALLBACK_MS,
@@ -722,6 +746,12 @@ export async function handleGithubWebhookEvent(
               if (fullPr) {
                 const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
                 const strictSlots = strictSlotsFor(deps);
+                const strictPending = strictPendingFollowUpChecker(
+                  strictOwner,
+                  strictRepo,
+                  deps.worker?.review,
+                  deps.review
+                );
                 const strictJob = await shouldEnqueueStrictRefreshForPR({
                   pr: fullPr,
                   owner: strictOwner,
@@ -733,6 +763,7 @@ export async function handleGithubWebhookEvent(
                   sender: payload.sender?.login ?? "pull_request",
                   log: logger,
                   ...(strictSlots ? { slots: strictSlots } : {}),
+                  ...(strictPending ? { hasPendingFollowUp: strictPending } : {}),
                 });
                 if (strictJob) {
                   const receivedAt = new Date().toISOString();
@@ -1217,10 +1248,23 @@ export async function handleGithubWebhookEvent(
       // slot across CI/review/merge; waiting PRs get no speculative push.
       let strictSlots: import("./strict_refresh_queue.ts").StrictRefreshSlotStore | undefined;
       try {
-        const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
+        const { shouldEnqueueStrictRefreshOnPush, strictPendingFollowUpChecker } = await import("./strict_refresh.ts");
         const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
         strictSlots = strictSlotsFor(deps);
-        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger, strictSlots);
+        const [pushOwner, pushRepo] = (payload.repository?.full_name ?? "").split("/");
+        const strictPending =
+          pushOwner && pushRepo
+            ? strictPendingFollowUpChecker(pushOwner, pushRepo, deps.worker?.review, deps.review)
+            : undefined;
+        const strict = await shouldEnqueueStrictRefreshOnPush(
+          payload,
+          policy,
+          deps.worker.api,
+          logger,
+          strictSlots,
+          undefined,
+          strictPending
+        );
         for (const partial of strict.jobs) {
           const job: IssueJob = {
             ...partial,

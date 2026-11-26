@@ -124,6 +124,8 @@ describe("strict push enqueue", () => {
       listOpenPulls: async () => [jumiPull()],
       getBranch: async () =>
         strict === undefined ? ({ protected: true } as never) : ({ protected: true, strict } as never),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
   }
   test("enqueues merge-only strict job on target-branch push when strict", async () => {
@@ -155,6 +157,8 @@ describe("strict push enqueue", () => {
     const api = {
       listOpenPulls: async () => [jumiPull({ draft: true }), jumiPull({ number: 128, autoMergeEnabled: false })],
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload(), policy, api);
     expect(jobs).toHaveLength(0);
@@ -165,6 +169,8 @@ describe("strict push enqueue", () => {
     const api = {
       listOpenPulls: async () => [other],
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload(), policy, api);
     expect(jobs).toHaveLength(0);
@@ -182,8 +188,14 @@ describe("strict push enqueue", () => {
 });
 
 describe("strict PR-activity reconcile", () => {
+  function prApi() {
+    return {
+      getBranch: async () => ({ protected: true, strict: true }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
+    } as never;
+  }
   test("already-behind PR is picked up without waiting for another base push", async () => {
-    const api = { getBranch: async () => ({ protected: true, strict: true }) } as never;
     const job = await shouldEnqueueStrictRefreshForPR({
       pr: jumiPull(),
       owner: "o",
@@ -191,7 +203,7 @@ describe("strict PR-activity reconcile", () => {
       defaultBranch: "main",
       cloneUrl: "https://github.com/o/r.git",
       policy: policy as never,
-      api,
+      api: prApi(),
     });
     expect(job?.mergeOnly).toBe(true);
     expect(job?.strictRefresh).toBe(true);
@@ -200,6 +212,8 @@ describe("strict PR-activity reconcile", () => {
     for (const strict of [false, undefined]) {
       const api = {
         getBranch: async () => ({ protected: true, ...(strict === undefined ? {} : { strict }) }),
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+        listCheckRuns: async () => [],
       } as never;
       const job = await shouldEnqueueStrictRefreshForPR({
         pr: jumiPull(),
@@ -376,6 +390,8 @@ describe("two-PR strict sequence", () => {
     const api = {
       listOpenPulls: async () => [second],
       getBranch: async () => ({ protected: true, strict: true }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     } as never;
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload("base-after-first"), policy, api);
     expect(jobs).toHaveLength(1);
@@ -516,6 +532,8 @@ describe("strict ignore-conflicts guard", () => {
     const baseApi = {
       getPR: async () => pr,
       getBranch: async () => ({ protected: true, strict: true }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     };
     const ok = await recheckStrictRefreshEligibility({
       api: baseApi as never,

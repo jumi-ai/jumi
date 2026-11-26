@@ -1,3 +1,5 @@
+import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import { parseJumiReviewSuccessFinish } from "./ci_webhook.ts";
 import {
   extractWorkingIssueNumber,
   type IssueApi,
@@ -31,6 +33,152 @@ export type StrictPolicy = "strict" | "off" | "unknown";
 
 export type StrictBranchApi = Pick<IssueApi, "getBranch">;
 
+/**
+ * Pending-fix-loop probe for strict admission (issue #900). Returns true
+ * when a follow-up job for the PR's head is queued or leased, meaning the
+ * fix loop still owns the head even though its review may read green.
+ * Ledger errors are the caller's to interpret; admission fails closed.
+ */
+export type StrictPendingFollowUp = (
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string
+) => boolean | Promise<boolean>;
+
+/** Minimal ledger surface for the pending-fix-loop probe. */
+export interface StrictFollowUpLedger {
+  listInflight(limit?: number): Promise<
+    ReadonlyArray<{
+      kind: string;
+      owner: string;
+      repo: string;
+      prNumber: number;
+      headSha: string;
+      state: string;
+    }>
+  >;
+}
+
+/**
+ * Build the pending-fix-loop probe from the first ledger that exposes
+ * `listInflight`. Webhook handlers pass their queue stores (which carry
+ * more than their enqueue-only types declare); unit tests pass a stub.
+ * Returns undefined when no ledger is available: callers then skip only
+ * the fix-loop half of the gate.
+ */
+export function strictPendingFollowUpChecker(
+  owner: string,
+  repo: string,
+  ...ledgers: Array<StrictFollowUpLedger | undefined | null | unknown>
+): StrictPendingFollowUp | undefined {
+  const ledger = ledgers.find(
+    (candidate): candidate is StrictFollowUpLedger =>
+      typeof (candidate as StrictFollowUpLedger | undefined)?.listInflight === "function"
+  );
+  if (!ledger) return undefined;
+  return async (checkOwner: string, checkRepo: string, prNumber: number, headSha: string): Promise<boolean> => {
+    if (checkOwner !== owner || checkRepo !== repo) return false;
+    const rows = await ledger.listInflight(500);
+    const want = (headSha ?? "").toLowerCase();
+    return rows.some(
+      (row) =>
+        row?.kind === "follow-up" &&
+        row?.owner === owner &&
+        row?.repo === repo &&
+        row?.prNumber === prNumber &&
+        (row?.headSha ?? "").toLowerCase() === want &&
+        (row?.state === "queued" || row?.state === "leased")
+    );
+  };
+}
+
+/** Jumi review verdict for one head, read from the forge's commit statuses. */
+export type StrictReviewGreen = "green" | "not-green" | "unknown";
+
+/**
+ * Whether Jumi's own review (`jumi/opencode-review` commit status) is
+ * successful on the head. `not-green` covers pending, missing, failure,
+ * and warning verdicts; `unknown` covers unreadable checks (fail closed:
+ * admission skips, the worker retries). Reads both statuses and check runs
+ * because the verdict is posted as a status but fakes may stub either.
+ */
+export async function readStrictReviewGreen(opts: {
+  api: Partial<Pick<IssueApi, "listCommitStatuses" | "listCheckRuns">>;
+  owner: string;
+  repo: string;
+  headSha: string;
+  log?: (message: string) => void;
+}): Promise<StrictReviewGreen> {
+  const listStatuses = opts.api?.listCommitStatuses;
+  const listRuns = opts.api?.listCheckRuns;
+  if (typeof listStatuses !== "function" && typeof listRuns !== "function") return "unknown";
+  const checks: Check[] = [];
+  let sawError = false;
+  if (typeof listStatuses === "function") {
+    try {
+      checks.push(...(await listStatuses.call(opts.api, opts.owner, opts.repo, opts.headSha)));
+    } catch (err) {
+      sawError = true;
+      opts.log?.(`strict refresh review status lookup failed: ${errorMessage(err)}`);
+    }
+  }
+  if (typeof listRuns === "function") {
+    try {
+      checks.push(...(await listRuns.call(opts.api, opts.owner, opts.repo, opts.headSha)));
+    } catch (err) {
+      sawError = true;
+      opts.log?.(`strict refresh review check lookup failed: ${errorMessage(err)}`);
+    }
+  }
+  const verdicts = checks.filter((check) => check?.context === JUMI_REVIEW_CONTEXT);
+  if (verdicts.some((check) => String(check?.state ?? check?.status ?? "").toLowerCase() === "success")) {
+    return "green";
+  }
+  if (verdicts.length > 0) return "not-green";
+  return sawError ? "unknown" : "not-green";
+}
+
+/**
+ * Review half of the admission gate (issue #900): the head is only
+ * refreshable when Jumi's review is green on it and no follow-up for the
+ * head is queued or leased. A lookup error fails closed (not ready, no
+ * terminal evidence): the next event or tick retries.
+ */
+export async function isReviewReadyForStrictRefresh(opts: {
+  api: Partial<Pick<IssueApi, "listCommitStatuses" | "listCheckRuns">>;
+  owner: string;
+  repo: string;
+  pr: Pull;
+  hasPendingFollowUp?: StrictPendingFollowUp;
+  log?: (message: string) => void;
+}): Promise<boolean> {
+  const green = await readStrictReviewGreen({
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    headSha: opts.pr.head.sha,
+    ...(opts.log ? { log: opts.log } : {}),
+  });
+  if (green !== "green") {
+    opts.log?.(`strict refresh #${opts.pr.number} review not green (${green}); skipping merge-only wake`);
+    return false;
+  }
+  if (opts.hasPendingFollowUp) {
+    let pending = false;
+    try {
+      pending = await opts.hasPendingFollowUp(opts.owner, opts.repo, opts.pr.number, opts.pr.head.sha);
+    } catch (err) {
+      opts.log?.(`strict refresh #${opts.pr.number} follow-up lookup failed: ${errorMessage(err)}`);
+      return false;
+    }
+    if (pending) {
+      opts.log?.(`strict refresh #${opts.pr.number} follow-up pending; skipping merge-only wake`);
+      return false;
+    }
+  }
+  return true;
+}
 export async function resolveStrictPolicy(
   api: Partial<StrictBranchApi> | undefined,
   owner: string,
@@ -345,6 +493,7 @@ async function collectReadyStrictCandidates(opts: {
   requiredContexts?: string[];
   terminal?: { prNumber: number; headSha: string; baseSha: string };
   baseSha?: string;
+  hasPendingFollowUp?: StrictPendingFollowUp;
   log?: (message: string) => void;
 }): Promise<Pull[]> {
   const { pulls, owner, repo, policy, api, defaultBranch, baseBranch, requiredContexts, terminal, baseSha, log } = opts;
@@ -379,6 +528,18 @@ async function collectReadyStrictCandidates(opts: {
         log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
         continue;
       }
+      if (
+        !(await isReviewReadyForStrictRefresh({
+          api,
+          owner,
+          repo,
+          pr,
+          ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+          ...(log ? { log } : {}),
+        }))
+      ) {
+        continue;
+      }
       ready.push(pr);
     }
     return ready;
@@ -400,11 +561,35 @@ async function collectReadyStrictCandidates(opts: {
         log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
         continue;
       }
+      if (
+        !(await isReviewReadyForStrictRefresh({
+          api,
+          owner,
+          repo,
+          pr,
+          ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+          ...(log ? { log } : {}),
+        }))
+      ) {
+        continue;
+      }
       ready.push(pr);
       break;
     }
     if (await isTerminallyStrictBlocked({ api, owner, repo, pr: fresh, requiredContexts, log })) {
       log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+      continue;
+    }
+    if (
+      !(await isReviewReadyForStrictRefresh({
+        api,
+        owner,
+        repo,
+        pr: fresh,
+        ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+        ...(log ? { log } : {}),
+      }))
+    ) {
       continue;
     }
     if (
@@ -514,7 +699,8 @@ export async function shouldEnqueueStrictRefreshOnPush(
   api: StrictRefreshApi,
   log?: (message: string) => void,
   slots?: StrictRefreshSlotStore,
-  nowMs?: number
+  nowMs?: number,
+  hasPendingFollowUp?: StrictPendingFollowUp
 ): Promise<{
   jobs: Array<Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }>;
   reason?: string;
@@ -592,6 +778,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
     requiredContexts,
     terminal,
     baseSha: pushedBase,
+    ...(hasPendingFollowUp ? { hasPendingFollowUp } : {}),
     log,
   });
   const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, log) : readyRaw;
@@ -651,6 +838,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
       defaultBranch,
       cloneUrl: payload.repository.clone_url,
       requiredContexts,
+      ...(hasPendingFollowUp ? { hasPendingFollowUp } : {}),
       nowMs: now,
       log,
     });
@@ -765,6 +953,7 @@ async function reconcileStrictSlotForCandidates(opts: {
   defaultBranch: string;
   cloneUrl: string;
   requiredContexts?: string[];
+  hasPendingFollowUp?: StrictPendingFollowUp;
   nowMs: number;
   log?: (message: string) => void;
 }): Promise<Pull | undefined> {
@@ -806,6 +995,7 @@ async function reconcileStrictSlotForCandidates(opts: {
       requiredContexts,
       terminal,
       baseSha,
+      ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
       log,
     });
     const kept = gitea ? await keepGiteaBehind(api, rec, owner, repo, log) : rec;
@@ -980,6 +1170,21 @@ async function reconcileStrictSlotForCandidates(opts: {
       `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`
     );
   }
+  if (
+    !(await isReviewReadyForStrictRefresh({
+      api,
+      owner,
+      repo,
+      pr: holder,
+      ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+      ...(log ? { log } : {}),
+    }))
+  ) {
+    // The holder's head is not refreshable right now (review not green or
+    // the fix loop still owns it). Keep the slot: a later review-green wake
+    // or push re-reconciles instead of handing the slot to a newer PR.
+    return undefined;
+  }
   const nb = baseSha || held.baseSha;
   if (holder.head.sha === held.headSha && nb === held.baseSha) return undefined;
   if (nb === held.baseSha) {
@@ -1050,6 +1255,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   log?: (message: string) => void;
   slots?: StrictRefreshSlotStore;
   nowMs?: number;
+  hasPendingFollowUp?: StrictPendingFollowUp;
 }): Promise<(Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }) | null> {
   const { owner, repo, policy, api } = opts;
   const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
@@ -1154,6 +1360,20 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   const slots = opts.slots;
   const listOpenPulls = (api as { listOpenPulls?: unknown }).listOpenPulls;
   if (!slots || typeof listOpenPulls !== "function") {
+    // Legacy single-call path: the same review gate applies, so a caller
+    // without a slot store cannot refresh a red or busy head either.
+    if (
+      !(await isReviewReadyForStrictRefresh({
+        api,
+        owner,
+        repo,
+        pr,
+        ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+        ...(opts.log ? { log: opts.log } : {}),
+      }))
+    ) {
+      return null;
+    }
     return {
       owner,
       repo,
@@ -1223,6 +1443,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     requiredContexts,
     terminal,
     baseSha: effBase,
+    ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
     log: opts.log,
   });
   const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, opts.log) : readyRaw;
@@ -1267,6 +1488,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
         defaultBranch: opts.defaultBranch,
         cloneUrl: opts.cloneUrl,
         requiredContexts,
+        ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
         nowMs: now,
         log: opts.log,
       });
@@ -1309,6 +1531,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
       defaultBranch: opts.defaultBranch,
       cloneUrl: opts.cloneUrl,
       requiredContexts,
+      ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
       nowMs: now,
       log: opts.log,
     });
@@ -1338,6 +1561,306 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   };
 }
 
+/**
+ * Review-green wake for strict refresh (issue #900). When Jumi's review
+ * turns green on a behind PR, the refresh must not wait for the next push
+ * to the target branch: reconcile that PR right away. Returns the
+ * merge-only job, or null when the PR is not refreshable (up-to-date,
+ * ineligible, review not green, fix loop pending). When a forge read fails
+ * before the refreshability verdict is known, the wake is recorded as a
+ * durable admit-next obligation (the same vehicle as #894) and `deferred`
+ * is true, so the engine tick retries it across restarts instead of the
+ * wake dying with this event.
+ */
+export async function shouldEnqueueStrictRefreshOnReviewGreen(opts: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  defaultBranch: string;
+  cloneUrl: string;
+  policy: StrictRefreshPolicy;
+  api: StrictRefreshApi & { getPR: NonNullable<StrictRefreshApi["getPR"]> };
+  sender?: string;
+  log?: (message: string) => void;
+  slots?: StrictRefreshSlotStore;
+  nowMs?: number;
+  hasPendingFollowUp?: StrictPendingFollowUp;
+  /**
+   * Caller-observed base branch for the defer path: when the fresh PR read
+   * itself fails, the branch is otherwise unknown and no obligation can be
+   * recorded. Status handlers know it from their pull listing.
+   */
+  baseBranch?: string;
+}): Promise<{
+  job: (Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }) | null;
+  deferred: boolean;
+}> {
+  const { owner, repo, prNumber, headSha, policy, api } = opts;
+  const log = opts.log;
+  const now = opts.nowMs ?? Date.now();
+  const defer = async (baseBranch: string): Promise<{ job: null; deferred: boolean }> => {
+    if (opts.slots && baseBranch) {
+      try {
+        const recorded = await opts.slots.ensureAdmitNextDue(owner, repo, baseBranch, now);
+        if (recorded) {
+          log?.(
+            `strict refresh review-green wake deferred for ${owner}/${repo}#${baseBranch} (forge error; tick retries)`
+          );
+          return { job: null, deferred: true };
+        }
+      } catch (err) {
+        log?.(`strict refresh review-green defer failed: ${errorMessage(err)}`);
+      }
+    }
+    return { job: null, deferred: false };
+  };
+  let fresh: Pull;
+  try {
+    const got = await api.getPR(owner, repo, prNumber);
+    if (!got || typeof got !== "object" || got.number !== prNumber) return { job: null, deferred: false };
+    fresh = got;
+  } catch (err) {
+    log?.(`strict refresh review-green pr lookup failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return defer(opts.baseBranch ?? "");
+  }
+  if ((fresh.head?.sha ?? "").toLowerCase() !== (headSha ?? "").toLowerCase() || !headSha) {
+    return { job: null, deferred: false };
+  }
+  const baseBranch = fresh.base?.ref?.trim() ? fresh.base.ref.trim() : "";
+  if (!baseBranch) return { job: null, deferred: false };
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
+  if (gitea) {
+    let armed = false;
+    try {
+      armed = await readGiteaScheduleArmed(api, owner, repo, fresh.number, log);
+    } catch (err) {
+      log?.(`strict refresh review-green schedule lookup failed: ${errorMessage(err)}`);
+      return defer(baseBranch);
+    }
+    if (!armed) return { job: null, deferred: false };
+    fresh = { ...fresh, autoMergeEnabled: true };
+  }
+  if (!isStrictRefreshCandidate(fresh, owner, repo, policy.botUsername, policy)) {
+    return { job: null, deferred: false };
+  }
+  // Behind-ness is established, never guessed: GitHub's mergeable_state, or
+  // Gitea's compare. Unknown or up-to-date means no wake.
+  if (gitea) {
+    let behind = false;
+    try {
+      behind = await readGiteaBehindForPull(api, owner, repo, fresh, log);
+    } catch (err) {
+      log?.(`strict refresh review-green behind lookup failed: ${errorMessage(err)}`);
+      return defer(baseBranch);
+    }
+    if (!behind) return { job: null, deferred: false };
+  } else if (!isStrictRefreshBehind(fresh)) {
+    return { job: null, deferred: false };
+  }
+  const { strict: strictness, requiredContexts } = await strictPolicyForBranch(
+    api,
+    owner,
+    repo,
+    baseBranch,
+    policy,
+    opts.defaultBranch,
+    log
+  );
+  if (strictness === "unknown") return defer(baseBranch);
+  if (strictness !== "strict") return { job: null, deferred: false };
+  if (
+    await isStrictRefreshLeftToAuthor(
+      api,
+      owner,
+      repo,
+      fresh,
+      {
+        botUsername: policy.botUsername,
+        ignoreConflictsLabel: policy.ignoreConflictsLabel,
+        defaultBranch: opts.defaultBranch,
+      },
+      log
+    )
+  ) {
+    log?.(`strict refresh #${fresh.number} left to author; skipping review-green wake`);
+    return { job: null, deferred: false };
+  }
+  if (!gitea && (await isTerminallyStrictBlocked({ api, owner, repo, pr: fresh, requiredContexts, log }))) {
+    log?.(`strict refresh #${fresh.number} blocked (conflict or failing checks); skipping review-green wake`);
+    return { job: null, deferred: false };
+  }
+  if (gitea && isStrictRefreshBlocked(fresh)) {
+    log?.(`strict refresh #${fresh.number} blocked (conflict or failing checks); skipping review-green wake`);
+    return { job: null, deferred: false };
+  }
+  let green: StrictReviewGreen;
+  try {
+    green = await readStrictReviewGreen({ api, owner, repo, headSha: fresh.head.sha, ...(log ? { log } : {}) });
+  } catch (err) {
+    log?.(`strict refresh review-green verdict lookup failed: ${errorMessage(err)}`);
+    return defer(baseBranch);
+  }
+  if (green === "unknown") return defer(baseBranch);
+  if (green !== "green") return { job: null, deferred: false };
+  if (opts.hasPendingFollowUp) {
+    let pending = false;
+    try {
+      pending = await opts.hasPendingFollowUp(owner, repo, fresh.number, fresh.head.sha);
+    } catch (err) {
+      log?.(`strict refresh review-green follow-up lookup failed: ${errorMessage(err)}`);
+      return defer(baseBranch);
+    }
+    if (pending) {
+      log?.(`strict refresh #${fresh.number} follow-up pending; skipping review-green wake`);
+      return { job: null, deferred: false };
+    }
+  }
+  const job = await shouldEnqueueStrictRefreshForPR({
+    pr: fresh,
+    owner,
+    repo,
+    defaultBranch: opts.defaultBranch,
+    cloneUrl: opts.cloneUrl,
+    policy,
+    api,
+    ...(opts.sender !== undefined ? { sender: opts.sender } : {}),
+    ...(log ? { log } : {}),
+    ...(opts.slots ? { slots: opts.slots } : {}),
+    nowMs: now,
+    ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+  });
+  return { job, deferred: false };
+}
+
+export type StrictGreenWakeApi = StrictRefreshApi & {
+  getPR: NonNullable<StrictRefreshApi["getPR"]>;
+  listOpenPulls: (owner: string, repo: string) => Promise<Pull[]>;
+} & Partial<{
+    getRepo: (
+      owner: string,
+      repo: string
+    ) => Promise<{ full_name: string; html_url: string; clone_url: string; default_branch: string }>;
+  }>;
+
+/**
+ * Shared status-event entry point for the review-green wake (issue #900),
+ * used by the Gitea `status` and GitHub `status`/`check_run` webhook paths
+ * so the two forges cannot drift. Parses the payload, matches open PRs by
+ * head SHA (oldest first), and reconciles each through
+ * `shouldEnqueueStrictRefreshOnReviewGreen` until one enqueues or defers.
+ * Non-green finishes (and any failure before the verdict is known) fall
+ * through as `skip` so callers reach the sibling-check path unchanged.
+ * A queued job also clears the slot's durable intent, mirroring the
+ * push and PR-activity paths.
+ */
+export async function enqueueStrictRefreshForGreenReview(opts: {
+  rawBody: Uint8Array;
+  delivery: string;
+  api: StrictGreenWakeApi;
+  policy: StrictRefreshPolicy;
+  slots?: StrictRefreshSlotStore;
+  /**
+   * Ledger candidates for the pending-fix-loop probe. The helper builds the
+   * probe from the first candidate exposing `listInflight` once the payload
+   * owner and repo are known; webhook handlers pass their queue stores.
+   */
+  followUpLedgers?: Array<StrictFollowUpLedger | undefined | null | unknown>;
+  sender?: string;
+  defaultBranch?: string;
+  cloneUrl?: string;
+  log?: (message: string) => void;
+  nowMs?: number;
+  enqueue: (job: IssueJob) => Promise<{ queued: boolean; key: string }> | { queued: boolean; key: string };
+}): Promise<{ outcome: "queued" | "deferred" | "skip"; key?: string; reason?: string }> {
+  const log = opts.log;
+  const now = opts.nowMs ?? Date.now();
+  const green = parseJumiReviewSuccessFinish(opts.rawBody);
+  if (!green) return { outcome: "skip", reason: "not a green review finish" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(opts.rawBody));
+  } catch {
+    return { outcome: "skip", reason: "malformed status payload" };
+  }
+  const repository =
+    parsed && typeof parsed === "object" && "repository" in parsed
+      ? (parsed as { repository?: unknown }).repository
+      : undefined;
+  const fullName =
+    repository && typeof repository === "object" && "full_name" in repository
+      ? (repository as { full_name?: unknown }).full_name
+      : undefined;
+  if (typeof fullName !== "string" || !fullName) return { outcome: "skip", reason: "malformed status payload" };
+  const [owner, repo] = fullName.split("/");
+  if (!owner || !repo) return { outcome: "skip", reason: "malformed status payload" };
+  const hasPendingFollowUp = strictPendingFollowUpChecker(owner, repo, ...(opts.followUpLedgers ?? []));
+  let pulls: Pull[];
+  try {
+    pulls = await opts.api.listOpenPulls(owner, repo);
+  } catch (err) {
+    log?.(`strict refresh review-green open-pull lookup failed: ${errorMessage(err)}`);
+    return { outcome: "skip", reason: "open-pull lookup failed" };
+  }
+  const matches = pulls
+    .filter((pr) => (pr?.head?.sha ?? "").toLowerCase() === green.sha.toLowerCase())
+    .sort(compareStrictRefreshOrder);
+  if (matches.length === 0) return { outcome: "skip", reason: "no matching pull request" };
+  const sender =
+    opts.sender ??
+    (parsed && typeof parsed === "object" && "sender" in parsed
+      ? (parsed as { sender?: { login?: unknown } }).sender?.login
+      : undefined);
+  for (const pr of matches) {
+    const baseBranch = pr.base?.ref?.trim() ? pr.base.ref.trim() : "";
+    let defaultBranch = (opts.defaultBranch ?? "").trim();
+    let cloneUrl = (opts.cloneUrl ?? "").trim();
+    if ((!defaultBranch || !cloneUrl) && typeof opts.api.getRepo === "function") {
+      try {
+        const info = await opts.api.getRepo(owner, repo);
+        if (!defaultBranch && typeof info?.default_branch === "string") defaultBranch = info.default_branch.trim();
+        if (!cloneUrl && typeof info?.clone_url === "string") cloneUrl = info.clone_url.trim();
+      } catch (err) {
+        log?.(`strict refresh review-green repo lookup failed for ${owner}/${repo}: ${errorMessage(err)}`);
+      }
+    }
+    if (!defaultBranch || !cloneUrl) {
+      log?.(`strict refresh review-green repo info unreadable for ${owner}/${repo}; skipping`);
+      continue;
+    }
+    const woken = await shouldEnqueueStrictRefreshOnReviewGreen({
+      owner,
+      repo,
+      prNumber: pr.number,
+      headSha: green.sha,
+      defaultBranch,
+      cloneUrl,
+      policy: opts.policy,
+      api: opts.api,
+      ...(typeof sender === "string" && sender ? { sender } : {}),
+      ...(baseBranch ? { baseBranch } : {}),
+      ...(log ? { log } : {}),
+      ...(opts.slots ? { slots: opts.slots } : {}),
+      nowMs: now,
+      ...(hasPendingFollowUp ? { hasPendingFollowUp } : {}),
+    });
+    if (woken.job) {
+      const receivedAt = new Date(now).toISOString();
+      const workerJob: IssueJob = { ...woken.job, delivery: opts.delivery, receivedAt };
+      const result = await opts.enqueue(workerJob);
+      if (opts.slots && woken.job.prNumber && woken.job.headSha && baseBranch) {
+        await opts.slots
+          .clearPending(owner, repo, baseBranch, woken.job.prNumber, woken.job.headSha)
+          .catch(() => undefined);
+      }
+      log?.(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${opts.delivery} strict-refresh-green`);
+      return { outcome: "queued", key: result.key };
+    }
+    if (woken.deferred) return { outcome: "deferred" };
+  }
+  return { outcome: "skip", reason: "no refreshable pull request" };
+}
+
 /** Pure recheck before writing: null means proceed, otherwise skip reason. */
 export function strictRecheckSkipReason(opts: {
   fresh: Pull;
@@ -1356,7 +1879,9 @@ export function strictRecheckSkipReason(opts: {
 
 export type StrictRecheckApi = {
   getPR: (owner: string, repo: string, index: number) => Promise<Pull>;
-} & Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">> &
+} & Partial<
+  StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits" | "listCommitStatuses" | "listCheckRuns">
+> &
   Partial<{
     listIssueTimeline: (
       owner: string,
@@ -1438,6 +1963,19 @@ export async function recheckStrictRefreshEligibility(opts: {
     if (!behind) {
       return { fresh: enriched, skipReason: "strict refresh: not behind" };
     }
+    const green = await readStrictReviewGreen({
+      api: opts.api,
+      owner: opts.owner,
+      repo: opts.repo,
+      headSha: enriched.head.sha,
+      ...(opts.log ? { log: opts.log } : {}),
+    });
+    if (green === "unknown") {
+      return { fresh: enriched, skipReason: "strict refresh: review status unreadable" };
+    }
+    if (green !== "green") {
+      return { fresh: enriched, skipReason: "strict refresh: review not green" };
+    }
     return { fresh: enriched, skipReason: null };
   }
   if (!fresh || !isStrictRefreshCandidate(fresh, opts.owner, opts.repo, opts.botUsername, opts.policy as never)) {
@@ -1472,6 +2010,19 @@ export async function recheckStrictRefreshEligibility(opts: {
     )
   ) {
     return { fresh, skipReason: "strict refresh: left to author (ignore-conflicts)" };
+  }
+  const green = await readStrictReviewGreen({
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    headSha: fresh.head.sha,
+    ...(opts.log ? { log: opts.log } : {}),
+  });
+  if (green === "unknown") {
+    return { fresh, skipReason: "strict refresh: review status unreadable" };
+  }
+  if (green !== "green") {
+    return { fresh, skipReason: "strict refresh: review not green" };
   }
   return { fresh, skipReason: null };
 }

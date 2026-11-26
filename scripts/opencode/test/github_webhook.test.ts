@@ -779,6 +779,8 @@ describe("POST /webhooks/github", () => {
           api: {
             getPR: async () => fullPr,
             getBranch: async () => ({ protected: true, strict: true }),
+            listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+            listCheckRuns: async () => [],
           },
         },
         logger: () => {},

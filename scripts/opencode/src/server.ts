@@ -566,8 +566,12 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           // through to the normal CI-gated review.
           if (deps.worker?.api && deps.worker?.queue) {
             try {
-              const { shouldEnqueueStrictRefreshForPR, encodeStrictRefreshWait, STRICT_REFRESH_WAIT_FALLBACK_MS } =
-                await import("./strict_refresh.ts");
+              const {
+                shouldEnqueueStrictRefreshForPR,
+                strictPendingFollowUpChecker,
+                encodeStrictRefreshWait,
+                STRICT_REFRESH_WAIT_FALLBACK_MS,
+              } = await import("./strict_refresh.ts");
               const [strictOwner, strictRepo] = payload.repository.full_name.split("/");
               if (strictOwner && strictRepo) {
                 let fullPr: import("./ports.ts").Pull | undefined;
@@ -582,6 +586,12 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                 if (fullPr) {
                   const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
                   const strictSlots = strictSlotsFor({ worker: deps.worker, queue: deps.queue });
+                  const strictPending = strictPendingFollowUpChecker(
+                    strictOwner,
+                    strictRepo,
+                    deps.queue,
+                    deps.worker?.review
+                  );
                   const strictJob = await shouldEnqueueStrictRefreshForPR({
                     pr: fullPr,
                     owner: strictOwner,
@@ -600,6 +610,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                     sender: payload.sender?.login ?? "pull_request",
                     log: logger,
                     ...(strictSlots ? { slots: strictSlots } : {}),
+                    ...(strictPending ? { hasPendingFollowUp: strictPending } : {}),
                   });
                   if (strictJob) {
                     const receivedAt = new Date().toISOString();
@@ -871,6 +882,21 @@ export async function reclaimExpiredJobs(
       } as never,
       enqueueIssue: (job) => store.enqueueIssue(job),
       log: logger,
+      hasPendingFollowUp: async (owner, repo, prNumber, headSha) => {
+        // The tick drains obligations for any branch: match the full
+        // coordinates so another repo's same-numbered PR never blocks.
+        const rows = await store.listInflight(500);
+        const want = (headSha ?? "").toLowerCase();
+        return rows.some(
+          (row) =>
+            row?.kind === "follow-up" &&
+            row?.owner === owner &&
+            row?.repo === repo &&
+            row?.prNumber === prNumber &&
+            (row?.headSha ?? "").toLowerCase() === want &&
+            (row?.state === "queued" || row?.state === "leased")
+        );
+      },
     });
   } catch (err) {
     logger(`strict refresh tick expire failed: ${errorMessage(err)}`);

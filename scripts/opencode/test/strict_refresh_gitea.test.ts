@@ -85,6 +85,8 @@ function giteaApi(
       if (behind === "error") throw new Error("Gitea API GET /repos/o/r/compare/x...main → 500: boom");
       return { totalCommits: behind };
     },
+    listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+    listCheckRuns: async () => [],
     getRepoFile: async () => {
       if (!optIn) return { found: false };
       return { found: true, content: "strict_branch_refresh: true\n" };
@@ -316,6 +318,8 @@ describe("gitea worker recheck", () => {
       getBranch: async () => ({ protected: true, strict: true }),
       listIssueTimeline: async () => [{ type: "pull_scheduled_merge" }],
       compareCommits: async () => ({ totalCommits: 2 }),
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      listCheckRuns: async () => [],
     };
     const ok = await recheckStrictRefreshEligibility({
       api: base as never,

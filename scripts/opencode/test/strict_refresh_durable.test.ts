@@ -78,6 +78,8 @@ function strictApi(pulls: Pull[]) {
       clone_url: "https://github.com/o/r.git",
       default_branch: "main",
     }),
+    listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+    listCheckRuns: async () => [],
   } as never;
 }
 
