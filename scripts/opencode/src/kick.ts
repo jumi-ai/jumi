@@ -1,6 +1,7 @@
 import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "./auth.ts";
 import { isCiWaitSkipReason } from "./ci.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
+import { isHeadSettingsFailureReason } from "./repo_settings.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 import { reviewVerdictView } from "./verdict.ts";
 
@@ -192,6 +193,12 @@ export function disabledKickWhy(reason: string): string | undefined {
     return (
       "No kick: the review stopped because the head moved mid-run; " +
       "requeueing this stale commit would review an old SHA."
+    );
+  }
+  if (isHeadSettingsFailureReason(reason)) {
+    return (
+      "No kick: the pull's `.jumi.yml` is invalid on this head; " +
+      "requeueing the same commit would fail the same way. Push a fix to the pull."
     );
   }
   return undefined;

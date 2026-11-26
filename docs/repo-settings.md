@@ -190,6 +190,14 @@ The legacy shared files (`repo_settings.test.ts`, the complete example)
 stay untouched: new keys add new files, so parallel additions merge without
 conflicts.
 
+Turning a new key on in this repository's own `.jumi.yml` is a separate pull,
+made after the release that knows the key is deployed. The parser that reads
+the default branch after merge is the deployed one: enabling the key here
+before that release lands leaves the head invalid, fails
+`jumi/opencode-review`, and stops runner jobs until the release deploys. Keep
+the parser change in the first pull, enable the key here in the later pull,
+and say so in that pull's body.
+
 ## Recipes
 
 Auto-merge only (still needs the deployment switch `JUMI_AUTOMERGE_ENABLED` on and no
