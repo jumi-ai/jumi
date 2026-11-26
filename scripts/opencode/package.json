@@ -8,6 +8,7 @@
     "server": "bun run src/server.ts",
     "lint": "biome check src test package.json tsconfig.json knip.json ../../.gitea/opencode-review.json ../../.gitea/opencode-implement.json",
     "lint:repo": "bun run src/repo_lint.ts",
+    "regenerate:file-sizes": "bun run src/regenerate_file_size_baseline.ts",
     "knip": "knip --include files,dependencies,exports,types",
     "test": "bun test",
     "test:pg": "bun test ./test/*_pg.test.ts",
