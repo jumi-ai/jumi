@@ -7,6 +7,7 @@ import {
   shouldEnqueueWorkflowJobFollowUp,
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
+import { webhookWakeDeliveryFallback } from "./followup_wake_causes.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
@@ -518,6 +519,26 @@ async function issueCommentPullRequestBody(
   }
 }
 
+function enqueueLogLine(result: EnqueueResult, key: string, delivery: string): string {
+  const verb = result.queued ? "queued" : result.deferred ? "deferred" : "deduped";
+  return `${verb} ${result.deferred ? `${key} deferred` : key} delivery=${delivery}`;
+}
+
+function isFollowUpJob(job: Pick<IssueJob, "mode">): boolean {
+  return (job as { mode?: string }).mode === "follow-up";
+}
+
+function stableFollowUpDelivery(
+  delivery: string,
+  rawBody: Uint8Array,
+  eventFamily: string,
+  opts?: { forgeDeliveryId?: string | null }
+): string {
+  const header = opts ? (opts.forgeDeliveryId ?? null) : delivery;
+  if (header) return header;
+  return webhookWakeDeliveryFallback(eventFamily, rawBody);
+}
+
 async function enqueueJobs(
   jobs: IssueJob[],
   queue: HandleWorkerWebhookDeps["queue"],
@@ -529,7 +550,7 @@ async function enqueueJobs(
     const job = jobs[0];
     if (!job) return skipped("no blocked issues to wake", logger);
     const result: EnqueueResult = await queue.enqueue(job);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    logger(enqueueLogLine(result, result.key, job.delivery));
     if (result.queued && sits) {
       const cleared = await clearGithubSit(sits, job.owner, job.repo, job.issueNumber, logger);
       if (cleared) return cleared;
@@ -540,7 +561,7 @@ async function enqueueJobs(
   for (const job of jobs) {
     const result: EnqueueResult = await queue.enqueue(job);
     keys.push(result.key);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    logger(enqueueLogLine(result, result.key, job.delivery));
     if (result.queued && sits) {
       const cleared = await clearGithubSit(sits, job.owner, job.repo, job.issueNumber, logger);
       if (cleared) return cleared;
@@ -558,6 +579,7 @@ export async function handleGithubWebhookEvent(
   opts?: { forgeDeliveryId?: string | null }
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
+  const followupDelivery = stableFollowUpDelivery(delivery, rawBody, event ?? "webhook", opts);
   rememberWebhookInstallation(rawBody, deps);
   if (event === "ping") return json(200, { ok: true });
   if (event === "status" || event === "check_run") {
@@ -714,7 +736,11 @@ export async function handleGithubWebhookEvent(
                 });
                 if (strictJob) {
                   const receivedAt = new Date().toISOString();
-                  const workerJob: import("./types.ts").IssueJob = { ...strictJob, delivery, receivedAt };
+                  const workerJob: import("./types.ts").IssueJob = {
+                    ...strictJob,
+                    delivery: isFollowUpJob(strictJob) ? followupDelivery : delivery,
+                    receivedAt,
+                  };
                   const workerResult = await deps.worker.queue.enqueue(workerJob);
                   if (strictSlots && strictJob.prNumber && strictJob.headSha) {
                     const baseBranch = fullPr.base?.ref?.trim() ? fullPr.base.ref.trim() : "";
@@ -758,7 +784,7 @@ export async function handleGithubWebhookEvent(
                           action,
                           policy,
                           deps,
-                          delivery,
+                          delivery: followupDelivery,
                           logger,
                         });
                       } catch (err) {
@@ -800,7 +826,7 @@ export async function handleGithubWebhookEvent(
               action,
               policy,
               deps,
-              delivery,
+              delivery: followupDelivery,
               logger,
             });
           } catch (err) {
@@ -853,9 +879,13 @@ export async function handleGithubWebhookEvent(
           log: (message) => logger(message),
         });
         if (decision.type === "skip") return skipped(decision.reason, logger);
-        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const job: IssueJob = {
+          ...decision.job,
+          delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
+          receivedAt: new Date().toISOString(),
+        };
         const result: EnqueueResult = await deps.worker.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        logger(enqueueLogLine(result, result.key, job.delivery));
         return json(202, result);
       } catch (err) {
         logger(`takeover failed: ${errorMessage(err)}`);
@@ -947,9 +977,13 @@ export async function handleGithubWebhookEvent(
           if (cleared) return cleared;
           return json(202, result);
         }
-        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const job: IssueJob = {
+          ...decision.job,
+          delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
+          receivedAt: new Date().toISOString(),
+        };
         const result: EnqueueResult = await deps.worker.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        logger(enqueueLogLine(result, result.key, job.delivery));
         if (result.queued) {
           const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
           if (cleared) return cleared;
@@ -965,10 +999,18 @@ export async function handleGithubWebhookEvent(
       }
     }
     if (deps.worker && (action === "closed" || action === "merged")) {
-      return handleWorkerWebhookEvent(rawBody, event, event, delivery, policy, {
-        ...deps.worker,
-        logger: deps.worker.logger ?? logger,
-      });
+      return handleWorkerWebhookEvent(
+        rawBody,
+        event,
+        event,
+        delivery,
+        policy,
+        {
+          ...deps.worker,
+          logger: deps.worker.logger ?? logger,
+        },
+        opts
+      );
     }
     if ((action === "closed" || action === "merged") && event === "pull_request") {
       // Review-only mode has no worker handler to record the close: mark it
@@ -1098,8 +1140,12 @@ export async function handleGithubWebhookEvent(
         }
       }
       if (decision.type === "enqueue") {
-        const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
-        return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
+        const jobs: IssueJob[] = decision.jobs.map((partial) => ({
+          ...partial,
+          delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+          receivedAt,
+        }));
+        return await enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
@@ -1123,7 +1169,11 @@ export async function handleGithubWebhookEvent(
       const jobs: IssueJob[] = [];
       if (decision.type === "enqueue") {
         for (const partial of decision.jobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           const prNumber = job.prNumber;
           const getPR = deps.getPR ?? deps.worker.api.getPR;
           if (prNumber != null && getPR) {
@@ -1149,9 +1199,13 @@ export async function handleGithubWebhookEvent(
           logger
         );
         for (const partial of waiterJobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           jobs.push(job);
-          logger(`shared waiter merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${delivery}`);
+          logger(`shared waiter merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${job.delivery}`);
         }
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
@@ -1168,9 +1222,13 @@ export async function handleGithubWebhookEvent(
         strictSlots = strictSlotsFor(deps);
         const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger, strictSlots);
         for (const partial of strict.jobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           jobs.push(job);
-          logger(`strict refresh merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${delivery}`);
+          logger(`strict refresh merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${job.delivery}`);
         }
       } catch (err) {
         logger(`strict refresh wake failed: ${errorMessage(err)}`);
@@ -1332,9 +1390,13 @@ export async function handleGithubWebhookEvent(
         }
         return skipped(decision.reason, logger);
       }
-      const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+      const job: IssueJob = {
+        ...decision.job,
+        delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
+        receivedAt: new Date().toISOString(),
+      };
       const result: EnqueueResult = await deps.worker.queue.enqueue(job);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      logger(enqueueLogLine(result, result.key, job.delivery));
       if (result.queued) {
         const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
         if (cleared) return cleared;
@@ -1480,7 +1542,7 @@ export async function handleGithubWebhookEvent(
       return skipped("no blocked issues to wake", logger);
     }
 
-    return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
+    return await enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
   } catch (err) {
     if (isQueueUnavailable(err)) {
       logger(`queue unavailable: ${err.message}`);

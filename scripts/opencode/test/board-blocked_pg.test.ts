@@ -9,7 +9,9 @@ describePg("board blocked implement on postgres (#668)", () => {
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
-      await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, review_kicks RESTART IDENTITY`);
+      await sql.unsafe(
+        `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, review_kicks RESTART IDENTITY`
+      );
       const job = makeIssueJob({ delivery: "d-pg-blocked", issueNumber: 12 });
       await store.enqueueIssue(job);
       const leased = await store.lease("worker", 60_000, new Date(), ["implement"]);
