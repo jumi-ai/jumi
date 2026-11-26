@@ -89,6 +89,9 @@ export const KNOWN_PI_ENDPOINTS: readonly string[] = [
   // subscription bearer, never an API key; listing it here does not enable
   // any route (the deployment allowlist still defaults off).
   "https://api.x.ai/v1",
+  // Public Responses API for the OSS Sign in with ChatGPT plan route
+  // (src/pi_chatgpt.ts). The deployment allowlist still gates selection.
+  "https://api.openai.com/v1",
 ];
 
 const GOOGLE_PI_PROVIDERS = new Set(["google", "google-vertex", "google-vertex-ai", "google-generative-ai"]);
