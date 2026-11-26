@@ -475,17 +475,28 @@ describe("pi offline structured review", () => {
   test("per-shell env keeps the git proxy host and no token", async () => {
     const workdir = await tempWorkdir();
     try {
+      // Hermetic: `git status` must not depend on whether TMPDIR (the mkdtemp
+      // parent) sits inside the parent checkout. Init a repo in the workdir
+      // so the allowed read-only git command succeeds on any runner.
+      const init = Bun.spawnSync(["git", "init"], { cwd: workdir });
+      expect(init.exitCode).toBe(0);
+      const sessionEnv = buildPiSessionEnv({
+        home: join(workdir, "home"),
+        scratchDir: join(workdir, "scratch"),
+        gitHost: "gitea.example",
+      });
+      expect(sessionEnv.GIT_AUTH_HOST).toBe("gitea.example");
+      expect(sessionEnv.GIT_AUTH_TOKEN).toBeUndefined();
       const tool = createGuardedPiBashTool({
         cwd: workdir,
-        env: buildPiSessionEnv({
-          home: join(workdir, "home"),
-          scratchDir: join(workdir, "scratch"),
-          gitHost: "gitea.example",
-        }),
+        env: sessionEnv,
       });
       expect(
         (await tool.execute("1", { command: "git status" }, undefined, undefined, undefined)).isError
       ).toBeUndefined();
+      const hostOut = await tool.execute("1", { command: "echo $GIT_AUTH_HOST" }, undefined, undefined, undefined);
+      expect(hostOut.isError).toBeUndefined();
+      expect(hostOut.content.map((part) => part.text).join("\n")).toContain("gitea.example");
       const denied = await tool.execute("1", { command: "git push origin head" }, undefined, undefined, undefined);
       expect(denied.isError).toBe(true);
     } finally {
