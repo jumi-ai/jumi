@@ -31,6 +31,7 @@ import { forgeCapabilities } from "./forge_capabilities.ts";
 import { upsertWorkerComment } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
+import { harnessModeMatches, normalizeHarnessMode, throwIfPiHarness } from "./harness_mode.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
@@ -195,6 +196,9 @@ export async function runReviewJob(
   logger: (message: string) => void = log,
   extras: RunReviewJobExtras = {}
 ): Promise<ReviewResult> {
+  // Deployment-only harness gate: legacy follows the existing dispatch;
+  // explicit pi fails here before any runner spawns (no Pi import on this path).
+  throwIfPiHarness(config.harnessMode ?? "legacy");
   const pr = await api.getPR(job.owner, job.repo, job.prNumber);
   const early = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, job.headSha);
   if (early) {
@@ -566,8 +570,12 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           // through to the normal CI-gated review.
           if (deps.worker?.api && deps.worker?.queue) {
             try {
-              const { shouldEnqueueStrictRefreshForPR, encodeStrictRefreshWait, STRICT_REFRESH_WAIT_FALLBACK_MS } =
-                await import("./strict_refresh.ts");
+              const {
+                shouldEnqueueStrictRefreshForPR,
+                strictPendingFollowUpChecker,
+                encodeStrictRefreshWait,
+                STRICT_REFRESH_WAIT_FALLBACK_MS,
+              } = await import("./strict_refresh.ts");
               const [strictOwner, strictRepo] = payload.repository.full_name.split("/");
               if (strictOwner && strictRepo) {
                 let fullPr: import("./ports.ts").Pull | undefined;
@@ -582,6 +590,12 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                 if (fullPr) {
                   const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
                   const strictSlots = strictSlotsFor({ worker: deps.worker, queue: deps.queue });
+                  const strictPending = strictPendingFollowUpChecker(
+                    strictOwner,
+                    strictRepo,
+                    deps.queue,
+                    deps.worker?.review
+                  );
                   const strictJob = await shouldEnqueueStrictRefreshForPR({
                     pr: fullPr,
                     owner: strictOwner,
@@ -600,6 +614,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                     sender: payload.sender?.login ?? "pull_request",
                     log: logger,
                     ...(strictSlots ? { slots: strictSlots } : {}),
+                    ...(strictPending ? { hasPendingFollowUp: strictPending } : {}),
                   });
                   if (strictJob) {
                     const receivedAt = new Date().toISOString();
@@ -871,6 +886,21 @@ export async function reclaimExpiredJobs(
       } as never,
       enqueueIssue: (job) => store.enqueueIssue(job),
       log: logger,
+      hasPendingFollowUp: async (owner, repo, prNumber, headSha) => {
+        // The tick drains obligations for any branch: match the full
+        // coordinates so another repo's same-numbered PR never blocks.
+        const rows = await store.listInflight(500);
+        const want = (headSha ?? "").toLowerCase();
+        return rows.some(
+          (row) =>
+            row?.kind === "follow-up" &&
+            row?.owner === owner &&
+            row?.repo === repo &&
+            row?.prNumber === prNumber &&
+            (row?.headSha ?? "").toLowerCase() === want &&
+            (row?.state === "queued" || row?.state === "leased")
+        );
+      },
     });
   } catch (err) {
     logger(`strict refresh tick expire failed: ${errorMessage(err)}`);
@@ -1020,7 +1050,11 @@ async function settleCiLookupFailure(
     logger(`ci-lookup-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
     return;
   }
-  await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+  await store.saveResult(row.id, leasedBy, {
+    kind: "error",
+    error: decision.reason,
+    harnessMode: config.harnessMode ?? "legacy",
+  });
   const saved = await store.get(row.id);
   if (!saved || saved.leasedBy !== leasedBy) {
     logger(`ci-lookup exhaust lost lease ${row.jobKey}`);
@@ -1070,6 +1104,8 @@ export async function processEngineTick(
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
+  // Explicit pi fails before any lease or spawn; legacy follows existing dispatch.
+  throwIfPiHarness(config.harnessMode ?? "legacy");
   const nowMs = extras.now?.() ?? Date.now();
   // Hydrate process-local runner cooldowns from the persisted copy so a
   // restart does not resurrect a dead runner. Expired entries are pruned
@@ -1128,6 +1164,14 @@ export async function processEngineTick(
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
+  // Fenced attempt: never resume a live session in a different harness mode.
+  // Old rows (no stamp) read as legacy for compatibility.
+  if (!harnessModeMatches((row as { harnessMode?: unknown }).harnessMode, config.harnessMode ?? "legacy")) {
+    await store.releaseLease(row.id, leasedBy).catch(() => undefined);
+    throw new Error(
+      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt required, never resuming a live session`
+    );
+  }
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
@@ -1256,7 +1300,10 @@ export async function processEngineTick(
       },
       extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
       persistResult: async (persisted) => {
-        await store.saveResult(row.id, leasedBy, persisted);
+        await store.saveResult(row.id, leasedBy, {
+          ...persisted,
+          harnessMode: effectiveConfig.harnessMode ?? "legacy",
+        });
       },
       recordSuggestions:
         extras.recordSuggestions ??
@@ -1425,7 +1472,11 @@ export async function processEngineTick(
       try {
         const decision = decideInfraRetry(row.error, Date.now());
         if (decision.action === "exhaust") {
-          await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+          await store.saveResult(row.id, leasedBy, {
+            kind: "error",
+            error: decision.reason,
+            harnessMode: config.harnessMode ?? "legacy",
+          });
           const current = await store.get(row.id);
           if (current) {
             const published = await publishAndCompleteJob(store, api, config, current, logger);

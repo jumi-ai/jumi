@@ -354,9 +354,9 @@ export interface ReviewOptions {
 }
 
 export type PersistReviewResult =
-  | { kind: "markdown"; markdown: string; runner?: string; record?: ReviewRecord }
-  | { kind: "skip"; reason: string }
-  | { kind: "error"; error: string };
+  | { kind: "markdown"; markdown: string; runner?: string; record?: ReviewRecord; harnessMode?: string }
+  | { kind: "skip"; reason: string; harnessMode?: string }
+  | { kind: "error"; error: string; harnessMode?: string };
 
 export interface ReviewResult {
   status: "posted" | "updated" | "skipped";

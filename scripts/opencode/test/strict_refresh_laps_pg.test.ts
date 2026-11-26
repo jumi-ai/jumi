@@ -55,6 +55,8 @@ function strictApi(pulls: Pull[]) {
   return {
     listOpenPulls: async () => pulls,
     getBranch: async () => ({ protected: true, strict: true }) as never,
+    listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+    listCheckRuns: async () => [],
   } as never;
 }
 

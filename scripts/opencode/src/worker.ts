@@ -22,6 +22,7 @@ import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { type HandoffStore, handoffsFor } from "./handoff.ts";
+import { harnessModeMatches, normalizeHarnessMode, throwIfPiHarness } from "./harness_mode.ts";
 import { settleHeldCancelThroughGate } from "./hold_cancel.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
@@ -611,6 +612,8 @@ export async function processWorkerTick(
   pids?: Map<string, number>
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
+  // Explicit pi fails before any lease or spawn; legacy follows existing dispatch.
+  throwIfPiHarness(config.harnessMode ?? "legacy");
   const nowMs = extras.now?.() ?? Date.now();
   if (extras.runnerCooldowns && typeof store.listRunnerCooldowns === "function") {
     try {
@@ -655,6 +658,14 @@ export async function processWorkerTick(
   }
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), WORKER_JOB_KINDS);
   if (!row) return "idle";
+  // Fenced attempt: never resume a live session in a different harness mode.
+  // Old rows (no stamp) read as legacy for compatibility.
+  if (!harnessModeMatches((row as { harnessMode?: unknown }).harnessMode, config.harnessMode ?? "legacy")) {
+    await store.releaseLease(row.id, leasedBy).catch(() => undefined);
+    throw new Error(
+      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt required, never resuming a live session`
+    );
+  }
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
@@ -1379,7 +1390,11 @@ export async function processWorkerTick(
       try {
         const decision = decideInfraRetry(row.error, Date.now());
         if (decision.action === "exhaust") {
-          await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+          await store.saveResult(row.id, leasedBy, {
+            kind: "error",
+            error: decision.reason,
+            harnessMode: config.harnessMode ?? "legacy",
+          });
           const published = await store.markPublished(row.id, leasedBy, {
             state: "failed",
             reason: decision.reason,

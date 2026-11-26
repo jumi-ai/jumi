@@ -203,6 +203,14 @@ export interface StrictRefreshSlotStore {
     expectedGeneration: number,
     nowMs?: number
   ): Promise<boolean>;
+  /**
+   * Record an admit-next obligation without touching a held slot (issue
+   * #900): a review-green wake that a forge error interrupted is retried
+   * by the engine tick. Returns false when the branch already holds a
+   * slot (the holder's own obligation owns the retry) or the write fails
+   * to land; true when a due obligation is now stored.
+   */
+  ensureAdmitNextDue(owner: string, repo: string, baseBranch: string, nowMs?: number): Promise<boolean>;
   /** Slots whose retry budget is exhausted and need an operator kick. */
   listNeedsKick(): Promise<StrictRefreshSlot[]>;
   /** Branches with an admit-next obligation due. */
@@ -557,6 +565,17 @@ export class MemoryStrictRefreshSlotStore implements StrictRefreshSlotStore {
       const slot = this.slots.get(key);
       if (slot && (slot.generation ?? 0) !== expectedGeneration) return false;
       if (slot) this.slots.delete(key);
+      this.admitNext.set(key, { owner, repo, baseBranch, dueAtMs: nowMs ?? Date.now() });
+      return true;
+    });
+  }
+
+  async ensureAdmitNextDue(owner: string, repo: string, baseBranch: string, nowMs?: number): Promise<boolean> {
+    return this.locked(() => {
+      const key = slotKey(owner, repo, baseBranch);
+      // Never touch a held slot: the holder's pending/retry obligation owns
+      // the retry, and callers rely on the false return to skip deferring.
+      if (this.slots.has(key)) return false;
       this.admitNext.set(key, { owner, repo, baseBranch, dueAtMs: nowMs ?? Date.now() });
       return true;
     });
@@ -1201,6 +1220,47 @@ export class PgStrictRefreshSlotStore implements StrictRefreshSlotStore {
           );
         }
         return true;
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async ensureAdmitNextDue(owner: string, repo: string, baseBranch: string, nowMs?: number): Promise<boolean> {
+    try {
+      return await this.withSlotLock(owner, repo, baseBranch, async (tx) => {
+        const nowIso = new Date(nowMs ?? Date.now()).toISOString();
+        // Never touch a held slot: the holder's pending/retry obligation
+        // owns the retry. The pr_number-IS-NULL guard keeps this a no-op
+        // for held branches.
+        const updated = asRows<{ one: unknown }>(
+          await tx.unsafe(
+            `UPDATE ${STRICT_REFRESH_SLOT_TABLE} SET phase = 'admit-next', due_at = $4::timestamptz, updated_at = $4::timestamptz, retry_marker = NULL, last_error = NULL WHERE owner = $1 AND repo = $2 AND base_branch = $3 AND pr_number IS NULL RETURNING 1 AS one`,
+            [owner, repo, baseBranch, nowIso]
+          )
+        );
+        if (updated.length > 0) return true;
+        const existing = asRows<{ pr_number: unknown }>(
+          await tx.unsafe(
+            `SELECT pr_number FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE owner = $1 AND repo = $2 AND base_branch = $3`,
+            [owner, repo, baseBranch]
+          )
+        );
+        // A held slot owns the branch: leave the wake to the holder path.
+        if (existing.length > 0) return false;
+        await tx.unsafe(
+          `INSERT INTO ${STRICT_REFRESH_SLOT_TABLE} (owner, repo, base_branch, phase, due_at, updated_at) VALUES ($1, $2, $3, 'admit-next', $4::timestamptz, $4::timestamptz) ON CONFLICT (owner, repo, base_branch) DO NOTHING`,
+          [owner, repo, baseBranch, nowIso]
+        );
+        const check = asRows<{ pr_number: unknown }>(
+          await tx.unsafe(
+            `SELECT pr_number FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE owner = $1 AND repo = $2 AND base_branch = $3`,
+            [owner, repo, baseBranch]
+          )
+        );
+        // A concurrent admission winning the race leaves a held row: the
+        // holder path owns the retry, so report no obligation stored.
+        return check[0]?.pr_number == null;
       });
     } catch (err) {
       wrapSqlError(err);

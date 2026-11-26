@@ -192,7 +192,9 @@ describe("strict refresh swallowed by the same-push conflict job (#784)", () => 
 
   test("conflict first: clean merge discarded, strict follow-up pushes the merge", async () => {
     await withDirs(async (home, workdir) => {
-      const api = forgeApi();
+      const api = forgeApi({
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      });
       const conflictCalls: string[][] = [];
       const conflictResult = await implementConflict({
         api,
@@ -253,7 +255,9 @@ describe("strict refresh swallowed by the same-push conflict job (#784)", () => 
 
   test("strict follow-up first: merge pushed, conflict afterwards is a no-op", async () => {
     await withDirs(async (home, workdir) => {
-      const api = forgeApi();
+      const api = forgeApi({
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      });
       const pushCalls: string[][] = [];
       const strictResult = await implementFollowUp({
         api,
@@ -358,6 +362,7 @@ describe("strict refresh pickup gate on Jumi closers (#814)", () => {
       listOpenPulls: async () => [pr],
       getPR: async () => pr as never,
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
     });
   }
 
@@ -380,6 +385,7 @@ describe("strict refresh pickup gate on Jumi closers (#814)", () => {
     const api = forgeApi({
       listOpenPulls: async () => [pr],
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
     });
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(
       makePushPayload({ after: "basesha-new" }),
@@ -414,6 +420,7 @@ describe("strict refresh pickup gate on Jumi closers (#814)", () => {
     const api = forgeApi({
       listOpenPulls: async () => [pr],
       getBranch: async () => ({ protected: true, strict: true }) as never,
+      listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
     });
     const { jobs } = await shouldEnqueueStrictRefreshOnPush(
       makePushPayload({ after: "basesha-new" }),
@@ -489,6 +496,7 @@ describe("strict refresh pickup gate on Jumi closers (#814)", () => {
         listOpenPulls: async () => [pr],
         getPR: async () => pr as never,
         getBranch: async () => ({ protected: true, strict: true }) as never,
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
       });
       const { jobs } = await shouldEnqueueStrictRefreshOnPush(
         makePushPayload({ after: "basesha-new" }),
