@@ -122,6 +122,8 @@ type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "getCollaboratorPermission"
       | "getAppPermissions"
       | "listPullCommits"
+      | "listCommitStatuses"
+      | "listCheckRuns"
       | "deleteGitRef"
       | "getRepoFile"
       | "addIssueAssignees"
@@ -764,6 +766,27 @@ export async function handleWorkerWebhookEvent(
   if (isCommitStatusWebhookEvent(event, eventType)) {
     if (!deps.review || !deps.api) return skipped(`unsupported event ${event ?? eventType ?? "status"}`, logger);
     try {
+      // Jumi's own review turning green on a behind PR wakes the refresh
+      // without waiting for the next target-branch push (issue #900). Any
+      // other finish falls through to the sibling-check path, which skips
+      // the review's own status. The wake is durable before the 202: a forge
+      // error mid-wake records an admit-next obligation the tick retries.
+      const { enqueueStrictRefreshForGreenReview } = await import("./strict_refresh.ts");
+      const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
+      const strictSlots = strictSlotsFor(deps);
+      const greenWake = await enqueueStrictRefreshForGreenReview({
+        rawBody,
+        delivery,
+        api: deps.api as never,
+        policy: policy as never,
+        ...(strictSlots ? { slots: strictSlots } : {}),
+        followUpLedgers: [deps.review, deps.queue],
+        log: logger,
+        enqueue: (job) => deps.queue.enqueue(job),
+      });
+      if (greenWake.outcome === "queued" || greenWake.outcome === "deferred") {
+        return json(202, { queued: greenWake.outcome === "queued", ...(greenWake.key ? { key: greenWake.key } : {}) });
+      }
       const decision = await shouldEnqueueSiblingCheckReview(rawBody, "status", policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
@@ -938,10 +961,21 @@ export async function handleWorkerWebhookEvent(
       // the `.jumi.yml` opt-in plus timeline schedule and compare behind.
       // Single-slot per repo and target branch (see github_webhook).
       try {
-        const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
+        const { shouldEnqueueStrictRefreshOnPush, strictPendingFollowUpChecker } = await import("./strict_refresh.ts");
         const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
         const strictSlots = strictSlotsFor(deps);
-        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger, strictSlots);
+        const [pushOwner, pushRepo] = (payload.repository?.full_name ?? "").split("/");
+        const strictPending =
+          pushOwner && pushRepo ? strictPendingFollowUpChecker(pushOwner, pushRepo, deps.review) : undefined;
+        const strict = await shouldEnqueueStrictRefreshOnPush(
+          payload,
+          policy as never,
+          deps.api,
+          logger,
+          strictSlots,
+          undefined,
+          strictPending
+        );
         for (const partial of strict.jobs) {
           const job: IssueJob = {
             ...partial,

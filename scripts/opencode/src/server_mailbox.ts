@@ -12,6 +12,8 @@ export function workerMailboxApi(
         | "listIssueBlocks"
         | "listRepoIssues"
         | "listPullCommits"
+        | "listCommitStatuses"
+        | "listCheckRuns"
         | "deleteGitRef"
         | "getRepoFile"
         | "addIssueAssignees"
@@ -43,6 +45,10 @@ export function workerMailboxApi(
     listIssueBlocks: api.listIssueBlocks ? (owner, repo, index) => api.listIssueBlocks!(owner, repo, index) : undefined,
     listRepoIssues: api.listRepoIssues ? (owner, repo, opts) => api.listRepoIssues!(owner, repo, opts) : undefined,
     listPullCommits: api.listPullCommits ? (owner, repo, index) => api.listPullCommits!(owner, repo, index) : undefined,
+    listCommitStatuses: api.listCommitStatuses
+      ? (owner, repo, sha) => api.listCommitStatuses!(owner, repo, sha)
+      : undefined,
+    listCheckRuns: api.listCheckRuns ? (owner, repo, sha) => api.listCheckRuns!(owner, repo, sha) : undefined,
     deleteGitRef: api.deleteGitRef ? (owner, repo, ref) => api.deleteGitRef!(owner, repo, ref) : undefined,
     getRepoFile: api.getRepoFile ? (owner, repo, path, ref) => api.getRepoFile!(owner, repo, path, ref) : undefined,
     addIssueAssignees: api.addIssueAssignees

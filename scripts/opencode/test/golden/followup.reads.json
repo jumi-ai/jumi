@@ -386,6 +386,8 @@
       "getBranch": 2,
       "getIssue": 1,
       "getPR": 2,
+      "listCheckRuns": 2,
+      "listCommitStatuses": 2,
       "listOpenPulls": 1
     }
   },

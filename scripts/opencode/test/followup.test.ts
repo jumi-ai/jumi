@@ -6438,7 +6438,9 @@ describe("strict refresh merge-only writer races", () => {
         issueUpdatedAt: "2026-05-23T00:00:00Z",
         headShaAtStart: "abc",
       });
-      const api = followupApi();
+      const api = followupApi({
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
+      });
       const result = await implementFollowUp({
         api,
         job: strictJob(),
@@ -6472,6 +6474,7 @@ describe("strict refresh merge-only writer races", () => {
         listOpenPulls: async () => [pr],
         getPR: async () => pr,
         getBranch: async () => ({ protected: true, strict: true }) as never,
+        listCommitStatuses: async () => [{ context: "jumi/opencode-review", state: "success" }],
       });
       const runtime = {
         ...standingPodRuntime,
