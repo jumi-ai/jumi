@@ -84,6 +84,7 @@ export const KNOWN_PI_ENDPOINTS: readonly string[] = [
   "https://opencode.ai/zen/v1",
   "https://opencode.ai/zen/go/v1",
   "https://opencode.ai/inference/v1",
+  "process://claude-code",
 ];
 
 const GOOGLE_PI_PROVIDERS = new Set(["google", "google-vertex", "google-vertex-ai", "google-generative-ai"]);
