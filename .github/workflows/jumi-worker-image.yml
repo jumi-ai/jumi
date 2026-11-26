@@ -248,6 +248,11 @@ jobs:
           docker run --rm "${TEST_TAG}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+          # Pi Claude subscription route (#937): same loopback probe as the
+          # reviewer image (real binary plus real Pi SDK, nothing billed).
+          docker run --rm "${TEST_TAG}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
           # The child gets an xAI credential with no refresh token, so a killed
           # job cannot rotate the grant. Prove the installed binary sends that
           # shape as a bearer instead of refreshing it.

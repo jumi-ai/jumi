@@ -287,6 +287,17 @@ jobs:
           docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the pi-claude subscription route against the installed components
+        if: ${{ env.VERSION != '' }}
+        # Pi owns tools while the unmodified helper is inference only (#937).
+        # The probe drives the real binary and the real Pi SDK at loopback
+        # (nothing billed, no real credential), so a version check cannot pass
+        # for it.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
       - name: Verify the xAI child credential against the opencode binary
         if: ${{ env.VERSION != '' }}
         # The child gets an xAI credential with no refresh token, so a killed

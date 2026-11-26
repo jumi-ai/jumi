@@ -409,6 +409,16 @@ verify_reviewer_runtime() {
     echo "claude production flags rejected by the installed claude binary" >&2
     exit 1
   fi
+  # Pi Claude subscription route (#937): the helper is inference only while Pi
+  # owns tools. The probe drives the real binary and the real Pi SDK against a
+  # loopback endpoint (nothing billed, no real credential), so a mocked helper
+  # or a version check cannot stand in for it.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "pi-claude subscription probe failed against the installed components" >&2
+    exit 1
+  fi
   # The child gets an xAI credential that cannot refresh, so a killed review
   # cannot burn the refresh grant. That only holds while OpenCode sends that
   # shape as a bearer instead of refreshing it, which only the real binary can

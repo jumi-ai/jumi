@@ -324,6 +324,15 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the pi-claude subscription route against the installed components
+        # Pi owns tools while the helper is inference only (#937). Loopback
+        # probe over the real binary and the real Pi SDK; a version check is
+        # not the probe.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
       - name: Verify the xAI child credential against the opencode binary
         # Jumi hands the child an xAI credential with no refresh token so a
         # killed review cannot rotate the grant and take the new token with it.
@@ -481,6 +490,13 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
+
+      - name: Verify the pi-claude subscription route against the installed components
+        # Same loopback probe as the reviewer job, under the worker image.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
 
       - name: Verify the xAI child credential against the opencode binary
         # The worker holds the same grant and runs the 4h jobs. Same probe.

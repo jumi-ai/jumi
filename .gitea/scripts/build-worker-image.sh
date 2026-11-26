@@ -389,6 +389,14 @@ verify_worker_skills() {
     echo "claude production flags rejected by the installed claude binary" >&2
     exit 1
   fi
+  # Pi Claude subscription route (#937): inference only through the helper
+  # while Pi owns tools. Same loopback probe as the reviewer image.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "pi-claude subscription probe failed against the installed components" >&2
+    exit 1
+  fi
   # The worker holds the same xAI grant and runs the 4h jobs, so it needs the
   # same proof: the child credential is sent as a bearer and never refreshed.
   if ! buildah run "${ctr}" -- \
