@@ -95,13 +95,7 @@ import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.t
 import { attachCarryNote, tryCarryReview } from "./review_carry.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
-import {
-  classifyBlockingFindings,
-  normalizeFindingForge,
-  normalizeFindingRunner,
-  parseBlockingFindings,
-  touchedFromFilenames,
-} from "./review_findings.ts";
+import { recordBlockingFindingOutcomes, resolveFindingWriterRunner } from "./review_findings_publish.ts";
 import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -1874,32 +1868,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       addressed: counts.addressed,
     });
   }
-  if (opts.recordFindings && opts.previousFindings && opts.previousFindings.length > 0) {
-    try {
-      const prevBlocking = parseBlockingFindings(opts.previousFindings.join("\n\n"), { singleFilePath });
-      const currBlocking = parseBlockingFindings(comment, { singleFilePath });
-      const touched = touchedFromFilenames((opts.touchedFiles ?? opts.changedFiles ?? []).map((file) => file.filename));
-      const classified = classifyBlockingFindings(prevBlocking, currBlocking, touched);
-      const rows = classified.map((entry) => ({
-        forge: normalizeFindingForge(opts.forgeKind),
-        owner: opts.owner,
-        repo: opts.repo,
-        prNumber: opts.prNumber,
-        severity: entry.prev.severity,
-        reviewerRunner: normalizeFindingRunner(opts.resultRunner),
-        writerRunner: (opts.writerRunner ?? "").trim(),
-        reviewRound: opts.reviewRound ?? 1,
-        outcome: entry.outcome,
-        fingerprint: entry.fingerprint,
-        path: entry.prev.path,
-        line: entry.prev.line,
-      }));
-      await opts.recordFindings(rows);
-      logDiagnostic(log, "review_findings", { review: reviewLabel, findings: rows.length });
-    } catch (err) {
-      log(`finding metrics unavailable: ${errorMessage(err)}`);
-    }
-  }
+  await recordBlockingFindingOutcomes(opts, comment, { singleFilePath, log, reviewLabel });
   // Opt-in blocking questions: when the effective list (deployer plus the
   // repository's default-branch file) names this PR author, a
   // questions-only success still fails the required check so automerge waits,
@@ -3164,26 +3133,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
         }
       }
-      // Writer runner for the finding rows: explicit stamp wins, otherwise the
-      // exact-head writer provenance (publisher, else last contributor).
-      // Fail-open to empty: attribution must never fail the review.
-      let writerRunner = opts.writerRunner ?? null;
-      if (!writerRunner && opts.provenance) {
-        try {
-          const lookup = await opts.provenance.lookupForReview({
-            forge: forgeCapabilities(opts.forgeKind).kind,
-            owner: opts.owner,
-            repo: opts.repo,
-            prNumber: opts.prNumber,
-            headSha: reviewedHeadSha,
-            branch: pr.head.ref,
-          });
-          const stamp = lookup.publisher ?? lookup.contributors[lookup.contributors.length - 1];
-          if (stamp) writerRunner = formatRunnerStamp(stamp);
-        } catch {
-          // Fail-open.
-        }
-      }
+      const writerRunner = await resolveFindingWriterRunner(opts, reviewedHeadSha, pr.head.ref);
       return await publishReviewResult({
         api: forgeApi,
         forge: forgeApi,
