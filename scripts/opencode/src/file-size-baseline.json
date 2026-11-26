@@ -65,7 +65,7 @@
   "forge_capabilities.ts": 144,
   "forge_errors.ts": 145,
   "forge_webfetch.ts": 149,
-  "git.ts": 1336,
+  "git.ts": 1337,
   "git_abort.ts": 167,
   "gitea_issues.ts": 376,
   "github_api.ts": 1616,

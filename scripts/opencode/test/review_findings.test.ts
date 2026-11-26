@@ -342,7 +342,7 @@ describe("blocking finding parsing", () => {
   test("severity helpers stay bounded", () => {
     expect(BLOCKING_FINDING_SEVERITIES).toEqual(["bug", "risk"]);
     expect(BLOCKING_FINDING_OUTCOMES).toEqual(["fixed", "dismissed", "repeated", "open_at_merge", "unmatched"]);
-    expect(FINDING_RESPONSE_STATUSES).toEqual(["fixed", "unchanged"]);
+    expect(FINDING_RESPONSE_STATUSES).toEqual(["fixed", "unchanged", "needs_maintainer"]);
     const bug: BlockingFindingSeverity = "bug";
     const repeated: BlockingFindingOutcome = "repeated";
     expect(bug).toBe("bug");
