@@ -1137,7 +1137,11 @@ describe("review setup sandbox red-team (real wrapper)", () => {
     });
   });
 
-  test("adversarial fixture: committed script plus lifecycle hook both fail; outcome follows onFailure", async () => {
+  // Real `npm install` inside the sandbox can exceed the default 5s
+  // bun timeout on loaded CI runners; this covers two sequential installs.
+  test("adversarial fixture: committed script plus lifecycle hook both fail; outcome follows onFailure", {
+    timeout: 60_000,
+  }, async () => {
     const live = checkReviewSandbox();
     if (!live.available) {
       expect(live.reason ?? "").toMatch(/Landlock|executable/);

@@ -96,9 +96,9 @@ export type FollowUpWakeRecordOutcome = "recorded" | "duplicate";
 
 export interface FollowUpWakeCauseStore {
   /** Insert or dedupe on `(job_key, cause_id)` in any state. Throws when the row cannot persist. */
-  record(input: FollowUpWakeCauseInput): Promise<FollowUpWakeRecordOutcome>;
+  record(input: FollowUpWakeCauseInput, opts?: { tx?: SqlClient }): Promise<FollowUpWakeRecordOutcome>;
   /** Any state, or undefined when unknown. */
-  get(jobKey: string, causeId: string): Promise<FollowUpWakeCause | undefined>;
+  get(jobKey: string, causeId: string, tx?: SqlClient): Promise<FollowUpWakeCause | undefined>;
   /**
    * Oldest pending cause for the key, row-locked when a caller transaction
    * is supplied (ordered by `id`). Compose with `markPromoted` in the
@@ -328,7 +328,8 @@ export class MemoryFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
     return `${jobKey}\u001f${causeId}`;
   }
 
-  async record(input: FollowUpWakeCauseInput): Promise<FollowUpWakeRecordOutcome> {
+  async record(input: FollowUpWakeCauseInput, opts?: { tx?: SqlClient }): Promise<FollowUpWakeRecordOutcome> {
+    void opts?.tx;
     return this.locked(() => {
       const causeId = resolveFollowUpWakeCauseId({
         causeId: input.causeId,
@@ -359,7 +360,8 @@ export class MemoryFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
     });
   }
 
-  async get(jobKey: string, causeId: string): Promise<FollowUpWakeCause | undefined> {
+  async get(jobKey: string, causeId: string, _tx?: SqlClient): Promise<FollowUpWakeCause | undefined> {
+    void _tx;
     const cause = this.causes.get(MemoryFollowUpWakeCauseStore.mapKey(jobKey, causeId));
     return cause ? cloneCause(cause) : undefined;
   }
@@ -467,15 +469,16 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
     }
   }
 
-  async record(input: FollowUpWakeCauseInput): Promise<FollowUpWakeRecordOutcome> {
+  async record(input: FollowUpWakeCauseInput, opts?: { tx?: SqlClient }): Promise<FollowUpWakeRecordOutcome> {
     const causeId = resolveFollowUpWakeCauseId({
       causeId: input.causeId,
       delivery: input.delivery,
       payload: input.payload,
     });
+    const client = opts?.tx ?? this.sql;
     try {
       const rows = asRows<{ id: unknown }>(
-        await this.sql.unsafe(
+        await client.unsafe(
           `INSERT INTO follow_up_wake_causes (
             job_key, owner, repo, issue_number, pr_number, head_sha, cause_id, delivery, payload
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
@@ -504,10 +507,11 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
     }
   }
 
-  async get(jobKey: string, causeId: string): Promise<FollowUpWakeCause | undefined> {
+  async get(jobKey: string, causeId: string, tx?: SqlClient): Promise<FollowUpWakeCause | undefined> {
+    const client = tx ?? this.sql;
     try {
       const rows = asRows<WakeCauseRow>(
-        await this.sql.unsafe(
+        await client.unsafe(
           `SELECT ${WAKE_CAUSE_COLUMNS} FROM follow_up_wake_causes WHERE job_key = $1 AND cause_id = $2`,
           [jobKey, causeId]
         )

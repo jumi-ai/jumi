@@ -9,7 +9,7 @@ describePg("PgReviewJobStore result_json round-trip", () => {
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
-      await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+      await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
       await store.enqueue(makeJob());
       const leased = await store.lease("engine-1", 60_000, new Date());
       expect(leased).toBeDefined();
