@@ -488,6 +488,19 @@ Rotation does not revoke an access token already issued, so no lock is held for 
 
 The child shape is `XAI_CHILD_AUTH_SHAPE` in `src/xai_auth.ts`, not operator env: the probe is what forces the decision, so an OpenCode release that stops accepting `api` fails the image build and the constant moves in the same change. The documented fallback is `oauth` — access and expiry with no refresh field. Measured against OpenCode 2.3.2 that shape is rejected before any request is made ("xAI API key is missing"), so it fails a review closed rather than presenting the parent's refresh token, but it is not the shape to reach for first.
 
+### Fresh-job subscription credential boundary (#931)
+
+One-shot Jobs (`bun run src/job.ts`) start with an empty `HOME`. The privileged parent owns every official login, serializes refresh/rotation, persists renewed state, and handles revocation; the inference component gets only the minimum capability for one request — no forge credential, no reusable login, no arbitrary refresh authority — and the parent is never a request proxy. The shared contract lives in `src/fresh_job_credential_boundary.ts` with a reusable offline proof in `test/fresh_job_credential_boundary.test.ts` (dummy credentials only; `#935`–`#938` inherit the checks for their own credential form). A single UID (`10001:10001`) cannot enforce this boundary by file mode — a same-user child reads the parent file and `/proc` — so any route that needs file-mode hiding within one UID is marked blocked until a per-job UID or mount namespace exists.
+
+| Route | Fresh-job verdict | Why |
+|-------|-------------------|-----|
+| ChatGPT OSS sign-in (Sign in with ChatGPT, dynamic client + `ext_agent_host_id`, loopback, `0600` file) | blocked | Official login needs an interactive browser; an empty `HOME` holds no grant and copying one in is the forbidden shared token store |
+| Claude unmodified signed-in helper (`apiKeyHelper`) | blocked | The helper is renewal authority the same-UID child could execute itself; the static `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` child shape stays allowed where mounted as env |
+| Direct SuperGrok (xAI OAuth grant) | blocked in job mode | Empty `HOME` has no grant (`src/job_requirements.ts` refuses); standing pods with retained `HOME` stay allowed via the parent-owned `src/xai_auth.ts` path, gated by `#938` on the Pi route |
+| OpenCode Go (static `OPENCODE_API_KEY`, `x-opencode-session`) | allowed | No refresh to serialize; the parent re-reads `OPENCODE_API_KEY_FILE` every spawn; missing/unreadable key fails closed as auth. Named Pi support (validated session-header client) is the allowed lane; unattended decision/embedding calls bill at list price without the Go discount |
+
+Subscription limits (5-hour / weekly / monthly, `403 EntitlementError`) block with a rate-limited status; paid overage (Extra Usage on the console balance, on by default only for Go Teams) is spend and needs a human operator decision — no registration, sign-in, or spend happens here. Operator-only checks: subscribe and mount the Go key as files (not `subPath`), keep Pi builds current so they send session information, complete device/browser logins on the ordinal with durable `HOME`, and disconnect (`/logout`, ChatGPT Security, key rotation) to revoke. First-party evidence is linked per route in the contract module.
+
 The service runs OpenCode with a sanitized environment. Gitea tokens and webhook secrets are not passed to the OpenCode child process.
 The container runtime process runs as non-root UID/GID `10001:10001`.
 
