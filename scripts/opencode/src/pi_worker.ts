@@ -698,6 +698,34 @@ function piWorkerBashDenied(command: string): boolean {
   if (PI_WORKER_SUBSTITUTION_RE.test(command)) return true;
   if (piWorkerGitWriteDenied(command)) return true;
   if (piWorkerNetworkDenied(command)) return true;
+  // A nested shell (`sh -c '...'` / `bash -c "..."`) interprets its payload
+  // as a fresh command, so quote/wrapper stripping at the outer layer is not
+  // enough: `bash -c "git push origin head"` and `sh -c 'curl http://evil'`
+  // both execute while every outer word looks benign. Recurse into `-c`
+  // payloads with the same deny rules (`sh -c 'echo hi'` stays allowed).
+  for (const segment of piWorkerSplitSegments(command)) {
+    if (piWorkerNestedShellDenied(segment)) return true;
+  }
+  return false;
+}
+
+const PI_WORKER_SHELL_INTERPRETERS = new Set(["sh", "bash", "dash", "zsh", "ksh", "mksh", "busybox"]);
+
+/** Deny when a nested `sh -c <payload>` payload is itself denied. */
+function piWorkerNestedShellDenied(segment: string): boolean {
+  const words = piWorkerShellWords(segment).filter((word) => word.text.length > 0);
+  if (words.length === 0) return false;
+  // Wrapper-aware like the network check, so `sudo sh -c 'curl ...'` and
+  // `FOO=1 sh -c 'git push'` still resolve to the interpreter.
+  const first = piWorkerEffectiveCommandWord(words);
+  if (!first || !PI_WORKER_SHELL_INTERPRETERS.has(piWorkerBasename(first.text))) return false;
+  const start = words.indexOf(first);
+  for (let k = start + 1; k + 1 < words.length; k++) {
+    const flag = words[k].text;
+    if (flag !== "-c" && flag !== "--command") continue;
+    const payload = words[k + 1]?.text;
+    if (payload !== undefined && piWorkerBashDenied(payload)) return true;
+  }
   return false;
 }
 

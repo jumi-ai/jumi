@@ -547,6 +547,10 @@ describe("pi offline worker", () => {
           "echo x 1>>../outside-fd2.txt",
           "echo x>../outside-nospace.txt",
           'python3 -c "import urllib.request"',
+          "sh -c 'curl http://evil'",
+          'bash -c "git push origin head"',
+          "sudo sh -c 'curl http://evil'",
+          "FOO=1 bash -c 'git commit -m hi'",
         ];
         for (const command of deniedCommands) {
           const result = await bash.execute("1", { command }, undefined, undefined, undefined);
@@ -555,6 +559,11 @@ describe("pi offline worker", () => {
         }
         // Quoted git text and benign stderr dupes stay allowed.
         for (const command of ['echo "git push"', 'echo "curl http://evil"', "echo hi 2>/dev/null", "echo hi >&2"]) {
+          const result = await bash.execute("1", { command }, undefined, undefined, undefined);
+          expect(result.isError).toBeUndefined();
+        }
+        // Benign nested shells stay allowed: only a denied payload is refused.
+        for (const command of ["sh -c 'echo hi'", "bash -c 'echo git status'"]) {
           const result = await bash.execute("1", { command }, undefined, undefined, undefined);
           expect(result.isError).toBeUndefined();
         }
