@@ -144,6 +144,33 @@ describe("resolveSettledHoldThreads ordering and retry", () => {
       log: () => undefined,
     });
   });
+
+  test("GitHub GraphQL permission denial posts one board note", async () => {
+    const inlines = [jumiInline(9001, jumiBody("❓ maintainer: please?"), 4109)];
+    const created: string[] = [];
+    const api = {
+      resolvePullComment: async () => {
+        throw new Error("GitHub GraphQL → Resource not accessible by integration");
+      },
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_o: string, _r: string, _n: number, body: string) => {
+        created.push(body);
+        return { id: 1 };
+      },
+    };
+    const out = await resolveSettledHoldThreads({
+      api,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 127,
+      inlines: inlines as never,
+      botUsername: BOT,
+      log: () => undefined,
+    });
+    expect(out).toEqual({ resolved: 0, failed: 1, permission: true });
+    expect(created).toHaveLength(1);
+    expect(created[0]).toContain(holdResolveNoteMarker("kirmanak", "demo", 127));
+  });
 });
 
 function heldPr() {

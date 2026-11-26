@@ -77,7 +77,12 @@ function isMissingResolveMethod(err: unknown): boolean {
 /** 401/403 from either forge adapter: the token cannot resolve threads. */
 function isResolvePermissionError(err: unknown): boolean {
   if (isForbiddenError(err)) return true;
-  return err instanceof Error && /→ 401\b/.test(err.message);
+  if (!(err instanceof Error)) return false;
+  if (/→ 401\b/.test(err.message)) return true;
+  // GitHub GraphQL surfaces permission denials as 200 + errors (no `→ 403`).
+  return /GitHub GraphQL →.*(forbidden|not accessible|requires?.*permission|permission.*denied|unauthorized)/i.test(
+    err.message
+  );
 }
 
 interface HoldResolveApi {
