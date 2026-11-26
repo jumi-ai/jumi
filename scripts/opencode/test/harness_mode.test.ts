@@ -1,17 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import {
-  gateResumeOnHarnessMode,
   HARNESS_MODE_ENV,
   normalizeHarnessMode,
   PiHarnessNotImplementedError,
   parseHarnessMode,
-  readRecordedHarnessMode,
   throwIfPiHarness,
-  writeHarnessModeStamp,
 } from "../src/harness_mode.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { processEngineTick } from "../src/server.ts";
@@ -171,25 +165,5 @@ describe("JUMI_HARNESS_MODE", () => {
     // A legacy factory must not convert the pi attempt's live session.
     const legacyConfig = loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "legacy" });
     expect(normalizeHarnessMode((recorded as any).harnessMode)).not.toBe(legacyConfig.harnessMode);
-  });
-
-  test("workdir stamp fences mode changes without converting a live session", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-harness-"));
-    // First run stamps legacy and must not resume (no live session yet).
-    expect(await gateResumeOnHarnessMode(dir, "legacy", async () => {})).toBe(false);
-    expect(await readRecordedHarnessMode(dir)).toBe("legacy");
-    // Same mode may resume; the helper does not clear.
-    expect(await gateResumeOnHarnessMode(dir, "legacy", async () => {})).toBe(true);
-    // Different mode clears and fences fresh, never converting.
-    let cleared = false;
-    expect(
-      await gateResumeOnHarnessMode(dir, "pi", async () => {
-        cleared = true;
-      })
-    ).toBe(false);
-    expect(cleared).toBe(true);
-    expect(await readRecordedHarnessMode(dir)).toBe("pi");
-    await writeHarnessModeStamp(dir, "legacy");
-    expect(await readRecordedHarnessMode(dir)).toBe("legacy");
   });
 });

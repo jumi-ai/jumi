@@ -74,7 +74,7 @@
   "github_webhook.ts": 1643,
   "handoff.ts": 251,
   "handover.ts": 680,
-  "harness_mode.ts": 101,
+  "harness_mode.ts": 49,
   "hold_cancel.ts": 103,
   "hold_resolve.ts": 171,
   "hold_settlement.ts": 722,
