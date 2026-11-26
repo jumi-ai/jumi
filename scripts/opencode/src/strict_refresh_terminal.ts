@@ -584,8 +584,9 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
         // candidate was ready, so an empty drain (e.g. closed PR, deleted
         // branch) does not poll the forge every tick. A later push or stop
         // re-creates the obligation. Consuming a just-admitted holder is a
-        // no-op (Memory already deleted it; Pg only deletes phase
-        // 'admit-next' rows, and a fresh admission is 'held').
+        // no-op (Memory already deleted it; Pg only clears phase
+        // 'admit-next' rows in place so terminal evidence survives, and a
+        // fresh admission is 'held').
         try {
           await opts.slots.consumeAdmitNext(target.owner, target.repo, target.baseBranch);
         } catch (err) {

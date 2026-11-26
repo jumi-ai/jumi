@@ -1280,13 +1280,19 @@ export class PgStrictRefreshSlotStore implements StrictRefreshSlotStore {
   async consumeAdmitNext(owner: string, repo: string, baseBranch: string): Promise<boolean> {
     try {
       return await this.withSlotLock(owner, repo, baseBranch, async (tx) => {
-        const deleted = asRows<{ one: unknown }>(
+        // Clear the obligation in place instead of DELETEing the row: the
+        // row also carries last_terminal_* evidence (written by
+        // release/releaseIfHolder and preserved by releaseToAdmitNext), and
+        // Memory keeps that evidence in a separate map that consume does
+        // not touch. A just-admitted holder is phase 'held', so the guard
+        // keeps the consume a no-op for it.
+        const cleared = asRows<{ one: unknown }>(
           await tx.unsafe(
-            `DELETE FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE owner = $1 AND repo = $2 AND base_branch = $3 AND phase = 'admit-next' RETURNING 1 AS one`,
-            [owner, repo, baseBranch]
+            `UPDATE ${STRICT_REFRESH_SLOT_TABLE} SET phase = 'held', due_at = NULL, updated_at = $4::timestamptz, retry_marker = NULL, last_error = NULL WHERE owner = $1 AND repo = $2 AND base_branch = $3 AND phase = 'admit-next' RETURNING 1 AS one`,
+            [owner, repo, baseBranch, new Date().toISOString()]
           )
         );
-        return deleted.length > 0;
+        return cleared.length > 0;
       });
     } catch (err) {
       wrapSqlError(err);
