@@ -115,6 +115,7 @@ import {
   effectiveFollowupRounds,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
+  headSettingsFollowUpFeedback,
   isAutoRerunFlakesEnabled,
   isRiskFollowupEnabled,
   isSuggestionFollowupEnabled,
@@ -3062,22 +3063,51 @@ export async function implementFollowUp(
             handledReviewFindings.push(finding);
             return false;
           });
-          await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
-        } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
-          await writeFile(
-            join(worktree, "JUMI_FEEDBACK.md"),
-            buildFeedbackMarkdown({
-              pr,
-              trigger: opts.job.trigger,
-              triggerBody: pendingTriggerBody,
-              comments: [],
-              inlines: [],
-              reviews: [],
-              lastReview: pendingLastReview,
-              currentInlines: unresolvedJumiInlines(pendingItems),
-              earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
-            }).markdown
-          );
+          const headFailure =
+            snapshot.headSettingsFailure ??
+            (await (async () => {
+              try {
+                const { invalidHeadSettingsFailure } = await import("./review.ts");
+                return await invalidHeadSettingsFailure({
+                  api: opts.api,
+                  owner,
+                  repo,
+                  prNumber: pr.number,
+                  headSha: pr.head.sha,
+                  baseBranch: pr.base.ref,
+                  log,
+                });
+              } catch {
+                return undefined;
+              }
+            })());
+          const markdownWithSettings =
+            headFailure && headFailure.trim()
+              ? `${feedback.markdown.trimEnd()}\n\n## Invalid head settings\n\n${headSettingsFollowUpFeedback(headFailure)}\n`
+              : feedback.markdown;
+          await writeFile(join(worktree, "JUMI_FEEDBACK.md"), markdownWithSettings);
+        } else if (
+          snapshot.headSettingsFailure ||
+          pendingLastReview ||
+          unresolvedJumiInlines(pendingItems).length > 0
+        ) {
+          const baseFeedback = buildFeedbackMarkdown({
+            pr,
+            trigger: opts.job.trigger,
+            triggerBody: pendingTriggerBody,
+            comments: [],
+            inlines: [],
+            reviews: [],
+            lastReview: pendingLastReview,
+            currentInlines: unresolvedJumiInlines(pendingItems),
+            earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
+          }).markdown;
+          const headFailure = snapshot.headSettingsFailure;
+          const markdownWithSettings =
+            headFailure && headFailure.trim()
+              ? `${baseFeedback.trimEnd()}\n\n## Invalid head settings\n\n${headSettingsFollowUpFeedback(headFailure)}\n`
+              : baseFeedback;
+          await writeFile(join(worktree, "JUMI_FEEDBACK.md"), markdownWithSettings);
         } else {
           await writeFile(
             join(worktree, "JUMI_FEEDBACK.md"),
