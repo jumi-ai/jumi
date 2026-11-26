@@ -276,6 +276,39 @@ describe("pi offline worker", () => {
     }
   });
 
+  test("parent-observed diff includes untracked and staged new files", async () => {
+    const { dir, cleanup } = await initRepoWithFixture();
+    try {
+      const { runtime, model } = await makeLoopback({
+        steps: [
+          { tool: "write", args: { path: "newfile.txt", content: "untracked-content\n" } },
+          { tool: "write", args: { path: "staged.txt", content: "staged-content\n" } },
+          { tool: "bash", args: { command: "git add staged.txt" } },
+          { tool: "jumi_set_pr_body", args: { markdown: "add files" } },
+          { tool: "jumi_set_handoff", args: { notes: "added newfile.txt and staged.txt" } },
+        ],
+      });
+      const store = new WorkerResultStore();
+      const result = await runPiWorkerAttempt({
+        workdir: dir,
+        intent: "implement",
+        prompt: "add two files",
+        store,
+        modelRuntime: runtime,
+        model,
+        timeoutMs: 30_000,
+      });
+      expect(result.status).toBe("complete");
+      expect(result.dirty).toBe(true);
+      expect(result.diff).toContain("newfile.txt");
+      expect(result.diff).toContain("untracked-content");
+      expect(result.diff).toContain("staged.txt");
+      expect(result.diff).toContain("staged-content");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("clean follow-up calls parent-owned no_changes without a patch", async () => {
     const { dir, cleanup } = await initRepoWithFixture();
     try {

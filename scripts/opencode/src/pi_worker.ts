@@ -1068,18 +1068,39 @@ export interface PiWorkerAttemptResult {
 async function parentGitDiff(workdir: string): Promise<{ diff: string; dirty: boolean }> {
   try {
     const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: workdir });
-    const lines = String(status.stdout ?? "")
+    const rawLines = String(status.stdout ?? "")
       .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
+      .map((line) => line.replace(/\r$/, ""))
+      .filter((line) => line.trim().length > 0);
+    // Keep the two-column XY field: trimming ` M f` first would shift `slice(3)` off the path.
+    const statusPath = (line: string): string => (line.length >= 3 ? line.slice(3) : line).trim().replace(/^"|"$/g, "");
+    const lines = rawLines.filter((line) => {
       // Harness scratch is parent-owned, never part of the patch.
-      .filter((line) => {
-        const path = line.length >= 4 ? line.slice(3).trim().replace(/^"|"$/g, "") : line;
-        return path !== ".jumi-tmp" && !path.startsWith(".jumi-tmp/");
-      });
+      const path = statusPath(line);
+      return path !== ".jumi-tmp" && !path.startsWith(".jumi-tmp/");
+    });
     if (lines.length === 0) return { diff: "", dirty: false };
-    const proc = Bun.spawnSync(["git", "diff", "--", ".", ":!.jumi-tmp"], { cwd: workdir });
-    const diff = String(proc.stdout ?? "").slice(0, PI_WORKER_MAX_OUTPUT_CHARS);
+    // Diff against HEAD so staged content is visible: `git add` is allowed in
+    // the tool shell and `git diff -- .` only shows unstaged changes.
+    const proc = Bun.spawnSync(["git", "diff", "HEAD", "--", ".", ":!.jumi-tmp"], { cwd: workdir });
+    const parts: string[] = [];
+    const tracked = String(proc.stdout ?? "");
+    if (tracked) parts.push(tracked);
+    // Untracked files are invisible to every `git diff` variant: enumerate
+    // them read-only and append a per-file `/dev/null` diff. No `git add -N`,
+    // which would mutate the parent-observed index.
+    const ls = Bun.spawnSync(["git", "ls-files", "--others", "--exclude-standard", "-z", "--", ".", ":!.jumi-tmp"], {
+      cwd: workdir,
+    });
+    for (const rel of String(ls.stdout ?? "")
+      .split("\0")
+      .map((entry) => entry.trim())
+      .filter(Boolean)) {
+      const untracked = Bun.spawnSync(["git", "diff", "--no-index", "--", "/dev/null", rel], { cwd: workdir });
+      const body = String(untracked.stdout ?? "");
+      if (body) parts.push(body);
+    }
+    const diff = parts.join("").slice(0, PI_WORKER_MAX_OUTPUT_CHARS);
     return { diff, dirty: true };
   } catch {
     return { diff: "", dirty: false };
