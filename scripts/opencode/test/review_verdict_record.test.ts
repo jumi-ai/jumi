@@ -151,7 +151,10 @@ describe("PgReviewJobStore result_json statements", () => {
     await store.saveResult(1, "engine-1", { kind: "markdown", markdown: "md", runner: "r", record });
     const markdownQuery = seen.at(-1)!;
     expect(markdownQuery.query).toContain("result_json");
-    expect(markdownQuery.params?.at(-1)).toBe(JSON.stringify(record));
+    expect(markdownQuery.params).toContain(JSON.stringify(record));
+    // Additive Pi stamp columns ride the same save without changing the
+    // result_json contract: unknown usage stays NULL, never zero.
+    expect(markdownQuery.query).toContain("pi_profile");
 
     await store.saveResult(1, "engine-1", { kind: "skip", reason: "late" });
     expect(seen.at(-1)!.query).toContain("result_json = NULL");

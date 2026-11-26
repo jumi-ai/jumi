@@ -22,6 +22,7 @@ import {
   kickReasonOf,
   STUCK_KICK_ALIASES,
 } from "./kick.ts";
+import { type PiAttemptStamp, piAttemptStampFromRecord, piAttemptStampToRecord } from "./pi_attempt.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import {
@@ -207,6 +208,31 @@ export interface ReviewJobRecord {
    * fenced attempt).
    */
   harnessMode?: string | null;
+  /**
+   * Additive Pi attempt stamp (jumi#939): named profile, role, model,
+   * actual funding route (pool + payer), and outcome, plus the available
+   * token/cache/reasoning usage. Every field is absent (never zero-filled)
+   * on rows written before the rollout and reads as absent for
+   * compatibility. Set on `saveResult` alongside `harnessMode`; never
+   * inferred from forge, never carries secrets, content, or per-session
+   * metric labels.
+   */
+  piProfile?: string | null;
+  piRole?: string | null;
+  piModel?: string | null;
+  piFundingPool?: string | null;
+  piPayer?: string | null;
+  piOutcome?: string | null;
+  /** Stated input tokens; absent (not zero) when the provider stated none. */
+  piTokensInput?: number | null;
+  /** Stated cached-input tokens; absent when unstated. */
+  piTokensCacheRead?: number | null;
+  /** Stated output tokens; absent when unstated. */
+  piTokensOutput?: number | null;
+  /** Stated cache-write tokens; absent when unstated. */
+  piTokensCacheWrite?: number | null;
+  /** Stated reasoning tokens; absent when unstated. */
+  piTokensReasoning?: number | null;
   pendingStatusAt: number | null;
   publishedAt: number | null;
   prUpdatedAt: number | null;
@@ -869,6 +895,17 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NU
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS reclaim_publish_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS harness_mode TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_profile TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_role TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_model TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_funding_pool TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_payer TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_outcome TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_input BIGINT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_cache_read BIGINT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_output BIGINT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_cache_write BIGINT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_reasoning BIGINT;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -2101,6 +2138,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       // assertions keep passing. Absent reads as legacy.
       if (normalizedMode !== undefined && normalizedMode !== "legacy") row.harnessMode = normalizedMode;
       else if (normalizedMode === "legacy") delete row.harnessMode;
+      // Additive Pi attempt stamp: only carry a complete stamp so old
+      // whole-row assertions keep passing. Absent reads as no stamp.
+      applyPiAttemptToRecord(row, (result as { piAttempt?: PiAttemptStamp }).piAttempt);
       row.updatedAt = Date.now();
     });
   }
@@ -3992,6 +4032,17 @@ type ReviewJobRow = {
   cancel_requested?: unknown;
   reclaim_publish_failures?: unknown;
   harness_mode?: unknown;
+  pi_profile?: unknown;
+  pi_role?: unknown;
+  pi_model?: unknown;
+  pi_funding_pool?: unknown;
+  pi_payer?: unknown;
+  pi_outcome?: unknown;
+  pi_tokens_input?: unknown;
+  pi_tokens_cache_read?: unknown;
+  pi_tokens_output?: unknown;
+  pi_tokens_cache_write?: unknown;
+  pi_tokens_reasoning?: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -4131,9 +4182,105 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     ...(row.harness_mode == null || String(row.harness_mode) === "" || String(row.harness_mode) === "legacy"
       ? {}
       : { harnessMode: String(row.harness_mode) }),
+    // Old rows predate every pi stamp column and read as absent. Only carry
+    // a complete stamp so existing whole-row assertions do not change.
+    ...piAttemptFieldsOf(row),
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
+}
+
+function numOrNull(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "number") return Number.isFinite(value) ? Math.floor(value) : null;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.floor(parsed) : null;
+  }
+  return null;
+}
+
+function piAttemptFieldsOf(row: ReviewJobRow): Partial<ReviewJobRecord> {
+  const stamp = piAttemptStampFromRecord({
+    piProfile: row.pi_profile,
+    piRole: row.pi_role,
+    piModel: row.pi_model,
+    piFundingPool: row.pi_funding_pool,
+    piPayer: row.pi_payer,
+    piOutcome: row.pi_outcome,
+    piTokensInput: row.pi_tokens_input,
+    piTokensCacheRead: row.pi_tokens_cache_read,
+    piTokensOutput: row.pi_tokens_output,
+    piTokensCacheWrite: row.pi_tokens_cache_write,
+    piTokensReasoning: row.pi_tokens_reasoning,
+  });
+  if (!stamp) return {};
+  const record = piAttemptStampToRecord(stamp);
+  const out: Partial<ReviewJobRecord> = {};
+  if (record.piProfile != null) out.piProfile = record.piProfile;
+  if (record.piRole != null) out.piRole = record.piRole;
+  if (record.piModel != null) out.piModel = record.piModel;
+  if (record.piFundingPool != null) out.piFundingPool = record.piFundingPool;
+  if (record.piPayer != null) out.piPayer = record.piPayer;
+  if (record.piOutcome != null) out.piOutcome = record.piOutcome;
+  // Unknown usage stays absent (never zero-filled): only carry stated cells.
+  if (record.piTokensInput != null) out.piTokensInput = record.piTokensInput;
+  if (record.piTokensCacheRead != null) out.piTokensCacheRead = record.piTokensCacheRead;
+  if (record.piTokensOutput != null) out.piTokensOutput = record.piTokensOutput;
+  if (record.piTokensCacheWrite != null) out.piTokensCacheWrite = record.piTokensCacheWrite;
+  if (record.piTokensReasoning != null) out.piTokensReasoning = record.piTokensReasoning;
+  void numOrNull;
+  return out;
+}
+
+function applyPiAttemptToRecord(row: ReviewJobRecord, stamp: PiAttemptStamp | null | undefined): void {
+  if (!stamp) {
+    delete row.piProfile;
+    delete row.piRole;
+    delete row.piModel;
+    delete row.piFundingPool;
+    delete row.piPayer;
+    delete row.piOutcome;
+    delete row.piTokensInput;
+    delete row.piTokensCacheRead;
+    delete row.piTokensOutput;
+    delete row.piTokensCacheWrite;
+    delete row.piTokensReasoning;
+    return;
+  }
+  const record = piAttemptStampToRecord(stamp);
+  if (record.piProfile == null) {
+    delete row.piProfile;
+    delete row.piRole;
+    delete row.piModel;
+    delete row.piFundingPool;
+    delete row.piPayer;
+    delete row.piOutcome;
+    delete row.piTokensInput;
+    delete row.piTokensCacheRead;
+    delete row.piTokensOutput;
+    delete row.piTokensCacheWrite;
+    delete row.piTokensReasoning;
+    return;
+  }
+  row.piProfile = record.piProfile;
+  row.piRole = record.piRole;
+  row.piModel = record.piModel;
+  row.piFundingPool = record.piFundingPool;
+  row.piPayer = record.piPayer;
+  row.piOutcome = record.piOutcome;
+  // Unknown usage stays absent (never zero-filled).
+  if (record.piTokensInput != null) row.piTokensInput = record.piTokensInput;
+  else delete row.piTokensInput;
+  if (record.piTokensCacheRead != null) row.piTokensCacheRead = record.piTokensCacheRead;
+  else delete row.piTokensCacheRead;
+  if (record.piTokensOutput != null) row.piTokensOutput = record.piTokensOutput;
+  else delete row.piTokensOutput;
+  if (record.piTokensCacheWrite != null) row.piTokensCacheWrite = record.piTokensCacheWrite;
+  else delete row.piTokensCacheWrite;
+  if (record.piTokensReasoning != null) row.piTokensReasoning = record.piTokensReasoning;
+  else delete row.piTokensReasoning;
 }
 
 function reclaimPublishFailuresOf(row: ReviewJobRow): number {
@@ -4189,6 +4336,17 @@ const REQUIRED_REVIEW_JOB_COLUMNS = [
   "rewake_requested",
   "cancel_requested",
   "harness_mode",
+  "pi_profile",
+  "pi_role",
+  "pi_model",
+  "pi_funding_pool",
+  "pi_payer",
+  "pi_outcome",
+  "pi_tokens_input",
+  "pi_tokens_cache_read",
+  "pi_tokens_output",
+  "pi_tokens_cache_write",
+  "pi_tokens_reasoning",
 ] as const;
 
 /**
@@ -5262,6 +5420,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     // Additive stamp: `pi` persists, legacy (or absent) clears to NULL so old
     // rows and new legacy rows read identically as legacy.
     const modeValue = modeRaw === "pi" ? "pi" : null;
+    const pi = piAttemptStampToRecord((result as { piAttempt?: PiAttemptStamp }).piAttempt);
     let rows: { id: unknown }[];
     if (result.kind === "markdown") {
       // A record serialization problem degrades to NULL: it must never turn
@@ -5278,30 +5437,89 @@ export class PgReviewJobStore implements ReviewJobStore {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_markdown = $3, result_runner = $4, harness_mode = $5, result_json = $6::jsonb, result_reason = NULL, error = NULL, updated_at = NOW()
+           SET result_markdown = $3, result_runner = $4, harness_mode = $5, result_json = $6::jsonb, result_reason = NULL, error = NULL,
+               pi_profile = $7, pi_role = $8, pi_model = $9, pi_funding_pool = $10, pi_payer = $11, pi_outcome = $12,
+               pi_tokens_input = $13, pi_tokens_cache_read = $14, pi_tokens_output = $15, pi_tokens_cache_write = $16, pi_tokens_reasoning = $17,
+               updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.markdown, result.runner ?? null, modeValue, recordJson]
+          [
+            id,
+            leasedBy,
+            result.markdown,
+            result.runner ?? null,
+            modeValue,
+            recordJson,
+            pi.piProfile,
+            pi.piRole,
+            pi.piModel,
+            pi.piFundingPool,
+            pi.piPayer,
+            pi.piOutcome,
+            pi.piTokensInput,
+            pi.piTokensCacheRead,
+            pi.piTokensOutput,
+            pi.piTokensCacheWrite,
+            pi.piTokensReasoning,
+          ]
         )
       );
     } else if (result.kind === "skip") {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4, updated_at = NOW()
+           SET result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4,
+               pi_profile = $5, pi_role = $6, pi_model = $7, pi_funding_pool = $8, pi_payer = $9, pi_outcome = $10,
+               pi_tokens_input = $11, pi_tokens_cache_read = $12, pi_tokens_output = $13, pi_tokens_cache_write = $14, pi_tokens_reasoning = $15,
+               updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.reason, modeValue]
+          [
+            id,
+            leasedBy,
+            result.reason,
+            modeValue,
+            pi.piProfile,
+            pi.piRole,
+            pi.piModel,
+            pi.piFundingPool,
+            pi.piPayer,
+            pi.piOutcome,
+            pi.piTokensInput,
+            pi.piTokensCacheRead,
+            pi.piTokensOutput,
+            pi.piTokensCacheWrite,
+            pi.piTokensReasoning,
+          ]
         )
       );
     } else {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET error = $3, result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4, updated_at = NOW()
+           SET error = $3, result_reason = $3, result_markdown = NULL, result_json = NULL, harness_mode = $4,
+               pi_profile = $5, pi_role = $6, pi_model = $7, pi_funding_pool = $8, pi_payer = $9, pi_outcome = $10,
+               pi_tokens_input = $11, pi_tokens_cache_read = $12, pi_tokens_output = $13, pi_tokens_cache_write = $14, pi_tokens_reasoning = $15,
+               updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.error, modeValue]
+          [
+            id,
+            leasedBy,
+            result.error,
+            modeValue,
+            pi.piProfile,
+            pi.piRole,
+            pi.piModel,
+            pi.piFundingPool,
+            pi.piPayer,
+            pi.piOutcome,
+            pi.piTokensInput,
+            pi.piTokensCacheRead,
+            pi.piTokensOutput,
+            pi.piTokensCacheWrite,
+            pi.piTokensReasoning,
+          ]
         )
       );
     }
