@@ -1,5 +1,6 @@
 import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile, SECRETS_DIR_ENV } from "./config.ts";
 import type { ForgeKind } from "./forge.ts";
+import { type HarnessMode, parseHarnessMode } from "./harness_mode.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 import {
   type IndependentReviewConfig,
@@ -72,6 +73,8 @@ export interface WorkerConfig {
   databaseUrl?: string;
   leaseMs: number;
   maxJobAttempts: number;
+  /** Deployment-only harness selector. Unset is legacy; never inferred from forge or repo settings. */
+  harnessMode?: HarnessMode;
   phoenixOtlpEndpoint?: string;
   checkpointEnabled: boolean;
   checkpointIntervalMs: number;
@@ -211,6 +214,9 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
+    // Deployment-only harness selector: unset is legacy, invalid fails startup.
+    // Never inferred from forge, never from repository settings.
+    harnessMode: parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE")),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
     ...checkpointFromEnv(resolved),
   };
