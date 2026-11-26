@@ -81,7 +81,9 @@ const expectedNoneKeys = [
   "allowedRunners",
   "autoRerunFlakes",
   "blockingQuestionAuthors",
+  "blockingRisks",
   "followupIgnoreLogins",
+  "followupOnRisks",
   "followupOnSuggestions",
   "ignoreConflictsAuthors",
   "mode",
@@ -106,12 +108,14 @@ const expectedFullKeys = [
   "autoRerunFlakes",
   "automergeMethod",
   "blockingQuestionAuthors",
+  "blockingRisks",
   "branchPrefix",
   "ciGate",
   "closingKeyword",
   "commitMessage",
   "conflictRegenerate",
   "followupIgnoreLogins",
+  "followupOnRisks",
   "followupOnSuggestions",
   "ignoreConflictsAuthors",
   "ignoreConflictsLabel",
@@ -146,6 +150,8 @@ const invalidPerKey: Array<[string, string, string]> = [
     '"allowed_runners" is empty, so no runner could work on the repository; use mode: off or mode: review-only',
   ],
   ["review_exclude", 'review_exclude:\n  - ""\n', '"review_exclude" must not contain blank entries'],
+  ["blocking_risks", 'blocking_risks: "yes"\n', '"blocking_risks" must be a boolean'],
+  ["followup_on_risks", 'followup_on_risks: "yes"\n', '"followup_on_risks" must be a boolean'],
   ["followup_on_suggestions", 'followup_on_suggestions: "yes"\n', '"followup_on_suggestions" must be a boolean'],
   ["auto_rerun_flakes", 'auto_rerun_flakes: "yes"\n', '"auto_rerun_flakes" must be a boolean'],
   ["suggestions_hold_merge", "suggestions_hold_merge: 1\n", '"suggestions_hold_merge" must be a boolean'],
@@ -202,7 +208,7 @@ describe("repo_settings registry", () => {
   });
 
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(35);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(37);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);

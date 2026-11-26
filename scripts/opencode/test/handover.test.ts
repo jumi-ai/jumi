@@ -712,6 +712,50 @@ describe("enqueueFollowUpFromReview", () => {
     expect(logs).toEqual(["persist-insert skipped: success trailer"]);
   });
 
+  test("followup_on_risks:false still hands over a blocking 🟡 failure", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = handoverApi({
+      getRepoFile: async () => ({ found: true, content: "followup_on_risks: false\n" }),
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 🟡 risk: race on retry\n<!-- jumi-check: failure; 1 risk -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("queued");
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("followup_on_risks:false skips a success with only non-blocking 🟡", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = handoverApi({
+      getRepoFile: async () => ({ found: true, content: "followup_on_risks: false\n" }),
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 🟡 risk: race on retry\n<!-- jumi-check: success; 1 non-blocking risk -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(logs).toEqual(["persist-insert skipped: risks disabled"]);
+  });
+
   test("incomplete review neither enqueues nor posts stuck", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());

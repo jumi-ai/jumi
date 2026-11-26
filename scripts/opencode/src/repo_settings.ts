@@ -24,12 +24,14 @@ import { automergeSetting } from "./repo_settings_keys/automerge.ts";
 import { automergeLabelSetting } from "./repo_settings_keys/automerge_label.ts";
 import { automergeMethodSetting } from "./repo_settings_keys/automerge_method.ts";
 import { blockingQuestionAuthorsSetting } from "./repo_settings_keys/blocking_question_authors.ts";
+import { blockingRisksSetting } from "./repo_settings_keys/blocking_risks.ts";
 import { branchPrefixSetting } from "./repo_settings_keys/branch_prefix.ts";
 import { ciGateSetting } from "./repo_settings_keys/ci_gate.ts";
 import { closingKeywordSetting } from "./repo_settings_keys/closing_keyword.ts";
 import { commitMessageSetting } from "./repo_settings_keys/commit_message.ts";
 import { conflictRegenerateSetting } from "./repo_settings_keys/conflict_regenerate.ts";
 import { followupIgnoreLoginsSetting } from "./repo_settings_keys/followup_ignore_logins.ts";
+import { followupOnRisksSetting } from "./repo_settings_keys/followup_on_risks.ts";
 import { followupOnSuggestionsSetting } from "./repo_settings_keys/followup_on_suggestions.ts";
 import { ignoreConflictsAuthorsSetting } from "./repo_settings_keys/ignore_conflicts_authors.ts";
 import { ignoreConflictsLabelSetting } from "./repo_settings_keys/ignore_conflicts_label.ts";
@@ -142,12 +144,14 @@ export const REPO_SETTINGS_REGISTRY = [
   automergeLabelSetting,
   automergeMethodSetting,
   blockingQuestionAuthorsSetting,
+  blockingRisksSetting,
   branchPrefixSetting,
   ciGateSetting,
   closingKeywordSetting,
   commitMessageSetting,
   conflictRegenerateSetting,
   followupIgnoreLoginsSetting,
+  followupOnRisksSetting,
   followupOnSuggestionsSetting,
   ignoreConflictsAuthorsSetting,
   ignoreConflictsLabelSetting,
@@ -783,6 +787,27 @@ export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
 }
 
 /**
+ * Whether 🟡 risk findings fail `jumi/opencode-review`. Missing, invalid, or
+ * unreadable files behave as today (`true`): every actionable 🟡 blocks.
+ * `blocking_risks: false` leaves 🟡 advisory: still published, but the status
+ * stays `success` with an `N non-blocking risk(s)` note.
+ */
+export function isRiskBlockingEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return load.blockingRisks !== false;
+}
+
+/**
+ * Whether a `success` review whose only findings are non-blocking 🟡 still
+ * wakes a follow-up worker. Missing, invalid, or unreadable files behave as
+ * today (`true`), the same rule as `followup_on_suggestions` for 💡.
+ */
+export function isRiskFollowupEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return load.followupOnRisks !== false;
+}
+
+/**
  * Whether Jumi reruns still-failed CI jobs once per head and check after a
  * worker `no_changes` on red CI. Missing, invalid, or unreadable files
  * behave as today (on): the repository opts out with
@@ -840,6 +865,7 @@ export function isMaintainerQuestionsHoldEnabled(load: RepoSettingsLoad | undefi
 
 interface RepoFollowupPolicy {
   followupOnSuggestions: boolean;
+  followupOnRisks: boolean;
   maxFollowupRounds: number;
   maxConflictRounds: number;
 }
@@ -860,6 +886,7 @@ async function loadRepoFollowupPolicy(
 ): Promise<RepoFollowupPolicy> {
   const fallback: RepoFollowupPolicy = {
     followupOnSuggestions: true,
+    followupOnRisks: true,
     maxFollowupRounds: deployment.maxFollowupRounds,
     maxConflictRounds: deployment.maxConflictRounds,
   };
@@ -867,6 +894,7 @@ async function loadRepoFollowupPolicy(
     const load = await loadRepoSettings(api, owner, repo, defaultBranch);
     return {
       followupOnSuggestions: isSuggestionFollowupEnabled(load),
+      followupOnRisks: isRiskFollowupEnabled(load),
       maxFollowupRounds: effectiveFollowupRounds(deployment.maxFollowupRounds, load),
       maxConflictRounds: effectiveConflictRounds(deployment.maxConflictRounds, load),
     };
