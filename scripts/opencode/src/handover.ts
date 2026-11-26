@@ -20,7 +20,13 @@ import { upsertStuckText } from "./stuck.ts";
 import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import { reviewVerdictView } from "./verdict.ts";
+import {
+  countBugFindings,
+  countRiskFindings,
+  parseReviewOutput,
+  reviewVerdictView,
+  trailerNonBlockingRiskCount,
+} from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS: string = TOO_MANY_FOLLOWUP_ROUNDS_REASON;
 
@@ -69,11 +75,24 @@ export function shouldHandoverFollowUp(opts: {
   // has no way to file/close another issue, change labels or assignment, or
   // decide scope. Mixed reviews still hand over for the worker-answerable part.
   if (isMaintainerOnlyTrailer(opts.markdown, opts.record)) return false;
-  return (
+  if (
     isCurrentHeadFailureTrailer(opts.markdown, opts.record) ||
     isLeftoverSimplificationTrailer(opts.markdown, opts.record) ||
     isBlockingQuestionTrailer(opts.markdown, opts.prAuthor, opts.blockingQuestionAuthors, opts.record)
-  );
+  ) {
+    return true;
+  }
+  // A success review that names non-blocking 🟡 risks still hands over when
+  // `followup_on_risks` is on (the default); the switch itself is enforced by
+  // the caller that owns the settings (`enqueueFollowUpFromReview`,
+  // `isJumiReviewFinding`), so the pure view defaults to handing over.
+  try {
+    const parsed = parseReviewOutput(opts.markdown ?? "");
+    if (!parsed.verdict.incomplete && trailerNonBlockingRiskCount(parsed.verdict.description) > 0) return true;
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function persistInsertSkipReason(
@@ -89,6 +108,17 @@ function persistInsertSkipReason(
   if (view.state === "success") {
     if (view.suggestionCount > 0) return undefined;
     if (view.blockingQuestionCount(prAuthorLogin, blockingAuthors) > 0) return undefined;
+    // A success review that names non-blocking 🟡 risks still needs the
+    // follow-up decision below (which reads `followup_on_risks`); the cheap
+    // gate must not skip it as a plain success trailer.
+    try {
+      const parsed = parseReviewOutput(markdown ?? "");
+      if (!parsed.verdict.incomplete && trailerNonBlockingRiskCount(parsed.verdict.description) > 0) {
+        return undefined;
+      }
+    } catch {
+      // Fall through to the plain success skip.
+    }
     return "success trailer";
   }
   return "incomplete";
@@ -252,6 +282,8 @@ export async function enqueueFollowUpFromReview(
   let effectiveBlocking: readonly string[] | undefined = opts.blockingQuestionAuthors;
   let policy = {
     followupOnSuggestions: true,
+    followupOnRisks: true,
+    blockingRisks: true,
     maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
     maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
   };
@@ -278,6 +310,8 @@ export async function enqueueFollowUpFromReview(
       } else {
         policy = {
           followupOnSuggestions: repoPolicy.followupOnSuggestions,
+          followupOnRisks: repoPolicy.followupOnRisks,
+          blockingRisks: repoPolicy.blockingRisks,
           maxFollowupRounds: repoPolicy.maxFollowupRounds,
           maxConflictRounds: repoPolicy.maxConflictRounds,
         };
@@ -442,6 +476,41 @@ export async function enqueueFollowUpFromReview(
       maintainerHoldEnabled
     );
     return logSkip("suggestions disabled");
+  }
+  // Risk follow-up off: a review whose only wake reason is non-blocking 🟡
+  // (a downgraded failure with only risks, or a success naming non-blocking
+  // risks) starts no follow-up. Failures with 🔴, blocking questions, and
+  // enabled suggestions still run as today.
+  if (!policy.followupOnRisks) {
+    try {
+      const parsed = parseReviewOutput(opts.markdown ?? "");
+      if (!parsed.verdict.incomplete) {
+        const bugs = countBugFindings(parsed.comment);
+        const failureRisks = countRiskFindings(parsed.comment);
+        const advisoryRisks = trailerNonBlockingRiskCount(parsed.verdict.description);
+        const hasRisks = failureRisks > 0 || advisoryRisks > 0;
+        const blockingQs = isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record);
+        const suggestionWake = isLeftoverSimplificationTrailer(opts.markdown, record) && policy.followupOnSuggestions;
+        if (bugs === 0 && hasRisks && !blockingQs && !suggestionWake) {
+          await resolveHeldSuggestion(
+            opts.store,
+            opts.api,
+            opts.row.owner,
+            opts.row.repo,
+            issueNumber,
+            opts.row.headSha,
+            opts.markdown,
+            "risks disabled",
+            pr.html_url,
+            record,
+            maintainerHoldEnabled
+          );
+          return logSkip("risks disabled");
+        }
+      }
+    } catch {
+      // Fall through to the normal handover.
+    }
   }
 
   const followUpLatch = await readFollowUpLatch(opts.store.skipLatches, {
