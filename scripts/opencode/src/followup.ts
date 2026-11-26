@@ -162,6 +162,7 @@ import {
   isBugFindingFirstLine,
   isMaintainerOnlyTrailerText,
   isMaintainerQuestionInline,
+  isNonMaintainerQuestionInline,
   isQuestionInline,
   isRiskFindingFirstLine,
   parseCheckLine,
@@ -631,13 +632,13 @@ function isOpenJumiInline(inline: InlineComment, botUsername?: string): boolean 
 
 /**
  * Whether a Jumi inline holds an open blocking question: Jumi-owned
- * (`<!-- jumi-review:` + bot author), unresolved, and carrying the `❓`
- * marker in its path or body. The marker check uses the same
- * `QUESTION_MARKER_RE` rule the engine used to set `N open questions`.
+ * (`<!-- jumi-review:` + bot author), unresolved, and carrying an ordinary
+ * `❓` marker in its path or body. `❓ maintainer:` inlines never count here;
+ * see `isNonMaintainerQuestionInline` for the shared rule.
  */
 export function isBlockingQuestionInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
-  return isQuestionInline(inline.path, inline.body ?? "");
+  return isNonMaintainerQuestionInline(inline.path, inline.body ?? "");
 }
 
 /** Whether an open Jumi inline carries an actionable `🔴` bug finding. */
@@ -658,7 +659,7 @@ function isRiskInline(inline: InlineComment, botUsername?: string): boolean {
 
 /** Whether an open Jumi inline carries a `❓ maintainer:` question. */
 function isMaintainerInline(inline: InlineComment, botUsername?: string): boolean {
-  if (!isBlockingQuestionInline(inline, botUsername)) return false;
+  if (!isOpenJumiInline(inline, botUsername)) return false;
   return isMaintainerQuestionInline(inline.path, inline.body ?? "");
 }
 
@@ -682,7 +683,8 @@ export function openQuestionsForReview(
   const bodyCount = countQuestionFindings(parsed.comment);
   let inlineCount = 0;
   for (const inline of inlines) {
-    if (isBlockingQuestionInline(inline, botUsername)) inlineCount++;
+    if (!isOpenJumiInline(inline, botUsername)) continue;
+    if (isQuestionInline(inline.path, inline.body ?? "")) inlineCount++;
   }
   return bodyCount + inlineCount;
 }
