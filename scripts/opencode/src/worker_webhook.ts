@@ -122,6 +122,8 @@ type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "getCollaboratorPermission"
       | "getAppPermissions"
       | "listPullCommits"
+      | "listCommitStatuses"
+      | "listCheckRuns"
       | "deleteGitRef"
       | "getRepoFile"
       | "addIssueAssignees"

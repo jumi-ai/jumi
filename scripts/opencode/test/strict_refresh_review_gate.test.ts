@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseJumiReviewSuccessFinish } from "../src/ci_webhook.ts";
 import type { Check, Pull } from "../src/ports.ts";
+import { workerMailboxApi } from "../src/server_mailbox.ts";
 import {
   enqueueStrictRefreshForGreenReview,
   isReviewReadyForStrictRefresh,
@@ -218,6 +219,29 @@ describe("review gate on push, github fake (#900)", () => {
     expect(jobs).toHaveLength(0);
     expect(await slots.getSlot("o", "r", "main")).toBeUndefined();
   });
+
+  test("red older plus green newer still admits the green head (suppression guard)", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const api = githubApi({
+      pulls: [githubPull(100), githubPull(101)],
+      statuses: { "head-100": [reviewCheck("failure")], "head-101": [reviewCheck("success")] },
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload(), githubPolicy, api, undefined, slots, 1_000);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(101);
+    expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(101);
+  });
+
+  test("pending older plus green newer still admits the green head (suppression guard)", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const api = githubApi({
+      pulls: [githubPull(100), githubPull(101)],
+      statuses: { "head-100": [reviewCheck("pending")], "head-101": [reviewCheck("success")] },
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload(), githubPolicy, api, undefined, slots, 1_000);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(101);
+  });
 });
 
 describe("review gate on push, gitea fake (#900)", () => {
@@ -280,6 +304,25 @@ describe("review gate on push, gitea fake (#900)", () => {
     );
     expect(jobs).toHaveLength(0);
     expect(await slots.getSlot("o", "r", "main")).toBeUndefined();
+  });
+
+  test("red older plus green newer still admits the green head (suppression guard)", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const api = giteaApi({
+      pulls: [giteaPull(100), giteaPull(101)],
+      statuses: { "head-100": [reviewCheck("failure")], "head-101": [reviewCheck("success")] },
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(
+      giteaPushPayload(),
+      giteaPolicy,
+      api,
+      undefined,
+      slots,
+      1_000
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(101);
+    expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(101);
   });
 });
 
@@ -605,6 +648,124 @@ describe("shared status-event entry (#900)", () => {
     });
     expect(outcome.outcome).toBe("deferred");
     expect(await slots.listAdmitNextDue(Date.now())).toHaveLength(1);
+  });
+
+  test("green wake through workerMailboxApi observes the verdict (REVIEW.md forwarding)", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const fullApi = {
+      getIssue: async () => ({ number: 1100, title: "Fix", body: "", state: "open" }),
+      getRepo: async () => ({
+        full_name: "o/r",
+        html_url: "https://github.com/o/r",
+        clone_url: "https://github.com/o/r.git",
+        default_branch: "main",
+      }),
+      getPR: async (_o: string, _r: string, index: number) => {
+        const found = [githubPull(100)].find((pr) => pr.number === index);
+        if (!found) throw new Error(`GitHub pull request #${index} unreadable`);
+        return found;
+      },
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getBranch: async () => ({ protected: true, strict: true, sha: "base-2", requiredContexts: ["ci"] }),
+      listOpenPulls: async () => [githubPull(100)],
+      listCommitStatuses: async (_o: string, _r: string, sha: string) =>
+        sha === "head-100" ? [reviewCheck("success")] : [],
+      listCheckRuns: async () => [],
+      getRepoFile: async () => ({ found: false }),
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" } }),
+      updateIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" } }),
+      listIssueComments: async () => [],
+      listPullReviews: async () => [],
+      listPullReviewComments: async () => [],
+      createCommitStatus: async () => ({ state: "success" as const }),
+    } as never;
+    const mailbox = workerMailboxApi(fullApi);
+    expect(mailbox).toBeDefined();
+    expect(typeof mailbox?.listCommitStatuses).toBe("function");
+    expect(typeof mailbox?.listCheckRuns).toBe("function");
+    const queued: IssueJob[] = [];
+    const outcome = await enqueueStrictRefreshForGreenReview({
+      rawBody: statusPayload("success"),
+      delivery: "d1",
+      api: mailbox as never,
+      policy: githubPolicy,
+      slots,
+      log: () => undefined,
+      enqueue: async (job) => {
+        queued.push(job);
+        return { queued: true, key: `strict:${job.prNumber}` };
+      },
+    });
+    expect(outcome.outcome).toBe("queued");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.prNumber).toBe(100);
+  });
+
+  test("open-pull lookup failure on the status path defers via the repo default", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    const api = {
+      listOpenPulls: async () => {
+        throw new Error("GitHub GET /repos/o/r/pulls → 503: boom");
+      },
+      getRepo: async () => ({
+        full_name: "o/r",
+        html_url: "https://github.com/o/r",
+        clone_url: "https://github.com/o/r.git",
+        default_branch: "main",
+      }),
+    } as never;
+    const outcome = await enqueueStrictRefreshForGreenReview({
+      rawBody: statusPayload("success"),
+      delivery: "d1",
+      api,
+      policy: githubPolicy,
+      slots,
+      log: () => undefined,
+      enqueue: async () => ({ queued: true, key: "k" }),
+    });
+    expect(outcome.outcome).toBe("deferred");
+    expect(await slots.listAdmitNextDue(Date.now())).toHaveLength(1);
+  });
+
+  test("second-read forge error after a proven green defers durably", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    let statusCalls = 0;
+    const api = {
+      listOpenPulls: async () => [githubPull(100)],
+      getPR: async () => githubPull(100),
+      getBranch: async () => ({ protected: true, strict: true, sha: "base-2", requiredContexts: ["ci"] }),
+      listCommitStatuses: async () => {
+        statusCalls += 1;
+        if (statusCalls === 1) return [reviewCheck("success")];
+        throw new Error("GitHub GET /repos/o/r/commits/head-100/status → 503: boom");
+      },
+      listCheckRuns: async () => [],
+      getRepoFile: async () => ({ found: false }),
+      getRepo: async () => ({
+        full_name: "o/r",
+        html_url: "https://github.com/o/r",
+        clone_url: "https://github.com/o/r.git",
+        default_branch: "main",
+      }),
+    } as never;
+    // The first verdict read proves green; the reconciliation re-read then
+    // hits a transient. The wake must defer (durable admit-next), not skip.
+    const direct = await shouldEnqueueStrictRefreshOnReviewGreen({
+      owner: "o",
+      repo: "r",
+      prNumber: 100,
+      headSha: "head-100",
+      defaultBranch: "main",
+      cloneUrl: "https://github.com/o/r.git",
+      policy: githubPolicy,
+      api,
+      slots,
+      nowMs: 1_000,
+    });
+    expect(direct.job).toBeNull();
+    expect(direct.deferred).toBe(true);
+    expect(await slots.listAdmitNextDue(1_000)).toHaveLength(1);
   });
 });
 

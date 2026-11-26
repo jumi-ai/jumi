@@ -1716,21 +1716,33 @@ export async function shouldEnqueueStrictRefreshOnReviewGreen(opts: {
       return { job: null, deferred: false };
     }
   }
-  const job = await shouldEnqueueStrictRefreshForPR({
-    pr: fresh,
-    owner,
-    repo,
-    defaultBranch: opts.defaultBranch,
-    cloneUrl: opts.cloneUrl,
-    policy,
-    api,
-    ...(opts.sender !== undefined ? { sender: opts.sender } : {}),
-    ...(log ? { log } : {}),
-    ...(opts.slots ? { slots: opts.slots } : {}),
-    nowMs: now,
-    ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
-  });
-  return { job, deferred: false };
+  let job: Awaited<ReturnType<typeof shouldEnqueueStrictRefreshForPR>>;
+  try {
+    job = await shouldEnqueueStrictRefreshForPR({
+      pr: fresh,
+      owner,
+      repo,
+      defaultBranch: opts.defaultBranch,
+      cloneUrl: opts.cloneUrl,
+      policy,
+      api,
+      ...(opts.sender !== undefined ? { sender: opts.sender } : {}),
+      ...(log ? { log } : {}),
+      ...(opts.slots ? { slots: opts.slots } : {}),
+      nowMs: now,
+      ...(opts.hasPendingFollowUp ? { hasPendingFollowUp: opts.hasPendingFollowUp } : {}),
+    });
+  } catch (err) {
+    log?.(`strict refresh review-green reconcile failed: ${errorMessage(err)}`);
+    return defer(baseBranch);
+  }
+  if (job) return { job, deferred: false };
+  // The head proved green above; a null below with a free slot means the
+  // second read hit a transient (open-pull/slot/verdict re-read) rather
+  // than terminal evidence, so record the admit-next obligation instead of
+  // dropping the proven-green wake. A held slot makes defer a no-op and
+  // correctly reports no deferral.
+  return defer(baseBranch);
 }
 
 export type StrictGreenWakeApi = StrictRefreshApi & {
@@ -1800,7 +1812,30 @@ export async function enqueueStrictRefreshForGreenReview(opts: {
     pulls = await opts.api.listOpenPulls(owner, repo);
   } catch (err) {
     log?.(`strict refresh review-green open-pull lookup failed: ${errorMessage(err)}`);
-    return { outcome: "skip", reason: "open-pull lookup failed" };
+    // The payload already proved green; without the pull list the base
+    // branch is unknown, so fall back to the repo default for the durable
+    // admit-next obligation (the common single-branch case). A held slot
+    // makes the defer a no-op. When no branch can be resolved there is
+    // nothing to drain, so report a retryable deferral without an
+    // obligation rather than a silent skip.
+    let branch = (opts.defaultBranch ?? "").trim();
+    if (!branch && typeof opts.api.getRepo === "function") {
+      try {
+        const info = await opts.api.getRepo(owner, repo);
+        if (typeof info?.default_branch === "string") branch = info.default_branch.trim();
+      } catch {
+        // Fall through to the branchless deferral below.
+      }
+    }
+    if (branch && opts.slots) {
+      try {
+        const recorded = await opts.slots.ensureAdmitNextDue(owner, repo, branch, now);
+        if (recorded) return { outcome: "deferred" };
+      } catch {
+        // Fall through to the branchless deferral below.
+      }
+    }
+    return { outcome: "deferred", reason: "open-pull lookup failed" };
   }
   const matches = pulls
     .filter((pr) => (pr?.head?.sha ?? "").toLowerCase() === green.sha.toLowerCase())
