@@ -326,7 +326,9 @@ describe("pr_snapshot", () => {
       await snapshot.resolveRequiredCiContexts();
       expect(counts["getBranch"] ?? 0).toBe(0);
     }
-    // No feedback: no finding identity, so no PR files read even after getSameFinding.
+    // No feedback: no finding identity, so no PR diff read even after getSameFinding.
+    // The snapshot still lists PR files once to check for an invalid head
+    // settings file (which counts as feedback when the pull touches it).
     {
       const { api, counts } = makeCountingApi({
         getRepoFile: () => ({ found: true, content: "max_followup_rounds: 3\n" }),
@@ -335,10 +337,10 @@ describe("pr_snapshot", () => {
       const { opts, deps } = snapshotArgs(api as never, latches);
       const snapshot = await buildFollowUpSnapshot(opts, deps as never);
       expect(snapshot.hasFeedback).toBe(false);
-      expect(counts["getPRFiles"] ?? 0).toBe(0);
+      expect(counts["getPRFiles"] ?? 0).toBe(1);
       await snapshot.getPrDiffHash();
       await snapshot.getSameFinding();
-      expect(counts["getPRFiles"] ?? 0).toBe(0);
+      expect(counts["getPRFiles"] ?? 0).toBe(1);
     }
     // Lazy left-to-author: no commit read until the thunk runs.
     {
