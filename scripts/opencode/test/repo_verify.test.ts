@@ -96,8 +96,9 @@ describe("verify settings", () => {
 });
 
 describe("verify runner", () => {
-  test("passed and job pushes without resuming", async () => {
+  test("passed first try commits verify-written files and pushes without resuming", async () => {
     let calls = 0;
+    let recommits = 0;
     const result = await runVerifyToPush({
       workdir: "/tmp/verify-pass",
       verify: { run: "bun run lint", kinds: ["implement"] },
@@ -111,11 +112,12 @@ describe("verify runner", () => {
         throw new Error("must not resume on pass");
       },
       recommit: async () => {
-        throw new Error("must not recommit on pass");
+        recommits++;
       },
     });
     expect(result.status).toBe("passed");
     expect(calls).toBe(1);
+    expect(recommits).toBe(1);
     expect(result.note).toContain("Verify: passed");
     expect(result.note).toContain("bun run lint");
     expect(result.quotaSkip).toBeUndefined();
@@ -149,7 +151,7 @@ describe("verify runner", () => {
     expect(result.status).toBe("passed");
     expect(runs).toBe(2);
     expect(resumes).toHaveLength(1);
-    expect(recommits).toBe(1);
+    expect(recommits).toBe(2);
   });
 
   test("failed on every attempt pushes with the failure noted", async () => {
@@ -171,9 +173,10 @@ describe("verify runner", () => {
     expect(result.note).toContain("Verify: failed after 2 attempts");
   });
 
-  test("timeout pushes without resuming", async () => {
+  test("timeout pushes without resuming or recommitting", async () => {
     let runs = 0;
     let resumes = 0;
+    let recommits = 0;
     const result = await runVerifyToPush({
       workdir: "/tmp/verify-timeout",
       verify: { run: "make check", kinds: ["implement"] },
@@ -187,12 +190,73 @@ describe("verify runner", () => {
         resumes++;
         return undefined;
       },
-      recommit: async () => undefined,
+      recommit: async () => {
+        recommits++;
+      },
     });
     expect(result.status).toBe("timeout");
     expect(runs).toBe(1);
     expect(resumes).toBe(0);
+    expect(recommits).toBe(0);
     expect(result.note).toContain("not run (timeout");
+  });
+
+  test("quota thrown from the resumed session converts to a quota skip without hopping", async () => {
+    let runs = 0;
+    const result = await runVerifyToPush({
+      workdir: "/tmp/verify-quota",
+      verify: { run: "bun run lint", kinds: ["implement"] },
+      timeoutMs: 60_000,
+      attempts: 2,
+      runScript: async () => {
+        runs++;
+        return { status: "failed", exitCode: 1, output: "error: bad", durationMs: 1 };
+      },
+      resume: async () => {
+        throw new Error("stuck: usage limit exceeded");
+      },
+      recommit: async () => undefined,
+    });
+    expect(runs).toBe(1);
+    expect(result.status).toBe("failed");
+    expect(result.quotaSkip).toEqual({ status: "skipped", reason: expect.stringContaining("usage limit") });
+  });
+
+  test("quota thrown from recommit converts to a quota skip", async () => {
+    let resumes = 0;
+    const result = await runVerifyToPush({
+      workdir: "/tmp/verify-quota-recommit",
+      verify: { run: "bun run lint", kinds: ["implement"] },
+      timeoutMs: 60_000,
+      attempts: 2,
+      runScript: async () => ({ status: "failed", exitCode: 1, output: "error: bad", durationMs: 1 }),
+      resume: async () => {
+        resumes++;
+        return undefined;
+      },
+      recommit: async () => {
+        throw new Error("Credit balance is too low");
+      },
+    });
+    expect(resumes).toBe(1);
+    expect(result.status).toBe("failed");
+    expect(result.quotaSkip?.status).toBe("skipped");
+  });
+
+  test("non-quota errors from resume still throw", async () => {
+    await expect(
+      runVerifyToPush({
+        workdir: "/tmp/verify-resume-throw",
+        verify: { run: "bun run lint", kinds: ["implement"] },
+        timeoutMs: 60_000,
+        attempts: 2,
+        runScript: async () => ({ status: "failed", exitCode: 1, output: "error: bad", durationMs: 1 }),
+        resume: async () => {
+          throw new Error("engine exploded");
+        },
+        recommit: async () => undefined,
+      })
+    ).rejects.toThrow("engine exploded");
   });
 
   test("infrastructure error never resumes", async () => {

@@ -12,9 +12,17 @@
 
 import { logDiagnostic } from "./diagnostics.ts";
 import { childScratchDir } from "./engine_scratch.ts";
+import { isQuotaError, isQuotaWaitError, quotaStuckReasonForText } from "./quota.ts";
+import {
+  escapeXml,
+  REPO_SCRIPT_OUTPUT_TAIL_BYTES,
+  type RepoChildScriptResult,
+  redactRepoScriptOutput,
+  runRepoChildScript,
+  tailBytes,
+} from "./repo_script.ts";
 import type { RepoSettingsLoad } from "./repo_settings.ts";
 import { errorMessage } from "./util/error.ts";
-import { redactGitSecrets } from "./workspace.ts";
 
 /** Kinds `verify` may run on. Reviews never run verify. */
 const REPO_VERIFY_KINDS = ["implement", "followup"] as const;
@@ -224,20 +232,9 @@ export function resolveVerifyAttemptsMax(
   return parsed;
 }
 
-/** Last bytes of verify output kept for the log and the resume prompt. */
-const VERIFY_OUTPUT_TAIL_BYTES = 4 * 1024;
-/** Total verify output kept in memory (tail-kept, size-capped). */
-const VERIFY_OUTPUT_MAX_BYTES = 64 * 1024;
-
 export type VerifyStatus = "passed" | "failed" | "timeout" | "infra";
 
-interface VerifyScriptResult {
-  status: "ok" | "failed" | "timeout";
-  exitCode?: number | null;
-  /** Combined stdout+stderr, redacted and size-capped. */
-  output: string;
-  durationMs: number;
-}
+type VerifyScriptResult = RepoChildScriptResult;
 
 /** Injectable verify script runner (tests stub the shell). */
 export type RepoVerifyRunScript = (opts: {
@@ -246,54 +243,6 @@ export type RepoVerifyRunScript = (opts: {
   timeoutMs: number;
   env: Record<string, string>;
 }) => Promise<VerifyScriptResult>;
-
-export interface RepoVerifyOutcome {
-  ran: true;
-  status: VerifyStatus;
-  exitCode?: number | null;
-  durationMs: number;
-  /** Redacted output tail (last 4 KB) for the log and the resume prompt. */
-  tail: string;
-  /** Resume prompt block for the same session (only on code failure). */
-  resumePrompt?: string;
-  /** One-line PR-body note stating the result. */
-  note: string;
-}
-
-/**
- * Credential shapes the caller did not pass in: same shapes `repo_setup.ts`
- * scrubs, so a token-shaped string in verify output never reaches the log,
- * the prompt, or the PR body.
- */
-function scrubVerifyCredentialShapes(text: string): string {
-  return text
-    .replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@")
-    .replace(
-      /((?:^|[?&#\s])(?:access_token|refresh_token|id_token|x-amz-security-token|x-amz-signature|x-amz-credential|client_secret|api_token|api_key|apikey|password|passwd|signature|secret|token|auth|authorization|jwt|sig)=)[^&#\s"'<>]*/gi,
-      "$1***"
-    )
-    .replace(
-      /(("(?:access_token|refresh_token|id_token|password|client_secret|api_key|api_token|secret|token|jwt)"\s*:\s*"))[^"]*/gi,
-      "$1***"
-    )
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{20,}/g, "$1 ***")
-    .replace(/\btoken\s+[A-Za-z0-9._~+/=-]{20,}/g, "token ***")
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, "***")
-    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "***")
-    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/g, "***");
-}
-
-/** Redact verify output the way engine output already is, plus token shapes. */
-function redactVerifyOutput(text: string, secrets: readonly (string | undefined)[] = []): string {
-  return scrubVerifyCredentialShapes(redactGitSecrets(text, secrets));
-}
-
-/** Last `maxBytes` of `text` by UTF-8 bytes. */
-function tailBytes(text: string, maxBytes: number): string {
-  const bytes = new TextEncoder().encode(text);
-  if (bytes.byteLength <= maxBytes) return text;
-  return new TextDecoder().decode(bytes.slice(bytes.byteLength - maxBytes));
-}
 
 /**
  * Sanitized environment for the verify child: the same shape the setup child
@@ -324,134 +273,17 @@ function joinPath(a: string, b: string): string {
   return a.endsWith("/") ? `${a}${b}` : `${a}/${b}`;
 }
 
-async function readStreamTail(
-  stream: ReadableStream<Uint8Array>,
-  maxBytes: number
-): Promise<{ text: string; totalBytes: number }> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  let kept = 0;
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      chunks.push(value);
-      kept += value.byteLength;
-      while (kept > maxBytes && chunks.length > 0) {
-        const overflow = kept - maxBytes;
-        const first = chunks[0];
-        if (!first) break;
-        if (first.byteLength <= overflow) {
-          chunks.shift();
-          kept -= first.byteLength;
-        } else {
-          chunks[0] = first.slice(overflow);
-          kept -= overflow;
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const merged = new Uint8Array(kept);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { text: new TextDecoder().decode(merged), totalBytes: total };
-}
-
-/**
- * Run `run` as a shell script from `workdir` with `sh -e`. Captures stdout
- * and stderr together, redacted and size-capped. Spawns in its own process
- * group (via `setsid` when available) and kills the group on timeout.
- */
-async function runRepoVerifyScript(opts: {
-  workdir: string;
-  run: string;
-  timeoutMs: number;
-  env: Record<string, string>;
-}): Promise<VerifyScriptResult> {
-  const { mkdir } = await import("node:fs/promises");
-  const scratch = opts.env.TMPDIR ?? childScratchDir(opts.workdir);
-  await mkdir(scratch, { recursive: true }).catch(() => undefined);
-  const startedAt = Date.now();
-  const useSetsid =
-    typeof (Bun as unknown as { which?: (cmd: string) => string | null }).which === "function"
-      ? Boolean((Bun as unknown as { which: (cmd: string) => string | null }).which("setsid"))
-      : false;
-  const args = useSetsid ? ["setsid", "sh", "-e", "-c", opts.run] : ["sh", "-e", "-c", opts.run];
-  let proc: ReturnType<typeof Bun.spawn>;
-  try {
-    proc = Bun.spawn(args, {
-      cwd: opts.workdir,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: opts.env,
-    });
-  } catch (err) {
-    return {
-      status: "failed",
-      exitCode: null,
-      output: redactVerifyOutput(errorMessage(err)),
-      durationMs: Date.now() - startedAt,
-    };
-  }
-  const pid = proc.pid;
-  let timedOut = false;
-  const timer =
-    opts.timeoutMs > 0
-      ? setTimeout(() => {
-          timedOut = true;
-          if (useSetsid) {
-            try {
-              process.kill(-pid, "SIGKILL");
-            } catch {}
-          }
-          try {
-            proc.kill();
-          } catch {}
-          if (useSetsid) {
-            try {
-              proc.kill(9 as unknown as undefined);
-            } catch {}
-          }
-        }, opts.timeoutMs)
-      : undefined;
-  let stdout = { text: "", totalBytes: 0 };
-  let stderr = { text: "", totalBytes: 0 };
-  let exitCode: number | null = null;
-  try {
-    const stdoutStream = proc.stdout as unknown as ReadableStream<Uint8Array>;
-    const stderrStream = proc.stderr as unknown as ReadableStream<Uint8Array>;
-    [stdout, stderr, exitCode] = await Promise.all([
-      readStreamTail(stdoutStream, VERIFY_OUTPUT_MAX_BYTES),
-      readStreamTail(stderrStream, VERIFY_OUTPUT_MAX_BYTES),
-      proc.exited,
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (timedOut && useSetsid) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {}
-    }
-  }
-  const durationMs = Date.now() - startedAt;
-  if (exitCode === 130) exitCode = 143;
-  const combined = [stdout.text, stderr.text].filter(Boolean).join("\n");
-  const output = redactVerifyOutput(combined);
-  if (timedOut) return { status: "timeout", exitCode, output, durationMs };
-  if (exitCode !== 0) return { status: "failed", exitCode, output, durationMs };
-  return { status: "ok", exitCode, output, durationMs };
-}
-
-/** Escape `<`, `>`, `&` for the resume prompt block. */
-function escapeXml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+export interface RepoVerifyOutcome {
+  ran: true;
+  status: VerifyStatus;
+  exitCode?: number | null;
+  durationMs: number;
+  /** Redacted output tail (last 4 KB) for the log and the resume prompt. */
+  tail: string;
+  /** Resume prompt block for the same session (only on code failure). */
+  resumePrompt?: string;
+  /** One-line PR-body note stating the result. */
+  note: string;
 }
 
 /**
@@ -473,7 +305,7 @@ export function verifyTaskNote(verify: RepoVerify): string {
  * cause without weakening the check.
  */
 export function verifyResumePrompt(command: string, tail: string, attemptsLeft: number): string {
-  const tailBlock = tail ? tailBytes(tail, VERIFY_OUTPUT_TAIL_BYTES) : "(no output)";
+  const tailBlock = tail ? tailBytes(tail, REPO_SCRIPT_OUTPUT_TAIL_BYTES) : "(no output)";
   const escaped = escapeXml(tailBlock);
   const attempts =
     attemptsLeft > 0 ? ` (${attemptsLeft} resume attempt${attemptsLeft === 1 ? "" : "s"} left after this)` : "";
@@ -530,12 +362,12 @@ export async function runRepoVerifyOnce(opts: RunRepoVerifyOpts): Promise<RepoVe
   const log = opts.log ?? (() => undefined);
   const timeoutMs = opts.timeoutMs;
   const env = buildRepoVerifyEnv(opts.workdir);
-  const runScript = opts.runScript ?? runRepoVerifyScript;
+  const runScript = opts.runScript ?? runRepoChildScript;
   let result: VerifyScriptResult;
   try {
     result = await runScript({ workdir: opts.workdir, run: opts.verify.run, timeoutMs, env });
   } catch (err) {
-    const tail = tailBytes(redactVerifyOutput(errorMessage(err)), VERIFY_OUTPUT_TAIL_BYTES);
+    const tail = tailBytes(redactRepoScriptOutput(errorMessage(err)), REPO_SCRIPT_OUTPUT_TAIL_BYTES);
     logDiagnostic(log, "verify", { state: "infra", exit_code: null, duration_ms: 0 });
     log(`[verify] infrastructure error: ${tail.split("\n")[0] ?? ""}`);
     return {
@@ -547,7 +379,7 @@ export async function runRepoVerifyOnce(opts: RunRepoVerifyOpts): Promise<RepoVe
       note: formatVerifyNote("infra", opts.verify.run, 0),
     };
   }
-  const tail = tailBytes(result.output, VERIFY_OUTPUT_TAIL_BYTES);
+  const tail = tailBytes(result.output, REPO_SCRIPT_OUTPUT_TAIL_BYTES);
   if (result.status === "ok") {
     logDiagnostic(log, "verify", { state: "passed", exit_code: result.exitCode ?? 0, duration_ms: result.durationMs });
     for (const line of tail.split("\n")) {
@@ -618,11 +450,17 @@ export async function runRepoVerifyOnce(opts: RunRepoVerifyOpts): Promise<RepoVe
  * failure only. Timeouts and infrastructure errors never resume. Always
  * resolves to a PR-body note; the caller pushes anyway after the last
  * attempt. A verify failure never counts as a runner failure and never uses
- * the availability-hop budget: `resume` must continue the same session.
+ * the availability-hop budget: `resume` must continue the same session, and
+ * a quota throw from `resume`/`recommit` converts to the quota-skip path
+ * instead of hopping.
  *
  * `resume` runs the same runner session with the given prompt and returns
  * `undefined` on success or a quota skip to abort the round. `recommit`
- * commits the resumed session's edits before the next attempt.
+ * commits the resumed session's edits before the next attempt, and the final
+ * attempt's verify-written files before the push: a verify command that
+ * writes tracked files (formatter, `lint --fix`) is committed on every code
+ * outcome, never silently dropped. A timed-out run is never committed: it
+ * may have been killed mid-write.
  */
 export async function runVerifyToPush(opts: {
   workdir: string;
@@ -637,6 +475,18 @@ export async function runVerifyToPush(opts: {
   const log = opts.log ?? (() => undefined);
   let remaining = opts.attempts;
   let runs = 0;
+  // A quota throw from the resumed session must not hop: the verify contract
+  // is same-session resumes only, and the caller pushes anyway. Convert it to
+  // the quota-skip path the `resume` return already uses.
+  const quotaSkipFor = (err: unknown) => {
+    const reason = quotaStuckReasonForText(errorMessage(err));
+    log(`[verify] resume hit quota, skipping without hopping: ${reason}`);
+    return {
+      note: formatVerifyNote("failed", opts.verify.run, runs),
+      status: "failed" as const,
+      quotaSkip: { status: "skipped" as const, reason },
+    };
+  };
   for (;;) {
     const result = await runRepoVerifyOnce({
       workdir: opts.workdir,
@@ -647,16 +497,25 @@ export async function runVerifyToPush(opts: {
       runScript: opts.runScript,
     });
     runs += 1;
-    if (result.status === "passed") return { note: result.note, status: "passed" };
+    if (result.status === "passed") {
+      await opts.recommit();
+      return { note: result.note, status: "passed" };
+    }
     if (result.status === "timeout" || result.status === "infra") return { note: result.note, status: result.status };
     if (remaining <= 0) {
+      await opts.recommit();
       return { note: formatVerifyNote("failed", opts.verify.run, runs), status: "failed" };
     }
     remaining -= 1;
     const prompt = verifyResumePrompt(opts.verify.run, result.tail, remaining);
     log(`[verify] resuming same session (${remaining} resume attempt${remaining === 1 ? "" : "s"} left)`);
-    const quotaSkip = await opts.resume(prompt);
-    if (quotaSkip) return { note: formatVerifyNote("failed", opts.verify.run, runs), status: "failed", quotaSkip };
-    await opts.recommit();
+    try {
+      const quotaSkip = await opts.resume(prompt);
+      if (quotaSkip) return { note: formatVerifyNote("failed", opts.verify.run, runs), status: "failed", quotaSkip };
+      await opts.recommit();
+    } catch (err) {
+      if (isQuotaError(err) || isQuotaWaitError(err)) return quotaSkipFor(err);
+      throw err;
+    }
   }
 }

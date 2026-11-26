@@ -12,6 +12,14 @@ import { withoutEngineTempPorcelain } from "./claimed_worktree.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { childScratchDir } from "./engine_scratch.ts";
 import {
+  escapeXml,
+  REPO_SCRIPT_OUTPUT_TAIL_BYTES,
+  type RepoChildScriptResult,
+  redactRepoScriptOutput,
+  runRepoChildScript,
+  tailBytes,
+} from "./repo_script.ts";
+import {
   DEFAULT_SETUP_TIMEOUT_MS,
   effectiveSetupTimeoutMs,
   loadDefaultBranchSettings,
@@ -34,13 +42,6 @@ import {
 } from "./review_sandbox.ts";
 import { errorMessage } from "./util/error.ts";
 import type { GitAuth, GitRunner } from "./workspace.ts";
-import { redactGitSecrets } from "./workspace.ts";
-
-/** Last bytes of setup output kept for the job log and the agent prompt. */
-const SETUP_OUTPUT_TAIL_BYTES = 4 * 1024;
-
-/** Total setup output kept in memory (tail-kept, size-capped). */
-const SETUP_OUTPUT_MAX_BYTES = 64 * 1024;
 
 type RepoSetupState = "ok" | "failed" | "timeout" | "dirty";
 
@@ -67,48 +68,6 @@ export type RepoSetupResult = { ran: false } | RepoSetupOutcome;
  */
 export function setupGitProxyAccess(kind: string): ChildGitProxyAccess {
   return kind === "review" ? "read-only" : "read-write";
-}
-
-/** Escape `<`, `>`, `&` for the prompt block. */
-function escapeXml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/**
- * Credential shapes the caller did not pass in: other PATs, JWTs, query
- * secrets, userinfo. Same shapes `forge_errors.ts` scrubs from forge text, so
- * a token-shaped string in setup output never reaches the log or the prompt.
- */
-function scrubSetupCredentialShapes(text: string): string {
-  return text
-    .replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@")
-    .replace(
-      /((?:^|[?&#\s])(?:access_token|refresh_token|id_token|x-amz-security-token|x-amz-signature|x-amz-credential|client_secret|api_token|api_key|apikey|password|passwd|signature|secret|token|auth|authorization|jwt|sig)=)[^&#\s"'<>]*/gi,
-      "$1***"
-    )
-    .replace(
-      /("(?:access_token|refresh_token|id_token|password|client_secret|api_key|api_token|secret|token|jwt)"\s*:\s*")[^"]*/gi,
-      "$1***"
-    )
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{20,}/g, "$1 ***")
-    .replace(/\btoken\s+[A-Za-z0-9._~+/=-]{20,}/g, "token ***")
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, "***")
-    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "***")
-    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/g, "***");
-}
-
-/** Redact setup output the way engine output already is, plus token shapes. */
-function redactSetupOutput(text: string, secrets: readonly (string | undefined)[] = []): string {
-  return scrubSetupCredentialShapes(redactGitSecrets(text, secrets));
-}
-
-/** Last `maxBytes` of `text` by UTF-8 bytes. */
-function tailBytes(text: string, maxBytes: number): string {
-  const bytes = new TextEncoder().encode(text);
-  if (bytes.byteLength <= maxBytes) return text;
-  // Slice on bytes, then decode with fatal off: a split multi-byte sequence
-  // decodes with replacement chars rather than throwing.
-  return new TextDecoder().decode(bytes.slice(bytes.byteLength - maxBytes));
 }
 
 /**
@@ -167,13 +126,7 @@ function gitHost(giteaUrl: string): string {
   }
 }
 
-export interface SetupScriptResult {
-  status: "ok" | "failed" | "timeout";
-  exitCode?: number | null;
-  /** Combined stdout+stderr, redacted and size-capped. */
-  output: string;
-  durationMs: number;
-}
+export type SetupScriptResult = RepoChildScriptResult;
 
 /** Injectable setup script runner (tests stub the shell). */
 export type RepoSetupRunScript = (opts: {
@@ -183,143 +136,11 @@ export type RepoSetupRunScript = (opts: {
   env: Record<string, string>;
 }) => Promise<SetupScriptResult>;
 
-async function readStreamTail(
-  stream: ReadableStream<Uint8Array>,
-  maxBytes: number
-): Promise<{ text: string; totalBytes: number }> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  let kept = 0;
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      chunks.push(value);
-      kept += value.byteLength;
-      while (kept > maxBytes && chunks.length > 0) {
-        const overflow = kept - maxBytes;
-        const first = chunks[0];
-        if (!first) break;
-        if (first.byteLength <= overflow) {
-          chunks.shift();
-          kept -= first.byteLength;
-        } else {
-          chunks[0] = first.slice(overflow);
-          kept -= overflow;
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const merged = new Uint8Array(kept);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { text: new TextDecoder().decode(merged), totalBytes: total };
-}
-
-/**
- * Run `run` as a shell script from `workdir` with `sh -e`. Captures stdout
- * and stderr together, redacted and size-capped. Spawns in its own process
- * group (via `setsid` when available) and kills the group on timeout.
- */
-async function runRepoSetupScript(opts: {
-  workdir: string;
-  run: string;
-  timeoutMs: number;
-  env: Record<string, string>;
-}): Promise<SetupScriptResult> {
-  const { mkdir } = await import("node:fs/promises");
-  const scratch = opts.env.TMPDIR ?? childScratchDir(opts.workdir);
-  await mkdir(scratch, { recursive: true }).catch(() => undefined);
-  const startedAt = Date.now();
-  const useSetsid =
-    typeof (Bun as unknown as { which?: (cmd: string) => string | null }).which === "function"
-      ? Boolean((Bun as unknown as { which: (cmd: string) => string | null }).which("setsid"))
-      : false;
-  const args = useSetsid ? ["setsid", "sh", "-e", "-c", opts.run] : ["sh", "-e", "-c", opts.run];
-  let proc: ReturnType<typeof Bun.spawn>;
-  try {
-    proc = Bun.spawn(args, {
-      cwd: opts.workdir,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: opts.env,
-    });
-  } catch (err) {
-    return {
-      status: "failed",
-      exitCode: null,
-      output: redactSetupOutput(errorMessage(err)),
-      durationMs: Date.now() - startedAt,
-    };
-  }
-  const pid = proc.pid;
-  let timedOut = false;
-  const timer =
-    opts.timeoutMs > 0
-      ? setTimeout(() => {
-          timedOut = true;
-          // Kill the whole process group first (setup runs under `setsid`),
-          // then the direct child as a fallback.
-          if (useSetsid) {
-            try {
-              process.kill(-pid, "SIGKILL");
-            } catch {}
-          }
-          try {
-            proc.kill();
-          } catch {}
-          // SIGKILL fallback for a group kill that did not land.
-          if (useSetsid) {
-            try {
-              proc.kill(9 as unknown as undefined);
-            } catch {}
-          }
-        }, opts.timeoutMs)
-      : undefined;
-  let stdout = { text: "", totalBytes: 0 };
-  let stderr = { text: "", totalBytes: 0 };
-  let exitCode: number | null = null;
-  try {
-    const stdoutStream = proc.stdout as unknown as ReadableStream<Uint8Array>;
-    const stderrStream = proc.stderr as unknown as ReadableStream<Uint8Array>;
-    [stdout, stderr, exitCode] = await Promise.all([
-      readStreamTail(stdoutStream, SETUP_OUTPUT_MAX_BYTES),
-      readStreamTail(stderrStream, SETUP_OUTPUT_MAX_BYTES),
-      proc.exited,
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    // Belt and suspenders: a timed-out group kill that raced the exit leaves
-    // no orphan behind.
-    if (timedOut && useSetsid) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {}
-    }
-  }
-  const durationMs = Date.now() - startedAt;
-  // The OpenCode CLI maps 130 to 143; a setup shell killed by SIGTERM reads
-  // the same way.
-  if (exitCode === 130) exitCode = 143;
-  const combined = [stdout.text, stderr.text].filter(Boolean).join("\n");
-  const output = redactSetupOutput(combined);
-  if (timedOut) return { status: "timeout", exitCode, output, durationMs };
-  if (exitCode !== 0) return { status: "failed", exitCode, output, durationMs };
-  return { status: "ok", exitCode, output, durationMs };
-}
-
 /** Short `<repo_setup>` block for the agent prompt. */
 function formatRepoSetupPromptBlock(state: RepoSetupState, opts?: { exitCode?: number | null; tail?: string }): string {
   if (state === "ok") return `<repo_setup state="ok"/>`;
   const exit = opts?.exitCode ?? "";
-  const tail = opts?.tail ? tailBytes(opts.tail, SETUP_OUTPUT_TAIL_BYTES) : "";
+  const tail = opts?.tail ? tailBytes(opts.tail, REPO_SCRIPT_OUTPUT_TAIL_BYTES) : "";
   const escaped = escapeXml(tail);
   const label = state === "timeout" ? "timed out" : state === "dirty" ? "left a dirty tree" : "did not complete";
   return (
@@ -417,7 +238,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
       log(`[repo setup] git proxy access=${proxy.access}`);
     } catch (err) {
       const durationMs = 0;
-      const tail = tailBytes(redactSetupOutput(errorMessage(err)), SETUP_OUTPUT_TAIL_BYTES);
+      const tail = tailBytes(redactRepoScriptOutput(errorMessage(err)), REPO_SCRIPT_OUTPUT_TAIL_BYTES);
       const failureReason = `repository setup failed: cannot start git credential proxy`;
       logDiagnostic(log, "repo_setup", {
         kind: opts.kind,
@@ -484,9 +305,9 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         });
       }
     }
-    const runScript = opts.runScript ?? runRepoSetupScript;
+    const runScript = opts.runScript ?? runRepoChildScript;
     const result = await runScript({ workdir: opts.workdir, run, timeoutMs, env });
-    const tail = tailBytes(result.output, SETUP_OUTPUT_TAIL_BYTES);
+    const tail = tailBytes(result.output, REPO_SCRIPT_OUTPUT_TAIL_BYTES);
     const reportFailed = (failureReason: string): RepoSetupOutcome => {
       logDiagnostic(log, "repo_setup", {
         kind: opts.kind,
@@ -513,7 +334,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         await opts.git(["clean", "-fd"], { cwd: opts.workdir, env: opts.gitEnv });
         return undefined;
       } catch (err) {
-        return redactSetupOutput(errorMessage(err));
+        return redactRepoScriptOutput(errorMessage(err));
       }
     };
     const checkPorcelain = async (): Promise<{ porcelain?: string; error?: string }> => {
@@ -521,7 +342,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         const status = await opts.git(["status", "--porcelain"], { cwd: opts.workdir, env: opts.gitEnv });
         return { porcelain: withoutEngineTempPorcelain(status) };
       } catch (err) {
-        return { error: redactSetupOutput(errorMessage(err)) };
+        return { error: redactRepoScriptOutput(errorMessage(err)) };
       }
     };
     if (result.status === "ok") {

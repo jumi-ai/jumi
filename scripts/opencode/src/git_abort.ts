@@ -5,7 +5,7 @@ import { join } from "node:path";
  * Abortable `git` spawn: process-group cancellation for `runGit`.
  *
  * When a signal is supplied, `git` runs under `setsid` in its own
- * session/process group (the same approach as `runRepoSetupScript`), so an
+ * session/process group (the same approach as `runRepoChildScript`), so an
  * abort can terminate Git and the descendants that remain in the group
  * (ssh/remote/credential helpers). This is process-group cancellation, not a
  * containment boundary: a descendant that creates a new session/group escapes
