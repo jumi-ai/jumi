@@ -1,7 +1,7 @@
 import { hasLabel, isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS, readFollowUpLatch } from "./followup.ts";
-import { extractWorkingIssueNumber, isAssignedForeignPR, isInScopeJumiPR, isJumiPrIdentity } from "./gitea_issues.ts";
+import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -638,7 +638,6 @@ async function enqueueFollowUpFromHeadSettings(
     ? { botUsername: opts.botUsername, isPickedUp: (issue) => hasLabel(issue, effectivePickup) }
     : { botUsername: opts.botUsername };
   const closer = extractWorkingIssueNumber(pr);
-  const inScopeCloser = closer !== undefined && isInScopeJumiPR(pr, opts.row.owner, opts.row.repo, opts.botUsername);
   const foreign =
     closer === undefined &&
     isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, effectivePickupPolicy) &&
@@ -653,11 +652,6 @@ async function enqueueFollowUpFromHeadSettings(
       opts.logger
     );
     return logSkip("no closer");
-  }
-  if (!inScopeCloser && !foreign) {
-    // The head is invalid but Jumi does not work on this pull: today's
-    // failing status stands with no follow-up.
-    return logSkip("not a jumi pull request");
   }
   const issueNumber = closer ?? pr.number;
   const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);

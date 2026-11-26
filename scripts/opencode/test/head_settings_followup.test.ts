@@ -8,7 +8,7 @@ import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { normalizeSitReason } from "../src/router_sits.ts";
 import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
-import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeUser } from "./fixtures.ts";
+import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 const UNKNOWN_KEY_FAILURE = '.jumi.yml is invalid: unknown key "verify" (did you mean "review_exclude"?)';
 
@@ -144,6 +144,35 @@ describe("invalid head .jumi.yml routes to follow-up (#915)", () => {
     expect(result).toBeUndefined();
     expect(store.rows.some((entry) => entry.kind === "follow-up")).toBe(false);
     expect(logs).toEqual(["persist-insert skipped: no closer"]);
+  });
+
+  test("a handed-over pull with a human author and a picked-up closer queues a follow-up", async () => {
+    // Handed-over / taken-over pulls keep human authorship and branch, so
+    // the Jumi-identity gate must not deny them: with a `Fixes #N` closer
+    // whose issue is picked up, the shared closer/pickup checks enqueue, the
+    // same as an ordinary review failure would.
+    const store = new MemoryReviewJobStore();
+    const row = await leasedReviewRow(store);
+    const repo = makeRepo();
+    const api = reviewLeaseApi({
+      getPR: async () =>
+        makePR({
+          body: "Fixes #12",
+          user: makeUser({ login: "alice" }),
+          head: { label: "kirmanak:feature", ref: "feature", sha: "headsha", repo, repo_id: repo.id },
+        }),
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row,
+      botUsername: "jumi",
+      published: { status: "skipped", reason: UNKNOWN_KEY_FAILURE },
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    const follow = store.rows.find((entry) => entry.kind === "follow-up");
+    expect(follow?.state).toBe("queued");
+    expect(follow?.issueNumber).toBe(12);
   });
 
   test("the snapshot treats an invalid head file as feedback for the worker", async () => {
