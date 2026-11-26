@@ -84,6 +84,7 @@ export const KNOWN_PI_ENDPOINTS: readonly string[] = [
   "https://opencode.ai/zen/v1",
   "https://opencode.ai/zen/go/v1",
   "https://opencode.ai/inference/v1",
+  "process://claude-code",
   // Public Responses API for the OSS Sign in with ChatGPT plan route
   // (src/pi_chatgpt.ts). The deployment allowlist still gates selection.
   "https://api.openai.com/v1",
