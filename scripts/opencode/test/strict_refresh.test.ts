@@ -247,12 +247,12 @@ describe("strict worker rechecks", () => {
       })
     ).toBe("strict refresh: auto-merge no longer armed");
   });
-  test("strictness off or unknown skips", () => {
+  test("strictness off is terminal while unknown retries", () => {
     expect(strictRecheckSkipReason({ fresh: jumiPull(), expectedHeadSha: "headsha", strict: "off" })).toBe(
-      "strict refresh: strictness off or unknown"
+      "strict refresh: strictness off"
     );
     expect(strictRecheckSkipReason({ fresh: jumiPull(), expectedHeadSha: "headsha", strict: "unknown" })).toBe(
-      "strict refresh: strictness off or unknown"
+      "strict refresh: strictness unknown"
     );
   });
   test("eligible refresh proceeds", () => {

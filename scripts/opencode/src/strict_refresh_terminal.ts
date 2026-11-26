@@ -32,7 +32,6 @@ export function isStrictRefreshRetryableSkipReason(reason: string | undefined): 
   if (lower.startsWith(RETRYABLE_BUSY_PREFIX)) return true;
   if (lower.includes("pull request unreadable")) return true;
   if (lower.includes("strictness unknown")) return true;
-  if (lower.includes("strict refresh: strictness off or unknown")) return false;
   return (
     lower.includes("503") ||
     lower.includes("502") ||
