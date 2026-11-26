@@ -207,6 +207,12 @@ export interface StrictRefreshSlotStore {
   listNeedsKick(): Promise<StrictRefreshSlot[]>;
   /** Branches with an admit-next obligation due. */
   listAdmitNextDue(nowMs: number): Promise<Array<{ owner: string; repo: string; baseBranch: string }>>;
+  /**
+   * Consume a due admit-next obligation after one bounded drain attempt,
+   * whether or not a candidate was ready. A later push or stop re-creates
+   * it. Returns true when an obligation was cleared.
+   */
+  consumeAdmitNext(owner: string, repo: string, baseBranch: string): Promise<boolean>;
 }
 
 function slotKey(owner: string, repo: string, baseBranch: string): string {
@@ -564,6 +570,10 @@ export class MemoryStrictRefreshSlotStore implements StrictRefreshSlotStore {
 
   async listAdmitNextDue(nowMs: number): Promise<Array<{ owner: string; repo: string; baseBranch: string }>> {
     return this.locked(() => [...this.admitNext.values()].filter((r) => r.dueAtMs <= nowMs).map((r) => ({ ...r })));
+  }
+
+  async consumeAdmitNext(owner: string, repo: string, baseBranch: string): Promise<boolean> {
+    return this.locked(() => this.admitNext.delete(slotKey(owner, repo, baseBranch)));
   }
 }
 
@@ -1262,6 +1272,22 @@ export class PgStrictRefreshSlotStore implements StrictRefreshSlotStore {
         repo: String(row.repo),
         baseBranch: String(row.base_branch),
       }));
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async consumeAdmitNext(owner: string, repo: string, baseBranch: string): Promise<boolean> {
+    try {
+      return await this.withSlotLock(owner, repo, baseBranch, async (tx) => {
+        const deleted = asRows<{ one: unknown }>(
+          await tx.unsafe(
+            `DELETE FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE owner = $1 AND repo = $2 AND base_branch = $3 AND phase = 'admit-next' RETURNING 1 AS one`,
+            [owner, repo, baseBranch]
+          )
+        );
+        return deleted.length > 0;
+      });
     } catch (err) {
       wrapSqlError(err);
     }

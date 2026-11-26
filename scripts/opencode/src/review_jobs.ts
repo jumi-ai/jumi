@@ -1756,7 +1756,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
               generation: entry.generation + 1,
             });
           }
-          if (kind === "follow-up" && job.prNumber) {
+          if (kind === "follow-up" && job.prNumber && superseded.length > 0) {
             await transferStrictSlotOnEnqueue(this.strictSlots, job, Date.now()).catch(() => undefined);
           }
         }
@@ -4592,6 +4592,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     assertValidIssueJobForEnqueue(job);
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
+    let followUpSupersededCount = 0;
     const result = await this.sql.begin(async (tx) => {
       if (isFollowUpKind(kind)) {
         if (job.prNumber) {
@@ -4751,6 +4752,7 @@ export class PgReviewJobStore implements ReviewJobStore {
               [job.owner, job.repo, job.prNumber, kind, key]
             )
           );
+          followUpSupersededCount = superseded.length;
           if (superseded.length > 0) {
             const sorted = [...superseded].sort((a, b) => {
               const ka = str(a.job_key);
@@ -4883,7 +4885,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       await this.clearSitTx(tx, job.owner, job.repo, job.issueNumber);
       return { key, queued: true };
     });
-    if (result.queued && job.prNumber) {
+    if (result.queued && job.prNumber && isFollowUpKind(kind) && followUpSupersededCount > 0) {
       await transferStrictSlotOnEnqueue(this.strictSlots, job, Date.now()).catch(() => undefined);
     }
     return result;

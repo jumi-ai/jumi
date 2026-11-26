@@ -72,6 +72,13 @@ export async function transferStrictObligationToReplacement(
     pendingJob?: import("./strict_refresh_queue.ts").StrictRefreshPendingJob | null;
     nowMs?: number;
     log?: (message: string) => void;
+    /**
+     * Caller-observed generation to fence on: the handoff only lands when
+     * the stored generation still matches. Without it the transfer fences
+     * on its own fresh read, so a newer admission landing between the
+     * caller's read and this read is clobbered back.
+     */
+    expectedGeneration?: number;
   }
 ): Promise<boolean> {
   if (!slots) return false;
@@ -79,10 +86,12 @@ export async function transferStrictObligationToReplacement(
     const held = await slots.getSlot(opts.owner, opts.repo, opts.baseBranch);
     if (!held) return false;
     if (held.prNumber !== opts.prNumber) return false;
-    const nextGeneration = (held.generation ?? 0) + 1;
+    const fenceGeneration = opts.expectedGeneration ?? held.generation;
+    if (opts.expectedGeneration !== undefined && (held.generation ?? 0) !== opts.expectedGeneration) return false;
+    const nextGeneration = (fenceGeneration ?? 0) + 1;
     const ok = await slots.handoff(opts.owner, opts.repo, opts.baseBranch, {
       expectedPrNumber: held.prNumber,
-      expectedGeneration: held.generation,
+      expectedGeneration: fenceGeneration,
       next: {
         owner: opts.owner,
         repo: opts.repo,

@@ -385,9 +385,9 @@ export async function settleStrictSlotForCancelledJob(opts: {
         baseSha: opts.successor.baseSha,
         ...(opts.successor.pendingJob ? { pendingJob: opts.successor.pendingJob } : {}),
         nowMs: now,
+        expectedGeneration: generation,
         ...(opts.log ? { log: opts.log } : {}),
       });
-      void generation;
       return ok ? "transferred" : "kept";
     }
     await opts.slots.releaseToAdmitNext(opts.owner, opts.repo, opts.baseBranch, generation, now);
@@ -579,6 +579,18 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
         }
       } catch (err) {
         opts.log?.(`strict refresh admit-next failed: ${errorMessage(err)}`);
+      } finally {
+        // One bounded drain per obligation: consume it whether or not a
+        // candidate was ready, so an empty drain (e.g. closed PR, deleted
+        // branch) does not poll the forge every tick. A later push or stop
+        // re-creates the obligation. Consuming a just-admitted holder is a
+        // no-op (Memory already deleted it; Pg only deletes phase
+        // 'admit-next' rows, and a fresh admission is 'held').
+        try {
+          await opts.slots.consumeAdmitNext(target.owner, target.repo, target.baseBranch);
+        } catch (err) {
+          opts.log?.(`strict refresh admit-next consume failed: ${errorMessage(err)}`);
+        }
       }
     }
   } catch (err) {
