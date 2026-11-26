@@ -6651,7 +6651,7 @@ describe("post-cap refusal idempotency", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => ({ status: "ok" }),
+        openCodeRunner: async () => ({ status: "ok" as const }),
         logger: (message: string) => {
           logs.push(message);
         },
@@ -6665,7 +6665,12 @@ describe("post-cap refusal idempotency", () => {
       const latchAfterFirst = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(latchAfterFirst.handledCommentIds).toContain(55);
       const secondLogs: string[] = [];
-      const second = await implementFollowUp({ ...baseOpts, logger: (message: string) => secondLogs.push(message) });
+      const second = await implementFollowUp({
+        ...baseOpts,
+        logger: (message: string) => {
+          secondLogs.push(message);
+        },
+      });
       expect(second).toEqual({ status: "skipped", reason: "comment already handled" });
       expect(api.comments.filter((body) => body.includes("Jumi did not act")).length).toBe(1);
     });
