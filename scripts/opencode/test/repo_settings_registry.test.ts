@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { KNOWN_KEYS, loadRepoSettings, parseRepoSettingsText, REPO_SETTINGS_REGISTRY } from "../src/repo_settings.ts";
 
@@ -71,67 +71,69 @@ verify:
   kinds: [implement, followup]
 `;
 
-// Object.keys lists captured by running the pre-refactor implementation once.
+// Load key order for an empty file: `early` entries first, then the rest in
+// registry (alphabetical) order. Late entries are absent here.
 const expectedNoneKeys = [
   "state",
   "automerge",
   "automergeLabel",
   "noAutomergeLabel",
-  "timeouts",
   "allowedRunners",
-  "reviewExclude",
-  "followupOnSuggestions",
   "autoRerunFlakes",
-  "takeoverAuthors",
-  "ignoreConflictsAuthors",
   "blockingQuestionAuthors",
-  "trustedSenders",
   "followupIgnoreLogins",
+  "followupOnSuggestions",
+  "ignoreConflictsAuthors",
   "mode",
-  "reviewDrafts",
   "reviewBudget",
-  "strictBranchRefresh",
   "reviewCarry",
+  "reviewDrafts",
+  "reviewExclude",
+  "strictBranchRefresh",
+  "takeoverAuthors",
+  "timeouts",
+  "trustedSenders",
   "workerReviewRules",
 ];
 
+// Load key order for the full fixture: `early`, then registry order, then `late`.
 const expectedFullKeys = [
   "state",
   "automerge",
   "automergeLabel",
   "noAutomergeLabel",
-  "timeouts",
   "allowedRunners",
-  "reviewExclude",
-  "followupOnSuggestions",
   "autoRerunFlakes",
-  "maxFollowupRounds",
-  "maxConflictRounds",
-  "takeoverAuthors",
-  "ignoreConflictsAuthors",
-  "blockingQuestionAuthors",
-  "trustedSenders",
-  "followupIgnoreLogins",
-  "ignoreConflictsLabel",
-  "pickupLabel",
-  "conflictRegenerate",
-  "mode",
-  "branchPrefix",
-  "prTitle",
-  "commitMessage",
-  "closingKeyword",
-  "reviewDrafts",
-  "maxSuggestions",
-  "reviewBudget",
-  "ciGate",
   "automergeMethod",
-  "setup",
-  "verify",
-  "strictBranchRefresh",
+  "blockingQuestionAuthors",
+  "branchPrefix",
+  "ciGate",
+  "closingKeyword",
+  "commitMessage",
+  "conflictRegenerate",
+  "followupIgnoreLogins",
+  "followupOnSuggestions",
+  "ignoreConflictsAuthors",
+  "ignoreConflictsLabel",
+  "maxConflictRounds",
+  "maxFollowupRounds",
+  "maxSuggestions",
+  "mode",
+  "pickupLabel",
+  "prTitle",
+  "reviewBudget",
   "reviewCarry",
+  "reviewDrafts",
+  "reviewExclude",
+  "setup",
+  "strictBranchRefresh",
+  "takeoverAuthors",
+  "timeouts",
+  "trustedSenders",
+  "verify",
   "workerReviewRules",
-  "suggestionsHoldMerge",
   "maintainerQuestionsHoldMerge",
+  "suggestionsHoldMerge",
 ];
 
 // One invalid value per key, with the pre-refactor error string.
@@ -194,6 +196,11 @@ const invalidPerKey: Array<[string, string, string]> = [
 ];
 
 describe("repo_settings registry", () => {
+  test("registry is alphabetical by key", () => {
+    const keys = REPO_SETTINGS_REGISTRY.map((def) => def.key);
+    expect(keys).toEqual([...keys].sort());
+  });
+
   test("every registry key is known and documented", () => {
     expect(REPO_SETTINGS_REGISTRY).toHaveLength(35);
     const table = keyTableSection(page);
@@ -203,7 +210,37 @@ describe("repo_settings registry", () => {
     }
   });
 
-  test("empty fixture keeps the legacy load keys", async () => {
+  test("every documented key is a registry key", () => {
+    const table = keyTableSection(page);
+    const documented = new Set<string>();
+    for (const line of table.split("\n")) {
+      const match = /^\| `([^`]+)`/.exec(line);
+      if (!match) continue;
+      documented.add((match[1] as string).split(".")[0] as string);
+    }
+    expect(documented.size).toBeGreaterThan(0);
+    for (const key of documented) {
+      expect(KNOWN_KEYS.has(key)).toBe(true);
+    }
+  });
+
+  test("every registry key has a per-key definition file and vice versa", () => {
+    const dir = join(process.cwd(), "src", "repo_settings_keys");
+    const files = readdirSync(dir)
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => file.replace(/\.ts$/, ""));
+    expect(new Set(files)).toEqual(new Set(REPO_SETTINGS_REGISTRY.map((def) => def.key)));
+  });
+
+  test("every registry key has a per-key test file and vice versa", () => {
+    const dir = join(process.cwd(), "test", "repo_settings_keys");
+    const files = readdirSync(dir)
+      .filter((file) => file.endsWith(".test.ts"))
+      .map((file) => file.replace(/\.test\.ts$/, ""));
+    expect(new Set(files)).toEqual(new Set(REPO_SETTINGS_REGISTRY.map((def) => def.key)));
+  });
+
+  test("empty fixture keeps the load key set", async () => {
     const load = await loadRepoSettings(
       { getRepoFile: async () => ({ found: true, content: "{}\n" }) },
       "o",
@@ -215,7 +252,7 @@ describe("repo_settings registry", () => {
     expect(Object.keys(load)).toEqual(expectedNoneKeys);
   });
 
-  test("full fixture keeps the legacy load keys", async () => {
+  test("full fixture keeps the load key set", async () => {
     const load = await loadRepoSettings(
       { getRepoFile: async () => ({ found: true, content: fullFixture }) },
       "o",
