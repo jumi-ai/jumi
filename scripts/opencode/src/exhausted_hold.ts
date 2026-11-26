@@ -1,4 +1,4 @@
-import { isJumiReviewContext } from "./ci.ts";
+import { isJumiReviewContext, latestStatuses } from "./ci.ts";
 import type { Check } from "./ports.ts";
 import type { ReviewJobStore } from "./review_jobs.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
@@ -111,14 +111,16 @@ export async function resolveExhaustedFollowUpHoldOrThrow(opts: {
     const ours = statuses.filter((status) => isJumiReviewContext(status.context));
     // No statuses for this context (fakes, pre-hold rows): fail open like the
     // legacy unconditional post. A recorded non-pending means someone already
-    // resolved it, so there is nothing to clear.
+    // resolved it, so there is nothing to clear. Only the newest entry counts:
+    // an older `pending` must not shadow a newer resolution, and an older
+    // resolution must not shadow a newer hold.
     if (ours.length > 0) {
-      const pending = ours.filter((status) => (status.state ?? status.status) === "pending");
-      if (pending.length === 0) return { resolved: false, reason: "already-resolved" };
-      if (pending.some((status) => isMaintainerHoldPendingDescription(status.description))) {
+      const newest = latestStatuses(ours)[0] ?? ours[0]!;
+      if ((newest.state ?? newest.status) !== "pending") return { resolved: false, reason: "already-resolved" };
+      if (isMaintainerHoldPendingDescription(newest.description)) {
         return { resolved: false, reason: "maintainer-held" };
       }
-      if (pending.some((status) => !isSuggestionHoldPendingDescription(status.description))) {
+      if (!isSuggestionHoldPendingDescription(newest.description)) {
         return { resolved: false, reason: "other-hold" };
       }
     }

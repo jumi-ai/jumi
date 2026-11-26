@@ -931,6 +931,43 @@ export function isMaintainerQuestionInline(path: string | undefined | null, body
 }
 
 /**
+ * Whether a finding first line is an ordinary `❓` question: it carries the
+ * question marker but not the prescribed `❓ maintainer:` marker. This is the
+ * single place where the "maintainer questions are never blocking questions"
+ * rule lives: body and inline blocking-question counts both derive from it,
+ * so a `❓ maintainer:` never counts as blocking in either.
+ */
+function isNonMaintainerQuestionFirstLine(original: string): boolean {
+  return isQuestionFindingFirstLine(original) && !isMaintainerQuestionFirstLine(original);
+}
+
+/** Count the ordinary `❓` findings in a review body: every `❓` that is not `❓ maintainer:`. */
+export function countNonMaintainerQuestionFindings(text: string, opts?: { singleFilePath?: string }): number {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isNonMaintainerQuestionFirstLine(block.first)) count++;
+  }
+  return count;
+}
+
+/**
+ * Whether a published Jumi inline holds an ordinary `❓` question: the marker
+ * is in the inline `path` as an ordinary question, or the inline `body`
+ * holds at least one ordinary question. A `❓ maintainer:` inline never
+ * counts here; use `isMaintainerQuestionInline` for that.
+ */
+export function isNonMaintainerQuestionInline(
+  path: string | undefined | null,
+  body: string | undefined | null
+): boolean {
+  if (typeof path === "string" && path.trim() && isNonMaintainerQuestionFirstLine(path)) return true;
+  if (typeof body === "string" && body.trim() && countNonMaintainerQuestionFindings(body) > 0) return true;
+  return false;
+}
+
+/**
  * A review whose only open item is a maintainer-only `❓`: a complete
  * success trailer, at least one question, every question marked
  * `❓ maintainer:`, and no leftover suggestions. Single parse of the
@@ -964,7 +1001,7 @@ export function blockingOpenQuestionCount(
   if (!markdown || !isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
-  return countQuestionFindings(parsed.comment, opts);
+  return countNonMaintainerQuestionFindings(parsed.comment, opts);
 }
 
 /** Input to {@link reviewVerdictView}: the stored text plus the row's typed record, when it has one. */
@@ -1141,7 +1178,7 @@ export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictV
       }
       if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
       if (base.state !== "success") return 0;
-      return record.counts.question;
+      return Math.max(0, record.counts.question - maintainerQuestionCount);
     },
   };
 }
