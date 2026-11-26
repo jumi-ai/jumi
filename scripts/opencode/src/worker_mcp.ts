@@ -569,7 +569,7 @@ function toolSchemas(opts?: {
         },
         required: ["finding", "status"],
       },
-    },
+    }
   );
   return tools;
 }
@@ -686,12 +686,7 @@ export async function startWorkerMcpServer(opts: {
       if (method === "tools/call") {
         const name = String(params.name ?? "");
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        const out = callTool(
-          current,
-          name,
-          args,
-          { prBodyFenced: opts.prBodyFenced, prTitleEligible }
-        );
+        const out = callTool(current, name, args, { prBodyFenced: opts.prBodyFenced, prTitleEligible });
         return Response.json({
           jsonrpc: "2.0",
           id: body?.id ?? null,

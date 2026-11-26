@@ -5,6 +5,7 @@ import {
   isPrTitleRetitleEligible,
   isRetitleSettingOn,
 } from "../src/followup.ts";
+import { buildFollowupPrompt } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import {
   extractOriginalTitle,
@@ -13,7 +14,6 @@ import {
   PR_BODY_FENCE_START,
   withOriginalTitleMarker,
 } from "../src/implement.ts";
-import { buildFollowupPrompt } from "../src/git.ts";
 import { buildPROpenedPrompt } from "../src/prompt.ts";
 import { probeWorkerMcpServer } from "../src/worker_mcp.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -313,7 +313,10 @@ describe("adopted PR retitle", () => {
     // A later body rewrite keeps the marker; a second retitle keeps the first original.
     const rewritten = withOriginalTitleMarker("Second disclosure.", original as string);
     expect(extractOriginalTitle(rewritten)).toBe("Update jumi to v11.3.122");
-    const secondMarker = withOriginalTitleMarker(`${formatOriginalTitleMarker("Something else")}\nbody`, original as string);
+    const secondMarker = withOriginalTitleMarker(
+      `${formatOriginalTitleMarker("Something else")}\nbody`,
+      original as string
+    );
     expect(extractOriginalTitle(secondMarker)).toBe("Something else");
   });
 });
@@ -363,9 +366,9 @@ describe("original title marker and reviewer prompt", () => {
     expect(isRetitleSettingOn({ state: "no-branch" })).toBe(false);
     expect(isRetitleSettingOn({ state: "loaded", load: { state: "missing" } })).toBe(true);
     expect(isRetitleSettingOn({ state: "loaded", load: { state: "invalid", error: "bad" } })).toBe(false);
-    expect(
-      await hasJumiAuthoredCommit({ listPullCommits: async () => [jumiCommit()] }, "o", "r", 1, "jumi")
-    ).toBe(true);
+    expect(await hasJumiAuthoredCommit({ listPullCommits: async () => [jumiCommit()] }, "o", "r", 1, "jumi")).toBe(
+      true
+    );
     expect(await hasJumiAuthoredCommit({}, "o", "r", 1, "jumi")).toBe(false);
     const adopted = adoptedPr();
     expect(

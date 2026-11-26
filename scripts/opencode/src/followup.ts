@@ -70,15 +70,10 @@ import {
 } from "./followup_ci_refresh.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
-import {
-  isEligibleWorkerPR,
-  isJumiPrIdentity,
-  resolveWorkerPullRequest,
-  upsertWorkerComment,
-} from "./gitea_issues.ts";
-import { hasJumiCommit } from "./ignore_conflicts.ts";
+import { isEligibleWorkerPR, isJumiPrIdentity, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import { settleFollowUpHold } from "./hold_settlement.ts";
+import { hasJumiCommit } from "./ignore_conflicts.ts";
 import {
   buildFollowupPullRequestBody,
   buildTaskMarkdown,
@@ -91,6 +86,7 @@ import {
   jumiPrBodyRegion,
   noteProvenanceRunners,
   PR_DESCRIPTION_FILE,
+  PR_TITLE_ELIGIBLE_FILE,
   provenanceForgeFor,
   replaceJumiPrBodyRegion,
   resolveWorkerPrBody,
@@ -98,7 +94,6 @@ import {
   seedPullRequestDescription,
   withOriginalTitleMarker,
   workerPublishSecrets,
-  PR_TITLE_ELIGIBLE_FILE,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
@@ -2571,9 +2566,13 @@ export async function implementFollowUp(
       return { changed: false };
     }
     try {
-      await (
-        updateTitle as (owner: string, repo: string, index: number, title: string) => Promise<Pull>
-      ).call(opts.api, owner, repo, pr.number, trimmed);
+      await (updateTitle as (owner: string, repo: string, index: number, title: string) => Promise<Pull>).call(
+        opts.api,
+        owner,
+        repo,
+        pr.number,
+        trimmed
+      );
     } catch (err) {
       log(`worker result: pr_title forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
       return { changed: false };
