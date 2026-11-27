@@ -1,0 +1,20 @@
+{
+  "defective": {
+    "anchors": [{ "path": "download.js", "start": 4, "end": 4 }],
+    "mustContain": ["../secret", "outside"],
+    "paraphrases": [
+      {
+        "title": "Unsanitized join: ../secret escapes outside the base directory",
+        "body": "filePath joins the user name without checks, so ../secret resolves outside the base directory and exposes other files. Reject .. segments. Proof: ../secret lands outside the base on this head."
+      },
+      {
+        "title": "No traversal guard, ../secret reads outside the base",
+        "body": "Passing ../secret as the name yields a path outside the intended base because join does not normalize against escapes. Proof: ../secret is outside the base here."
+      }
+    ],
+    "note": "The traversal is on download.js:4. A blocking finding on line 4 counts; the text must name the concrete failure (../secret resolving outside the base), not only \"check this\"."
+  },
+  "repaired": {
+    "forbiddenSeverities": ["bug", "risk"]
+  }
+}

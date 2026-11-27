@@ -1,0 +1,12 @@
+{
+  "name": "notes-deploy",
+  "owner": "eval",
+  "repo": "demo",
+  "issueNumber": 13,
+  "defaultBranch": "main",
+  "expected": {
+    "closingKeyword": "refs",
+    "minRemaining": 1,
+    "remainingMustContain": ["deploy"]
+  }
+}

@@ -17,6 +17,7 @@
  * from the branch under test. The eval case id never enters `JUMI_TASK.md`.
  */
 
+import { accessSync, constants as fsConstants } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,6 +36,136 @@ export const EVAL_INERT_HOST = "eval.invalid";
 export const EVAL_GITEA_URL = "https://eval.invalid";
 export const EVAL_TOKEN = "eval-inert-token";
 export const EVAL_BOT_USERNAME = "jumi";
+
+/** Deadline for each grading git subprocess; the owned group is killed on expiry. */
+export const WORKER_EVAL_GRADING_GIT_TIMEOUT_MS = 30_000;
+/** Deadline for the hidden check; expiry kills the process group and grades `fail`. */
+export const WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS = 60_000;
+/** Grace between SIGTERM and SIGKILL when reaping a timed-out hidden check group. */
+export const WORKER_EVAL_HIDDEN_CHECK_KILL_GRACE_MS = 2_000;
+
+/** Minimal env for the hidden check and grading git: allowlist only, never the parent env. */
+export function minimalWorkerEvalEnv(homeDir: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (process.env.PATH) env.PATH = process.env.PATH;
+  env.HOME = homeDir;
+  if (process.env.LANG) env.LANG = process.env.LANG;
+  if (process.env.LC_ALL) env.LC_ALL = process.env.LC_ALL;
+  if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  return env;
+}
+
+function isSetsidOnPath(spawnPath: string | undefined): boolean {
+  const pathValue = spawnPath ?? process.env.PATH ?? "";
+  return pathValue.split(":").some((dir) => {
+    if (!dir) return false;
+    try {
+      accessSync(`${dir}/setsid`, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isGroupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw err;
+  }
+}
+
+/** Grading git with the minimal env and a deadline; rejects on timeout or git failure. */
+export async function runWorkerEvalGit(
+  args: string[],
+  cwd: string,
+  homeDir: string,
+  timeoutMs: number = WORKER_EVAL_GRADING_GIT_TIMEOUT_MS
+): Promise<string> {
+  const env = minimalWorkerEvalEnv(homeDir);
+  const signal = AbortSignal.timeout(timeoutMs);
+  // `runGit` with a signal spawns under `setsid` and kills the owned process
+  // group on abort, so a hung helper cannot outlive the deadline.
+  return (await runGit(args, { cwd, env, signal })).trim();
+}
+
+export interface WorkerHiddenCheckResult {
+  code: number;
+  output: string;
+  timedOut: boolean;
+}
+
+/**
+ * Run the hidden check with the minimal env and a deadline. On expiry the
+ * whole process group gets SIGTERM (then SIGKILL after a grace) so a `sleep`
+ * past the deadline dies and its pipes release; the caller grades the timeout
+ * as `fail`. A spawn/startup failure throws for the caller to grade
+ * `inconclusive` (verifier startup, never a model failure).
+ */
+export async function runWorkerHiddenCheck(
+  scriptPath: string,
+  workdir: string,
+  homeDir: string,
+  timeoutMs: number = WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS
+): Promise<WorkerHiddenCheckResult> {
+  const env = minimalWorkerEvalEnv(homeDir);
+  const useSetsid = isSetsidOnPath(env.PATH);
+  const argv = useSetsid ? ["setsid", "sh", scriptPath, workdir] : ["sh", scriptPath, workdir];
+  const proc = Bun.spawn(argv, {
+    cwd: workdir,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: env as Record<string, string>,
+  });
+  const pgid = proc.pid;
+  let timedOut = false;
+  const killGroup = (signal: "SIGTERM" | "SIGKILL") => {
+    try {
+      if (useSetsid) process.kill(-pgid, signal);
+      else proc.kill(signal);
+    } catch {
+      // Already gone.
+    }
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killGroup("SIGTERM");
+    setTimeout(() => {
+      try {
+        if (useSetsid && isGroupAlive(pgid)) process.kill(-pgid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }, WORKER_EVAL_HIDDEN_CHECK_KILL_GRACE_MS).unref?.();
+  }, timeoutMs);
+  try {
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (timedOut) {
+      const output = `${out}\n${err}`.trim().slice(0, 4000) || `hidden check timed out after ${timeoutMs}ms`;
+      return { code: 124, output, timedOut: true };
+    }
+    return { code, output: `${out}\n${err}`.trim().slice(0, 4000), timedOut: false };
+  } finally {
+    clearTimeout(timer);
+    // Belt and suspenders: never leave the group behind.
+    if (timedOut) {
+      killGroup("SIGKILL");
+      await proc.exited.catch(() => undefined);
+    }
+  }
+}
 
 export type WorkerEvalVerdict = "pass" | "fail" | "inconclusive";
 
@@ -61,6 +192,13 @@ export interface WorkerEvalRecord {
   inconclusiveReason?: string;
 }
 
+export interface WorkerEvalExpected {
+  closingKeyword: "fixes" | "refs";
+  minRemaining: number;
+  /** Named unfinished items that must appear in the remaining-work list (case-insensitive substring). */
+  remainingMustContain?: string[];
+}
+
 export interface LoadedWorkerEvalFixture {
   name: string;
   owner: string;
@@ -72,10 +210,56 @@ export interface LoadedWorkerEvalFixture {
   hiddenCheck: string;
   dir: string;
   repoDir: string;
+  expected?: WorkerEvalExpected;
 }
 
 function fixtureBaseDir(): string {
   return join(dirname(new URL(import.meta.url).pathname), "eval_fixtures");
+}
+
+export function parseWorkerEvalExpected(raw: unknown): WorkerEvalExpected | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as { closingKeyword?: unknown; minRemaining?: unknown; remainingMustContain?: unknown };
+  if (record.closingKeyword !== "fixes" && record.closingKeyword !== "refs") return undefined;
+  const minRemaining =
+    typeof record.minRemaining === "number" && Number.isFinite(record.minRemaining) && record.minRemaining >= 0
+      ? Math.floor(record.minRemaining)
+      : 0;
+  const remainingMustContain = Array.isArray(record.remainingMustContain)
+    ? (record.remainingMustContain as unknown[])
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    : [];
+  const expected: WorkerEvalExpected = { closingKeyword: record.closingKeyword, minRemaining };
+  if (remainingMustContain.length > 0) expected.remainingMustContain = remainingMustContain;
+  return expected;
+}
+
+export function workerEvalClosingFailures(
+  closingKeyword: "fixes" | "refs" | "none",
+  remaining: string[],
+  expected?: WorkerEvalExpected
+): string[] {
+  if (!expected) {
+    const failed: string[] = [];
+    if (closingKeyword !== "fixes") failed.push("closing-keyword");
+    if (remaining.length !== 0) failed.push("remaining-empty");
+    return failed;
+  }
+  const failed: string[] = [];
+  if (closingKeyword !== expected.closingKeyword) failed.push("closing-keyword");
+  if (expected.minRemaining > 0 ? remaining.length < expected.minRemaining : remaining.length !== 0) {
+    failed.push("remaining-empty");
+  }
+  // A bare count is not enough: the named unfinished item must show up in the
+  // remaining-work list, so unrelated filler text still fails.
+  const required = expected.remainingMustContain ?? [];
+  if (required.length > 0) {
+    const haystack = remaining.join("\n").toLowerCase();
+    const missing = required.some((token) => !haystack.includes(token.toLowerCase()));
+    if (missing && !failed.includes("remaining-empty")) failed.push("remaining-empty");
+  }
+  return failed;
 }
 
 export async function loadWorkerEvalFixture(name: string, baseDir?: string): Promise<LoadedWorkerEvalFixture> {
@@ -88,10 +272,12 @@ export async function loadWorkerEvalFixture(name: string, baseDir?: string): Pro
     repo: string;
     issueNumber: number;
     defaultBranch: string;
+    expected?: unknown;
   };
   const issueRaw = await readFile(join(dir, "issue.json"), "utf8");
   const issue = JSON.parse(issueRaw) as { title: string; body: string };
   const hiddenCheck = await readFile(join(dir, "hidden_check.sh"), "utf8");
+  const expected = parseWorkerEvalExpected(fixture.expected);
   return {
     name: fixture.name,
     owner: fixture.owner,
@@ -103,6 +289,7 @@ export async function loadWorkerEvalFixture(name: string, baseDir?: string): Pro
     hiddenCheck,
     dir,
     repoDir: join(dir, "repo"),
+    ...(expected ? { expected } : {}),
   };
 }
 
@@ -156,12 +343,12 @@ export function makeEvalGitRunner(localBarePath: string, inertCloneUrl?: string)
   };
 }
 
-async function runPlainGit(args: string[], cwd: string): Promise<string> {
+async function runPlainGit(args: string[], cwd: string, homeDir?: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: process.env as Record<string, string>,
+    env: minimalWorkerEvalEnv(homeDir ?? process.env.HOME ?? "/tmp") as Record<string, string>,
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -176,21 +363,26 @@ async function runPlainGit(args: string[], cwd: string): Promise<string> {
 
 async function setupFixtureBare(
   fixture: LoadedWorkerEvalFixture,
-  tmpRoot: string
+  tmpRoot: string,
+  homeDir: string
 ): Promise<{ barePath: string; baseSha: string }> {
   const barePath = join(tmpRoot, "remote.git");
   await mkdir(tmpRoot, { recursive: true });
-  await runPlainGit(["init", "--bare", barePath], tmpRoot);
+  await runPlainGit(["init", "--bare", barePath], tmpRoot, homeDir);
   const seed = join(tmpRoot, "seed");
   await mkdir(seed, { recursive: true });
-  await runPlainGit(["init"], seed);
+  await runPlainGit(["init"], seed, homeDir);
   await cp(fixture.repoDir, seed, { recursive: true });
-  await runPlainGit(["add", "-A"], seed);
-  await runPlainGit(["-c", "user.name=jumi", "-c", "user.email=jumi@localhost", "commit", "-m", "fixture base"], seed);
-  await runPlainGit(["branch", "-M", fixture.defaultBranch], seed);
-  await runPlainGit(["remote", "add", "origin", barePath], seed);
-  await runPlainGit(["push", "-u", "origin", fixture.defaultBranch], seed);
-  const baseSha = await runPlainGit(["rev-parse", "HEAD"], seed);
+  await runPlainGit(["add", "-A"], seed, homeDir);
+  await runPlainGit(
+    ["-c", "user.name=jumi", "-c", "user.email=jumi@localhost", "commit", "-m", "fixture base"],
+    seed,
+    homeDir
+  );
+  await runPlainGit(["branch", "-M", fixture.defaultBranch], seed, homeDir);
+  await runPlainGit(["remote", "add", "origin", barePath], seed, homeDir);
+  await runPlainGit(["push", "-u", "origin", fixture.defaultBranch], seed, homeDir);
+  const baseSha = await runPlainGit(["rev-parse", "HEAD"], seed, homeDir);
   await rm(seed, { recursive: true, force: true });
   return { barePath, baseSha };
 }
@@ -244,6 +436,12 @@ export interface RunWorkerEvalCaseOptions {
   engine?: Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
+  /** Deadline for the hidden check (default `WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS`). */
+  hiddenCheckTimeoutMs?: number;
+  /** Deadline per grading git subprocess (default `WORKER_EVAL_GRADING_GIT_TIMEOUT_MS`). */
+  gradingGitTimeoutMs?: number;
+  /** Test hook: runs against the bare after the PR is recorded, before grading. */
+  afterPr?: (ctx: { barePath: string; tmpDir: string }) => Promise<void>;
 }
 
 export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise<WorkerEvalRecord> {
@@ -270,9 +468,29 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
     homeDir = await mkdtemp(join(opts.homeRoot, "eval-home-"));
     workdir = await mkdtemp(join(opts.workdirRoot, "eval-work-"));
     const tmp = await mkdtemp(join(opts.tmpRoot, "eval-tmp-"));
-    const setup = await setupFixtureBare(opts.fixture, tmp);
+    const setup = await setupFixtureBare(opts.fixture, tmp, homeDir);
     barePath = setup.barePath;
     baseSha = setup.baseSha;
+    const gradingGitTimeoutMs = opts.gradingGitTimeoutMs ?? WORKER_EVAL_GRADING_GIT_TIMEOUT_MS;
+    const hiddenCheckTimeoutMs = opts.hiddenCheckTimeoutMs ?? WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS;
+    const gradeGit = (args: string[], cwd: string) => runWorkerEvalGit(args, cwd, homeDir, gradingGitTimeoutMs);
+
+    const inconclusiveGitInfra = (detail: string) =>
+      finish({
+        ...baseRecord,
+        baseSha,
+        verdict: "inconclusive",
+        failedAssertions: [],
+        jobStatus: "pr",
+        jobReason: detail,
+        closingKeyword: "none",
+        remaining: [],
+        prBody: "",
+        hiddenCheck: "skip",
+        noSentinels: true,
+        pushedSha: null,
+        inconclusiveReason: detail,
+      });
 
     // Hidden grader was read from the base checkout before the run.
     const hiddenCheck = opts.fixture.hiddenCheck;
@@ -280,7 +498,14 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
     const inertCloneUrl = `https://${EVAL_INERT_HOST}/${opts.fixture.owner}/${opts.fixture.repo}.git`;
     const htmlUrl = `https://${EVAL_INERT_HOST}/${opts.fixture.owner}/${opts.fixture.repo}/issues/${opts.fixture.issueNumber}`;
 
-    const pulls: Array<{ number: number; title: string; body: string; head: string; base: string }> = [];
+    const pulls: Array<{
+      number: number;
+      title: string;
+      body: string;
+      head: string;
+      base: string;
+      headSha: string | null;
+    }> = [];
     const baseApi = makeIssueApi();
     const evalApi = {
       ...baseApi,
@@ -311,7 +536,16 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         pull: { title: string; body: string; head: string; base: string }
       ) => {
         const number = pulls.length + 1;
-        pulls.push({ number, title: pull.title, body: pull.body, head: pull.head, base: pull.base });
+        // Record the PR head commit now: grading runs on this commit, never on
+        // a later branch-list scan (a stray `jumi/issue-N-*` branch must not
+        // change what is graded).
+        let headSha: string | null = null;
+        try {
+          headSha = (await runWorkerEvalGit(["rev-parse", pull.head], barePath, homeDir)).trim() || null;
+        } catch {
+          headSha = null;
+        }
+        pulls.push({ number, title: pull.title, body: pull.body, head: pull.head, base: pull.base, headSha });
         return {
           number,
           title: pull.title,
@@ -319,7 +553,11 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
           state: "open" as const,
           html_url: `https://${EVAL_INERT_HOST}/${opts.fixture.owner}/${opts.fixture.repo}/pulls/${number}`,
           user: { login: EVAL_BOT_USERNAME },
-          head: { ref: pull.head, sha: "headsha", repo: { full_name: `${opts.fixture.owner}/${opts.fixture.repo}` } },
+          head: {
+            ref: pull.head,
+            sha: headSha ?? "unknown",
+            repo: { full_name: `${opts.fixture.owner}/${opts.fixture.repo}` },
+          },
           base: { ref: pull.base, sha: baseSha },
           merged: false,
           created_at: new Date().toISOString(),
@@ -411,72 +649,78 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
       const closingKeyword = parseEvalClosingKeyword(prBody, opts.fixture.issueNumber);
       const remaining = parseEvalRemaining(prBody);
 
-      // Pushed commit: the branch implementIssue pushed to the local bare.
-      // The agent never saw this checkout; hidden checks run here.
-      const branch = `jumi/issue-${opts.fixture.issueNumber}-`;
-      const branchList = await runPlainGit(["branch", "--list", `${branch}*`, "--format=%(refname:short)"], barePath);
-      const pushedBranch = branchList
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .sort()
-        .pop();
-      let pushedSha: string | null = null;
-      if (pushedBranch) {
-        pushedSha = await runPlainGit(["rev-parse", pushedBranch], barePath);
+      if (opts.afterPr) {
+        await opts.afterPr({ barePath, tmpDir: tmp });
+      }
+
+      // Graded commit: the head the fake forge recorded when the PR opened.
+      // Never a branch-list scan, so a stray branch changes nothing.
+      const pushedSha: string | null = pr?.headSha ?? null;
+      if (!pushedSha) {
+        return inconclusiveGitInfra("eval git infrastructure: PR head SHA unavailable");
       }
 
       let hiddenCheckStatus: "pass" | "fail" | "skip" = "skip";
       let hiddenOutput = "";
-      if (pushedSha) {
-        const verifyDir = await mkdtemp(join(tmp, "verify-"));
+      {
+        const verifyDir = await mkdtemp(join(tmp, "verify-")).catch(() => null);
+        if (!verifyDir) {
+          return inconclusiveGitInfra("eval git infrastructure: verify checkout unavailable");
+        }
         try {
-          await runPlainGit(["clone", barePath, verifyDir], tmp);
-          await runPlainGit(["checkout", pushedSha], verifyDir);
+          try {
+            await gradeGit(["clone", barePath, verifyDir], tmp);
+          } catch (err) {
+            return inconclusiveGitInfra(`eval git infrastructure: clone failed: ${errorMessage(err)}`.slice(0, 500));
+          }
+          try {
+            await gradeGit(["checkout", pushedSha], verifyDir);
+          } catch (err) {
+            return inconclusiveGitInfra(`eval git infrastructure: checkout failed: ${errorMessage(err)}`.slice(0, 500));
+          }
           const scriptPath = join(verifyDir, ".eval-hidden.sh");
-          await writeFile(scriptPath, hiddenCheck, "utf8");
-          const proc = Bun.spawn(["sh", scriptPath, verifyDir], {
-            cwd: verifyDir,
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          const [out, err, code] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          hiddenOutput = `${out}\n${err}`.trim().slice(0, 4000);
-          hiddenCheckStatus = code === 0 ? "pass" : "fail";
-        } catch (err) {
-          hiddenOutput = errorMessage(err).slice(0, 4000);
-          hiddenCheckStatus = "fail";
+          try {
+            await writeFile(scriptPath, hiddenCheck, "utf8");
+          } catch (err) {
+            return inconclusiveGitInfra(`eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500));
+          }
+          let result: WorkerHiddenCheckResult;
+          try {
+            result = await runWorkerHiddenCheck(scriptPath, verifyDir, homeDir, hiddenCheckTimeoutMs);
+          } catch (err) {
+            return inconclusiveGitInfra(`eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500));
+          }
+          hiddenOutput = result.output;
+          // A deadline expiry kills the process group and grades `fail`: the
+          // agent's change hung the verifier. Only startup/infra is inconclusive.
+          hiddenCheckStatus = result.code === 0 && !result.timedOut ? "pass" : "fail";
+          if (result.timedOut && !hiddenOutput) hiddenOutput = `hidden check timed out after ${hiddenCheckTimeoutMs}ms`;
         } finally {
           await rm(verifyDir, { recursive: true, force: true }).catch(() => undefined);
         }
       }
 
       let noSentinels = true;
-      if (pushedSha) {
+      {
+        let listed: string;
         try {
-          const listed = await runPlainGit(["ls-tree", "-r", "--name-only", pushedSha], barePath);
-          const leaked = listed
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean)
-            .filter((path) => {
-              const base = path.split("/").pop() ?? path;
-              return base.startsWith("JUMI_") && base.endsWith(".md");
-            });
-          noSentinels = leaked.length === 0;
-          if (!noSentinels) log(`eval sentinel leak: ${leaked.join(", ")}`);
-        } catch {
-          noSentinels = false;
+          listed = await gradeGit(["ls-tree", "-r", "--name-only", pushedSha], barePath);
+        } catch (err) {
+          return inconclusiveGitInfra(`eval git infrastructure: ls-tree failed: ${errorMessage(err)}`.slice(0, 500));
         }
+        const leaked = listed
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((path) => {
+            const base = path.split("/").pop() ?? path;
+            return base.startsWith("JUMI_") && base.endsWith(".md");
+          });
+        noSentinels = leaked.length === 0;
+        if (!noSentinels) log(`eval sentinel leak: ${leaked.join(", ")}`);
       }
 
-      const failedAssertions: string[] = [];
-      if (closingKeyword !== "fixes") failedAssertions.push("closing-keyword");
-      if (remaining.length !== 0) failedAssertions.push("remaining-empty");
+      const failedAssertions: string[] = workerEvalClosingFailures(closingKeyword, remaining, opts.fixture.expected);
       if (hiddenCheckStatus !== "pass") failedAssertions.push("hidden-check");
       if (!noSentinels) failedAssertions.push("no-sentinels");
 
