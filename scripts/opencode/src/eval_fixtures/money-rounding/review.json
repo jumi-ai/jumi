@@ -2,6 +2,16 @@
   "defective": {
     "anchors": [{ "path": "pricing.js", "start": 4, "end": 4 }],
     "mustContain": ["0.1", "0.30000000000000004"],
+    "paraphrases": [
+      {
+        "title": "Binary float adds 0.1 + 0.2 as 0.30000000000000004",
+        "body": "cartTotal accumulates floats, so items of 0.1 and 0.2 total 0.30000000000000004 instead of 0.3. Sum integer cents. Proof: 0.1 + 0.2 gives 0.30000000000000004 on this head."
+      },
+      {
+        "title": "Rounding error: 0.1 items sum to 0.30000000000000004",
+        "body": "Adding 0.1 and 0.2 in binary floating point yields 0.30000000000000004, not exact cents. Proof: 0.1 plus 0.2 is 0.30000000000000004 here."
+      }
+    ],
     "note": "The float accumulation is on pricing.js:4. A blocking finding on line 4 counts; the text must name the concrete wrong total (0.1 + 0.2 gives 0.30000000000000004, not 0.3), not only \"check this\"."
   },
   "repaired": {
