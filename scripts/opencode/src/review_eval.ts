@@ -40,7 +40,6 @@
  */
 
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { type Engine, EngineFailedError, throwIfEngineFailed } from "./engine.ts";
@@ -52,7 +51,7 @@ import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.t
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { resolveReviewVerdictContract } from "./review_verdict_contract.ts";
-import { ReviewVerdictStore } from "./review_verdict_store.ts";
+import { isMaintainerStoreFinding, type ReviewMcpFindingRecord, ReviewVerdictStore } from "./review_verdict_store.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
 import { errorMessage } from "./util/error.ts";
 import { runGit } from "./workspace.ts";
@@ -285,27 +284,20 @@ function findingInAnchors(finding: { path?: string; line?: number }, anchors: Re
 
 /**
  * Every question that mentions a maintainer must publish as a maintainer
- * hold: the stored markdown counts it as `maintainerQuestion`. A question
- * that says "maintainer" without the `maintainer:` marker would publish as
- * an ordinary question instead of a hold, so the run fails this assertion.
+ * hold: the store counts it as `maintainerQuestion`. Checked against the
+ * store with the same predicate production publishes from, so a non-question
+ * severity that mentions "maintainer" in prose stays a pass here exactly as
+ * it publishes with no hold live.
  */
-function maintainerHoldsForMarkdown(markdown: string): boolean {
-  const lines = markdown.split(/\r?\n/);
-  let mentions = 0;
-  let holds = 0;
-  for (const line of lines) {
-    if (/^.+?:\d+:\s+\S/.test(line) || /^[❓💡🔴🟡]/u.test(line.trim())) {
-      if (/maintainer/i.test(line)) {
-        mentions += 1;
-        if (/❓\s*maintainer\s*:/i.test(line)) holds += 1;
-      }
-    }
+function maintainerHoldsForFindings(
+  findings: ReadonlyArray<Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">>
+): boolean {
+  for (const finding of findings) {
+    if (finding.severity !== "question") continue;
+    const text = `${finding.title ?? ""}\n${finding.body ?? ""}`;
+    if (/maintainer/i.test(text) && !isMaintainerStoreFinding(finding)) return false;
   }
-  // Also count unlocated question lines that mention a maintainer.
-  if (mentions === 0 && /maintainer/i.test(markdown)) {
-    return /❓\s*maintainer\s*:/i.test(markdown);
-  }
-  return holds >= mentions;
+  return true;
 }
 
 function porcelainTreeClean(porcelain: string): boolean {
@@ -334,7 +326,6 @@ export interface RunReviewEvalCaseOptions {
   trial: number;
   workdirRoot: string;
   homeRoot: string;
-  tmpRoot: string;
   engine?: Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
@@ -544,7 +535,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
       const blockingCount = findings.filter(
         (finding) => finding.severity === "bug" || finding.severity === "risk"
       ).length;
-      const maintainerHolds = maintainerHoldsForMarkdown(markdown);
+      const maintainerHolds = maintainerHoldsForFindings(findings);
       const failedAssertions: string[] = [];
 
       if (!headUnchanged) failedAssertions.push("head-unchanged");
@@ -657,7 +648,6 @@ export interface RunReviewEvalOptions {
   outDir: string;
   workdirRoot: string;
   homeRoot: string;
-  tmpRoot: string;
   engineForRunner?: (runner: NamedRunner) => Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
@@ -684,7 +674,6 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
               trial,
               workdirRoot: opts.workdirRoot,
               homeRoot: opts.homeRoot,
-              tmpRoot: opts.tmpRoot,
               ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
               ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
               logger: log,
@@ -830,8 +819,6 @@ async function main(): Promise<void> {
   const halves: ReviewEvalHalf[] = args.half ? [args.half] : ["defective", "repaired"];
   const workdirRoot = join(env.WORKDIR ?? "/work", "jumi-review-eval");
   const homeRoot = env.HOME?.trim() ? env.HOME : "/data";
-  const tmpRoot = process.env.TMPDIR?.trim() ? process.env.TMPDIR : tmpdir();
-  await mkdir(workdirRoot, { recursive: true });
   const records = await runReviewEval({
     fixtures,
     halves,
@@ -840,7 +827,6 @@ async function main(): Promise<void> {
     outDir: args.out,
     workdirRoot,
     homeRoot: join(homeRoot, "jumi-review-eval-homes"),
-    tmpRoot: join(tmpRoot, "jumi-review-eval"),
     logger: (message) => console.log(`[review-eval] ${message}`),
   });
   const summary = records.map((r) => `${r.fixture}/${r.half}/${r.runner}#${r.trial}:${r.verdict}`).join(" ");

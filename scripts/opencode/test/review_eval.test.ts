@@ -88,16 +88,14 @@ const OFF_ANCHOR_FINDING = {
   body: "isAdult(18) returns false, want true. Proof: isAdult(18) is false.",
 };
 
-async function withRoots(fn: (roots: { workdirRoot: string; homeRoot: string; tmpRoot: string }) => Promise<void>) {
+async function withRoots(fn: (roots: { workdirRoot: string; homeRoot: string }) => Promise<void>) {
   const workdirRoot = await mkdtemp(join(tmpdir(), "review-eval-test-work-"));
   const homeRoot = await mkdtemp(join(tmpdir(), "review-eval-test-home-"));
-  const tmpRoot = await mkdtemp(join(tmpdir(), "review-eval-test-tmp-"));
   try {
-    await fn({ workdirRoot, homeRoot, tmpRoot });
+    await fn({ workdirRoot, homeRoot });
   } finally {
     await rm(workdirRoot, { recursive: true, force: true }).catch(() => undefined);
     await rm(homeRoot, { recursive: true, force: true }).catch(() => undefined);
-    await rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -217,6 +215,54 @@ describe("review eval", () => {
     });
   });
 
+  test("maintainer prose outside a question is not a hold; unmarked maintainer question fails", async () => {
+    const fixture = await loadReviewEvalFixture("adult-boundary");
+    await withRoots(async (roots) => {
+      const proseOk = await runReviewEvalCase({
+        fixture,
+        half: "repaired",
+        runner: { ...RUNNER },
+        trial: 1,
+        ...roots,
+        engine: scriptedReviewEngine({
+          findings: [
+            {
+              severity: "suggestion",
+              title: "Note for the maintainer docs",
+              body: "The maintainer guide could mention this boundary.",
+            },
+          ],
+          verdict: { state: "success", reason: "clean" },
+        }),
+        logger: () => undefined,
+      });
+      expect(proseOk.verdict).toBe("pass");
+      expect(proseOk.failedAssertions).toEqual([]);
+
+      const unmarked = await runReviewEvalCase({
+        fixture,
+        half: "defective",
+        runner: { ...RUNNER },
+        trial: 1,
+        ...roots,
+        engine: scriptedReviewEngine({
+          findings: [
+            BUG_FINDING,
+            {
+              severity: "question",
+              title: "Ask the maintainer team about rollout",
+              body: "Should the maintainer team backfill old accounts?",
+            },
+          ],
+          verdict: { state: "failure", reason: "blocking" },
+        }),
+        logger: () => undefined,
+      });
+      expect(unmarked.verdict).toBe("fail");
+      expect(unmarked.failedAssertions).toContain("maintainer-holds");
+    });
+  });
+
   test("dirty tree fails", async () => {
     const fixture = await loadReviewEvalFixture("adult-boundary");
     await withRoots(async (roots) => {
@@ -321,7 +367,6 @@ describe("review eval", () => {
     const fixture = await loadReviewEvalFixture("adult-boundary");
     const workdirRoot = await mkdtemp(join(tmpdir(), "review-eval-batch-work-"));
     const homeRoot = await mkdtemp(join(tmpdir(), "review-eval-batch-home-"));
-    const tmpRoot = await mkdtemp(join(tmpdir(), "review-eval-batch-tmp-"));
     const outDir = await mkdtemp(join(tmpdir(), "review-eval-batch-out-"));
     try {
       const records = await runReviewEval({
@@ -332,7 +377,6 @@ describe("review eval", () => {
         outDir,
         workdirRoot,
         homeRoot,
-        tmpRoot,
         engineForRunner: () => scriptedReviewEngine({ verdict: { state: "success", reason: "batch" } }),
         logger: () => undefined,
       });
@@ -342,7 +386,6 @@ describe("review eval", () => {
     } finally {
       await rm(workdirRoot, { recursive: true, force: true }).catch(() => undefined);
       await rm(homeRoot, { recursive: true, force: true }).catch(() => undefined);
-      await rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
       await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
     }
   });
