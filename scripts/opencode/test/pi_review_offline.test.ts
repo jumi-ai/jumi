@@ -188,10 +188,12 @@ async function tempWorkdir(): Promise<string> {
 }
 
 describe("pi offline structured review", () => {
-  test("trusted loader exposes no discovery and treats base instructions as data", async () => {
+  test("trusted loader exposes only codemode and treats base instructions as data", async () => {
     const loader = createTrustedPiResourceLoader("BASE-DATA-123");
     await loader.reload();
-    expect(loader.getExtensions().extensions).toEqual([]);
+    const extensions = loader.getExtensions().extensions;
+    expect(extensions).toHaveLength(1);
+    expect([...(extensions[0] as unknown as { tools: Map<string, unknown> }).tools.keys()]).toEqual(["codemode"]);
     expect(loader.getExtensions().errors).toEqual([]);
     expect(loader.getSkills().skills).toEqual([]);
     expect(loader.getPrompts().prompts).toEqual([]);
@@ -212,6 +214,9 @@ describe("pi offline structured review", () => {
     expect(current.enableInstallTelemetry).toBe(false);
     expect(current.packages).toEqual([]);
     expect(current.extensions).toEqual([]);
+    expect(current as { defaultTools?: unknown }).toHaveProperty("defaultTools");
+    expect((current as { defaultTools: string[] }).defaultTools).toContain("codemode");
+    expect((current as { codemode: { mode: string } }).codemode).toMatchObject({ mode: "on" });
   });
 
   test("head-supplied extension never loads and never runs", async () => {
@@ -223,7 +228,9 @@ describe("pi offline structured review", () => {
       await writeFile(join(evilDir, "evil.ts"), "export default () => { globalThis.__piEvilRan = true; };");
       const loader = createTrustedPiResourceLoader("base");
       await loader.reload();
-      expect(loader.getExtensions().extensions).toEqual([]);
+      const extensions = loader.getExtensions().extensions;
+      expect(extensions).toHaveLength(1);
+      expect([...(extensions[0] as unknown as { tools: Map<string, unknown> }).tools.keys()]).toEqual(["codemode"]);
       const { runtime, model } = await makeLoopback({ steps: [{ text: "done" }] });
       const store = changedStore();
       const result = await runPiReviewAttempt({
@@ -353,6 +360,7 @@ describe("pi offline structured review", () => {
           tools: [
             "read",
             "bash",
+            "codemode",
             "jumi_add_finding",
             "jumi_update_finding",
             "jumi_remove_finding",
@@ -372,8 +380,10 @@ describe("pi offline structured review", () => {
           const active = session.getActiveToolNames();
           expect(active).toContain("read");
           expect(active).toContain("bash");
+          expect(active).toContain("codemode");
           expect(active).not.toContain("edit");
           expect(active).not.toContain("write");
+          expect(active).not.toContain("tool_search");
         } finally {
           session.dispose();
         }

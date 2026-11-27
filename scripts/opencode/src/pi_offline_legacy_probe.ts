@@ -8,6 +8,9 @@
  * - Pi worker: real session through `runPiWorkerAttempt` on a deterministic
  *   git fixture; requires the parent-observed diff plus a passing fixture
  *   test (`sh check.sh`).
+ * - Pi codemode (both roles): the same harnesses driven by a `codemode`
+ *   script that calls the guarded tools; requires the nested calls to land
+ *   (finding/diff) and the outer `codemode` call to appear in telemetry.
  * - Legacy startup/dispatch for both roles without Pi credentials: real
  *   `loadConfig`/`loadWorkerConfig` plus the production dispatch gates
  *   (`processEngineTick`/`processWorkerTick`) on a memory ledger.
@@ -298,6 +301,106 @@ async function main(): Promise<number> {
       false,
       errorMessage(err)
     );
+  }
+
+  // --- Pi reviewer codemode offline: script calls guarded tools, verdict resolves ---
+  try {
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-image-probe-review-codemode-"));
+    try {
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(join(workdir, "src"), { recursive: true });
+      await writeFile(join(workdir, "src", "a.ts"), "x\n");
+      const { runtime, model } = await makeLoopback([
+        {
+          tool: "codemode",
+          args: {
+            code: 'const t = await tools.jumi_add_finding({ path: "src/a.ts", line: 1, severity: "suggestion", title: "t", body: "b" }); text("finding:" + t);',
+          },
+        },
+        { tool: "jumi_set_verdict", args: { state: "success" } },
+      ]);
+      const store = new ReviewVerdictStore({
+        changedFiles: [{ filename: "src/a.ts", patch: "@@ -1,0 +1,1 @@\n+line\n" }],
+      });
+      const result = await runPiReviewAttempt({
+        workdir,
+        prompt: "image probe review codemode",
+        store,
+        modelRuntime: runtime,
+        model,
+        allowedFetchHosts: ["127.0.0.1"],
+        timeoutMs: 30_000,
+      });
+      const hasCodemode = result.toolCalls.some((call) => call.name === "codemode" && call.ok);
+      const hasNestedFinding = result.toolCalls.some((call) => call.name === "jumi_add_finding" && call.ok);
+      push(
+        "pi reviewer codemode offline completes a real review task through a script",
+        result.status === "complete" &&
+          store.hasVerdict() &&
+          store.toRecord().state === "success" &&
+          hasCodemode &&
+          hasNestedFinding &&
+          store.listFindings().length === 1,
+        `status=${result.status} codemode=${hasCodemode} nested=${hasNestedFinding} findings=${store.listFindings().length}`
+      );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    push("pi reviewer codemode offline completes a real review task through a script", false, errorMessage(err));
+  }
+
+  // --- Pi worker codemode offline: script edits, fixture test passes ---
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-image-probe-worker-codemode-"));
+    try {
+      gitSync(["init"], dir);
+      gitSync(["config", "user.email", "probe@example.com"], dir);
+      gitSync(["config", "user.name", "probe"], dir);
+      await writeFile(join(dir, "app.txt"), "broken\n");
+      await writeFile(join(dir, "check.sh"), "#!/bin/sh\ngrep -q fixed app.txt\n");
+      gitSync(["add", "-A"], dir);
+      gitSync(["commit", "-m", "init"], dir);
+      const { runtime, model } = await makeLoopback([
+        {
+          tool: "codemode",
+          args: {
+            code: 'const out = await tools.edit({ path: "app.txt", edits: [{ oldText: "broken", newText: "fixed" }] }); const check = await tools.bash({ command: "sh check.sh" }); text(out + "\\n" + check);',
+          },
+        },
+        { tool: "jumi_set_pr_body", args: { markdown: "fix the app via codemode" } },
+        { tool: "jumi_set_handoff", args: { notes: "edited app.txt via codemode, check.sh passes" } },
+      ]);
+      const store = new WorkerResultStore();
+      const result = await runPiWorkerAttempt({
+        workdir: dir,
+        intent: "implement",
+        prompt: "fix app.txt so check.sh passes via codemode",
+        store,
+        modelRuntime: runtime,
+        model,
+        allowedFetchHosts: ["127.0.0.1"],
+        timeoutMs: 30_000,
+      });
+      const check = Bun.spawnSync(["sh", "check.sh"], { cwd: dir });
+      const hasCodemode = result.toolCalls.some((call) => call.name === "codemode" && call.ok);
+      const hasNestedEdit = result.toolCalls.some((call) => call.name === "edit" && call.ok);
+      push(
+        "pi worker codemode offline completes a real worker task through a script",
+        result.status === "complete" &&
+          result.dirty &&
+          result.diff.includes("fixed") &&
+          check.exitCode === 0 &&
+          hasCodemode &&
+          hasNestedEdit &&
+          (store.getPrBody() ?? "").includes("via codemode"),
+        `status=${result.status} dirty=${result.dirty} codemode=${hasCodemode} nestedEdit=${hasNestedEdit} check=${check.exitCode}`
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    push("pi worker codemode offline completes a real worker task through a script", false, errorMessage(err));
   }
 
   // --- Ambient inference outside loopback fails closed ---
