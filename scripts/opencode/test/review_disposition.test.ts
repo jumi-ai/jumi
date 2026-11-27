@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildKeyedPriors } from "../src/review_prior.ts";
+import { createPiReviewCustomTools } from "../src/pi_review.ts";
+import { resolveReviewFacts } from "../src/review_facts.ts";
+import { probeReviewMcpServer, startReviewMcpServer } from "../src/review_mcp.ts";
 import {
   attachPostPullReviewMeta,
   attachStickyReviewMeta,
@@ -13,10 +15,8 @@ import {
   signMetaPayload,
   verifyReviewMeta,
 } from "../src/review_meta.ts";
-import { resolveReviewFacts } from "../src/review_facts.ts";
-import { probeReviewMcpServer, startReviewMcpServer } from "../src/review_mcp.ts";
-import { createPiReviewCustomTools } from "../src/pi_review.ts";
-import { ReviewVerdictStore, type KeyedPriorInfo } from "../src/review_verdict_store.ts";
+import { buildKeyedPriors } from "../src/review_prior.ts";
+import { type KeyedPriorInfo, ReviewVerdictStore } from "../src/review_verdict_store.ts";
 import {
   findingFingerprint,
   parseReviewFindings,
@@ -27,7 +27,9 @@ import {
 import type { GitRunner } from "../src/workspace.ts";
 import { makeComment } from "./fixtures.ts";
 
-const PATCH = ["@@ -1,3 +1,5 @@", " context", "-old", "+new line two", "+new line three", " context", " tail"].join("\n");
+const PATCH = ["@@ -1,3 +1,5 @@", " context", "-old", "+new line two", "+new line three", " context", " tail"].join(
+  "\n"
+);
 const SECRET = "test-webhook-secret-979";
 const IDENTITY = "gitea.example.com/jumi";
 const OWNER = "o";
@@ -60,7 +62,11 @@ function makeStore(priors: KeyedPriorInfo[], unkeyed: string[] = []) {
   });
 }
 
-function signSticky(bodyWithoutMeta: string, findings: Parameters<typeof encodeMetaPayload>[0]["findings"], opts: { head?: string } = {}) {
+function signSticky(
+  bodyWithoutMeta: string,
+  findings: Parameters<typeof encodeMetaPayload>[0]["findings"],
+  opts: { head?: string } = {}
+) {
   const payload = {
     v: 1 as const,
     forge: IDENTITY,
@@ -128,7 +134,9 @@ describe("dispositions: missing gate", () => {
 
 describe("dispositions: still_present", () => {
   test("unchanged file prefills location; same key twice returns same handle", () => {
-    const store = makeStore([keyedPrior({ key: "k_job_1", text: "🔴 bug: broken  double", path: "src/a.ts", line: 2, unchanged: true })]);
+    const store = makeStore([
+      keyedPrior({ key: "k_job_1", text: "🔴 bug: broken  double", path: "src/a.ts", line: 2, unchanged: true }),
+    ]);
     const first = store.setDisposition({ key: "k_job_1", disposition: "still_present" });
     expect(first.ok).toBe(true);
     const second = store.setDisposition({ key: "k_job_1", disposition: "still_present" });
@@ -141,9 +149,7 @@ describe("dispositions: still_present", () => {
   });
 
   test("changed file needs location or body_only", () => {
-    const store = makeStore([
-      keyedPrior({ key: "k_job_1", path: "src/a.ts", line: 2, unchanged: false }),
-    ]);
+    const store = makeStore([keyedPrior({ key: "k_job_1", path: "src/a.ts", line: 2, unchanged: false })]);
     const missing = store.setDisposition({ key: "k_job_1", disposition: "still_present" });
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.error).toMatch(/location|body_only/);
@@ -206,9 +212,13 @@ describe("dispositions: auto-withdraw", () => {
 describe("buildKeyedPriors", () => {
   test("force-push falls back to plain strings", async () => {
     const body = stickyBody("src/a.ts:12: 🔴 Null deref.", FAIL_TRAILER, HEAD);
-    const signed = signSticky(body, [{ k: "k_job_1_1", s: "bug", p: "body", path: "src/a.ts", line: 12, proof: 0, o: 1 }], {
-      head: HEAD,
-    });
+    const signed = signSticky(
+      body,
+      [{ k: "k_job_1_1", s: "bug", p: "body", path: "src/a.ts", line: 12, proof: 0, o: 1 }],
+      {
+        head: HEAD,
+      }
+    );
     const git = fakeGit({
       "merge-base": () => {
         throw new Error("not ancestor");
@@ -270,9 +280,13 @@ describe("buildKeyedPriors", () => {
 
   test("removed file auto-withdraws", async () => {
     const body = stickyBody("src/gone.ts:3: 🔴 Gone bug.", FAIL_TRAILER, HEAD);
-    const signed = signSticky(body, [{ k: "k_job_1_1", s: "bug", p: "body", path: "src/gone.ts", line: 3, proof: 0, o: 1 }], {
-      head: HEAD,
-    });
+    const signed = signSticky(
+      body,
+      [{ k: "k_job_1_1", s: "bug", p: "body", path: "src/gone.ts", line: 3, proof: 0, o: 1 }],
+      {
+        head: HEAD,
+      }
+    );
     const git = fakeGit({
       "cat-file": () => {
         throw new Error("missing");
@@ -418,13 +432,31 @@ describe("signed block dispositions", () => {
     const published = [{ id: 501, path: findings[0]!.path, body: livePostedBody, new_position: 2 }];
     const list = buildFindingsList(findings);
     const failed = stripFindingLines(comment, { posted });
-    const topBody = [MARKER, "### Jumi review", "", `Reviewed commit: \`${HEAD}\``, "", [list, failed].filter(Boolean).join("\n\n"), "", FAIL_TRAILER].join("\n");
+    const topBody = [
+      MARKER,
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      [list, failed].filter(Boolean).join("\n\n"),
+      "",
+      FAIL_TRAILER,
+    ].join("\n");
     const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/a.ts", patch: PATCH }] });
-    expect(store.addFinding({ path: "src/a.ts", line: 2, severity: "bug", body: "Null deref on empty input." }).ok).toBe(true);
+    expect(
+      store.addFinding({ path: "src/a.ts", line: 2, severity: "bug", body: "Null deref on empty input." }).ok
+    ).toBe(true);
     expect(store.setVerdict({ state: "failure", reason: "blocking" }).ok).toBe(true);
     const record = store.toRecord();
     const finalBody = attachPostPullReviewMeta({
-      meta: { webhookSecret: SECRET, giteaUrl: "https://gitea.example.com", forgeIdentity: IDENTITY, jobId: "job-1", verdictState: "failure", record },
+      meta: {
+        webhookSecret: SECRET,
+        giteaUrl: "https://gitea.example.com",
+        forgeIdentity: IDENTITY,
+        jobId: "job-1",
+        verdictState: "failure",
+        record,
+      },
       owner: OWNER,
       repo: REPO,
       prNumber: PR,
@@ -438,7 +470,17 @@ describe("signed block dispositions", () => {
       published,
       log: () => undefined,
     });
-    const live = [{ id: 501, body: livePostedBody, user: { login: BOT }, created_at: "", updated_at: "", path: "src/a.ts", new_position: 2 }];
+    const live = [
+      {
+        id: 501,
+        body: livePostedBody,
+        user: { login: BOT },
+        created_at: "",
+        updated_at: "",
+        path: "src/a.ts",
+        new_position: 2,
+      },
+    ];
     const resolved = resolveReviewFacts({
       body: finalBody,
       inlines: live as never,

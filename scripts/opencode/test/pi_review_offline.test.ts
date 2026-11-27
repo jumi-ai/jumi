@@ -579,6 +579,7 @@ describe("pi offline structured review", () => {
       "jumi_set_verdict",
       "jumi_list_findings",
       "jumi_previous_findings",
+      "jumi_set_disposition",
     ]);
     const toolName: PiReviewToolName = "jumi_set_verdict";
     expect([...PI_REVIEW_TOOL_NAMES]).toContain(toolName);
