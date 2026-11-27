@@ -24,6 +24,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { type RemainingItem, validateRemainingItems } from "./pr_closing.ts";
 import { validateFindingResponse } from "./review_findings.ts";
 import { agyMcpServerEntry, claudeMcpConfigFor, codexMcpTomlEntry, openCodeMcpEntry } from "./review_mcp.ts";
 import { sanitizeCheckReason } from "./verdict.ts";
@@ -158,23 +159,11 @@ export function validatePrTitleReason(
 
 export function validatePrRemaining(
   input: unknown
-): { ok: true; remaining: string[] | undefined } | { ok: false; error: string } {
-  if (input === undefined || input === null) return { ok: true, remaining: undefined };
-  if (!Array.isArray(input)) return { ok: false, error: "remaining must be an array of strings" };
-  if (input.length > MAX_WORKER_PR_REMAINING_ITEMS) {
-    return { ok: false, error: `remaining is too long (max ${MAX_WORKER_PR_REMAINING_ITEMS} items)` };
-  }
-  const items: string[] = [];
-  for (const entry of input) {
-    if (typeof entry !== "string") return { ok: false, error: "remaining must be an array of strings" };
-    const trimmed = entry.replaceAll("\0", "").trim();
-    if (!trimmed) continue;
-    if (trimmed.length > MAX_WORKER_PR_REMAINING_ITEM_CHARS) {
-      return { ok: false, error: `remaining item is too long (max ${MAX_WORKER_PR_REMAINING_ITEM_CHARS} chars)` };
-    }
-    items.push(trimmed);
-  }
-  return { ok: true, remaining: items };
+): { ok: true; remaining: RemainingItem[] | undefined } | { ok: false; error: string } {
+  return validateRemainingItems(input, {
+    maxItems: MAX_WORKER_PR_REMAINING_ITEMS,
+    maxItemChars: MAX_WORKER_PR_REMAINING_ITEM_CHARS,
+  });
 }
 
 function pickRemainingArg(args: Record<string, unknown>): unknown {
@@ -278,7 +267,7 @@ export interface WorkerFindingResponse {
 export class WorkerResultStore {
   private reason?: string;
   private prBody?: string;
-  private prRemaining?: string[] | undefined;
+  private prRemaining?: RemainingItem[] | undefined;
   private prTitle?: string;
   private prTitleReason?: string | undefined;
   private skipReason?: string;
@@ -341,7 +330,7 @@ export class WorkerResultStore {
     return this.prBody !== undefined;
   }
 
-  getPrRemaining(): string[] | undefined {
+  getPrRemaining(): RemainingItem[] | undefined {
     return this.prRemaining ? [...this.prRemaining] : this.prRemaining;
   }
 
@@ -503,12 +492,27 @@ function toolSchemas(opts?: {
     {
       name: "set_pr_body",
       description:
-        "Record the pull-request description (markdown) with an optional structured list of remaining Done items (remaining). Pass the items that are still left; leave the list empty when Done is met. A non-empty list publishes a non-closing Refs #N and renders the items visibly; an empty or absent list publishes the closing keyword even when the markdown says Refs #N. Checks the forge CI runs on the PR never count as remaining work. If the PR body is maintainer-written (no Jumi fence), your markdown becomes a fenced Jumi section appended below it: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description.",
+        "Record the pull-request description (markdown) with an optional structured list of remaining Done items (remaining). Each item is a string or {text, kind} with kind work (real leftover work, keeps Refs #N even when the text names a CI check), ci_check (a check the forge CI runs, never counts as leftover work), or post_merge_check (verified only after merge or deploy, keeps Refs #N under its own heading). Pass the items that are still left; leave the list empty when Done is met. A non-empty work/post-merge list publishes a non-closing Refs #N and renders the items visibly; an empty list or only ci_check items publishes the closing keyword even when the markdown says Refs #N. Checks the forge CI runs on the PR never count as remaining work. If the PR body is maintainer-written (no Jumi fence), your markdown becomes a fenced Jumi section appended below it: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description.",
       inputSchema: {
         type: "object",
         properties: {
           markdown: { type: "string" },
-          remaining: { type: "array", items: { type: "string" } },
+          remaining: {
+            type: "array",
+            items: {
+              anyOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    text: { type: "string" },
+                    kind: { type: "string", enum: ["work", "ci_check", "post_merge_check"] },
+                  },
+                  required: ["text", "kind"],
+                },
+              ],
+            },
+          },
         },
         required: ["markdown"],
       },

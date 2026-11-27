@@ -478,7 +478,8 @@ function isFindingMarkerLine(original: string): boolean {
   return FINDING_MARKER_RE.test(stripFindingPrefix(original));
 }
 
-function isQuestionFindingFirstLine(original: string): boolean {
+/** Whether a finding first line carries the question marker (`❓` or `q:`/`question:`). */
+export function isQuestionFindingFirstLine(original: string): boolean {
   return QUESTION_MARKER_RE.test(stripFindingPrefix(original));
 }
 
@@ -971,9 +972,9 @@ export function isNonMaintainerQuestionInline(
  * A review whose only open item is a maintainer-only `❓`: a complete
  * success trailer, at least one question, every question marked
  * `❓ maintainer:`, and no leftover suggestions. Single parse of the
- * trailer; handover and follow-up gates call this instead of re-parsing.
+ * trailer; the record-or-text view calls this on the text path.
  */
-export function isMaintainerOnlyTrailerText(markdown: string | null | undefined): boolean {
+function isMaintainerOnlyTrailerText(markdown: string | null | undefined): boolean {
   if (!markdown) return false;
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;

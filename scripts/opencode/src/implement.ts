@@ -56,7 +56,6 @@ import type { ForgeKind } from "./forge.ts";
 import { buildBlockedByRejectedPrompt, buildImplementPrompt, buildImplementYieldPrompt } from "./git.ts";
 import {
   closesIssuePattern,
-  isVisibleClosingMatch,
   pullRequestClosesIssue,
   refsIssuePattern,
   upsertWorkerComment,
@@ -74,6 +73,20 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
+import {
+  classifyRemainingItems,
+  decidePrClosing,
+  filterCiOnlyRemainingStrings,
+  isCiOnlyRemainingItem,
+  isNonClosingLiveBody,
+  type PersistedPrClosing,
+  persistedClosingDecision,
+  type RemainingItem,
+  renderRemainingSections,
+  rewriteClosingToRefs,
+  rewriteRefsToClosing,
+  sha256Hex,
+} from "./pr_closing.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
@@ -717,7 +730,7 @@ export function buildPullRequestBody(
   runner?: RunnerStamp,
   secrets: readonly (string | undefined)[] = [],
   closingKeyword?: string,
-  remaining?: readonly string[] | null | undefined
+  remaining?: readonly RemainingItem[] | null | undefined
 ): string {
   return redactGitSecrets(
     appendRunnerStamp(pullRequestText(issueNumber, fileContents, closingKeyword, remaining), runner),
@@ -725,116 +738,37 @@ export function buildPullRequestBody(
   );
 }
 
-export function rewriteClosingToRefs(text: string, issueNumber: number): string {
-  // Replace closing-keyword references to the worked issue with a
-  // non-closing `Refs #N` reference. Other issues keep their keywords.
-  // Only visible references count: code spans, fenced blocks, and quotes
-  // never close on the forge, so they are left untouched.
-  const pattern = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#${issueNumber}\b`, "gi");
-  let result = "";
-  let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    const start = match.index ?? 0;
-    const matched = match[0];
-    if (!isVisibleClosingMatch(text, start, matched.length)) continue;
-    result += text.slice(last, start);
-    result += `Refs #${issueNumber}`;
-    last = start + matched.length;
-  }
-  if (last === 0) return text;
-  return result + text.slice(last);
-}
+export type { PersistedPrClosing, RemainingItem };
+export { isCiOnlyRemainingItem, isNonClosingLiveBody, rewriteClosingToRefs, rewriteRefsToClosing };
 
-/**
- * Remaining items that only name checks the forge CI runs on the PR never
- * count as leftover work, even when the worker could not run them locally.
- * Dropped items never keep a PR non-closing on their own.
- */
-export function isCiOnlyRemainingItem(item: string): boolean {
-  const lower = item.toLowerCase();
-  if (lower.includes("bun run ci") || lower.includes("test:pg") || lower.includes("gitea actions")) return true;
-  if (lower.includes("ci green") || (lower.includes("ci") && lower.includes("green"))) return true;
-  if (lower.trim() === "ci" || (lower.includes("full") && lower.includes("ci"))) return true;
-  if (lower.includes("forge") && lower.includes("ci")) return true;
-  if ((lower.includes("bun run") || lower.includes("bun test")) && (lower.includes("postgres") || /\bpg\b/.test(lower)))
-    return true;
-  // A postgres/pg mention is CI-only only when it names running the check on the forge,
-  // not code to write ("add postgres regression test for queue").
-  if (lower.includes("postgres") || /\bpg\b/.test(lower)) {
-    if (lower.includes("forge") && (lower.includes("pass") || lower.includes("green") || lower.includes("run")))
-      return true;
-    return (
-      lower.includes("ci") &&
-      (lower.includes("pass") || lower.includes("green") || lower.includes("run") || lower.includes("forge"))
-    );
-  }
-  return false;
-}
-
-/** Trimmed remaining items with blanks dropped. */
-function normalizeRemainingItems(input: readonly string[] | null | undefined): string[] {
-  if (input == null) return [];
-  const out: string[] = [];
-  for (const entry of input) {
-    if (typeof entry !== "string") continue;
-    const trimmed = entry.replaceAll("\0", "").trim();
-    if (trimmed) out.push(trimmed);
-  }
-  return out;
-}
-
-/** Remaining items minus CI-only checks. */
+/** Remaining items minus CI-only checks (legacy untyped helper). */
 export function filterCiOnlyRemainingItems(items: readonly string[]): string[] {
-  return normalizeRemainingItems(items).filter((item) => !isCiOnlyRemainingItem(item));
-}
-
-/** Remaining list rendering; items are scrubbed so a non-empty list never visibly closes the worked issue. */
-function renderRemainingItems(items: readonly string[], issueNumber: number): string {
-  return `Remaining:\n${items.map((item) => `- ${rewriteClosingToRefs(item, issueNumber)}`).join("\n")}`;
-}
-
-export function rewriteRefsToClosing(text: string, issueNumber: number): string {
-  // Replace visible non-closing references to the worked issue (`Refs #N`,
-  // `Part of #N`, `Progress toward(s) #N`, `Related to #N`) with a closing
-  // `Fixes #N` reference. Other issues keep their wording. Code spans,
-  // fenced blocks, and quotes never close on the forge, so like the
-  // closing-to-refs direction they are left untouched.
-  const pattern = new RegExp(
-    String.raw`\b(?:refs?|part of|progress towards?|related to)\s*:?\s*#${issueNumber}\b`,
-    "gi"
-  );
-  let result = "";
-  let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    const start = match.index ?? 0;
-    const matched = match[0];
-    if (!isVisibleClosingMatch(text, start, matched.length)) continue;
-    result += text.slice(last, start);
-    result += `Fixes #${issueNumber}`;
-    last = start + matched.length;
-  }
-  if (last === 0) return text;
-  return result + text.slice(last);
+  return filterCiOnlyRemainingStrings(items);
 }
 
 function pullRequestText(
   issueNumber: number,
   fileContents: string | null | undefined,
   closingKeyword?: string,
-  remaining?: readonly string[] | null | undefined
+  remaining?: readonly RemainingItem[] | null | undefined
 ): string {
   const refs = closingKeyword === "refs";
   const fallback = refs ? `Refs #${issueNumber}` : `Fixes #${issueNumber}`;
-  const effective = filterCiOnlyRemainingItems(remaining ?? []);
+  const classified = classifyRemainingItems(remaining ?? []);
+  const rendered =
+    classified.work.length > 0 || classified.postMerge.length > 0
+      ? renderRemainingSections(classified.work, classified.postMerge, issueNumber)
+      : "";
+  const hasRemaining = rendered.length > 0;
   if (refs) {
     if (fileContents == null) {
-      if (effective.length === 0) return fallback;
-      return `${fallback}\n\n${renderRemainingItems(effective, issueNumber)}`;
+      if (!hasRemaining) return fallback;
+      return `${fallback}\n\n${rendered}`;
     }
     let text = parentOwnedProse(fileContents);
     if (!text) {
-      if (effective.length === 0) return fallback;
-      return `${fallback}\n\n${renderRemainingItems(effective, issueNumber)}`;
+      if (!hasRemaining) return fallback;
+      return `${fallback}\n\n${rendered}`;
     }
     if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
       text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
@@ -842,11 +776,10 @@ function pullRequestText(
     }
     if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
     if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) {
-      if (effective.length === 0) return text;
-      return `${text}\n\n${renderRemainingItems(effective, issueNumber)}`;
+      if (!hasRemaining) return text;
+      return `${text}\n\n${rendered}`;
     }
-    if (effective.length > 0)
-      return `${text}\n\nRefs #${issueNumber}\n\n${renderRemainingItems(effective, issueNumber)}`;
+    if (hasRemaining) return `${text}\n\nRefs #${issueNumber}\n\n${rendered}`;
     return `${text}\n\n${fallback}`;
   }
   // Default (`closes`) mode: the finished-or-partial decision comes from the
@@ -855,8 +788,7 @@ function pullRequestText(
   // markdown says `Refs #N` (or `Part of` / `Related to`); CI-only checks
   // were already dropped above. Words like "follow-up" or "remaining" in
   // the prose never keep a body non-closing.
-  if (effective.length > 0) {
-    const rendered = renderRemainingItems(effective, issueNumber);
+  if (hasRemaining) {
     if (fileContents == null) return `Refs #${issueNumber}\n\n${rendered}`;
     let text = parentOwnedProse(fileContents);
     if (!text) return `Refs #${issueNumber}\n\n${rendered}`;
@@ -880,19 +812,14 @@ function pullRequestText(
   return `${text}\n\n${fallback}`;
 }
 
-/** Whether the live body keeps the issue open: visible Refs with no visible closing keyword. */
-export function isNonClosingLiveBody(liveBody: string | null | undefined, issueNumber: number): boolean {
-  const visible = visibleClosingText(liveBody ?? "");
-  if (closesIssuePattern(issueNumber).test(visible)) return false;
-  return refsIssuePattern(issueNumber).test(visible);
-}
-
 /**
  * Follow-up re-publish: same rule as the initial body, except an absent
  * remaining list keeps the previous round's decision instead of closing.
  * An explicit list (including an explicitly empty one) always decides:
- * non-empty (after CI-only filtering) publishes Refs, empty publishes the
- * closing keyword. `refs` repos always stay non-closing.
+ * non-empty (after typed classification) publishes Refs, empty publishes the
+ * closing keyword. `refs` repos always stay non-closing. With `remaining`
+ * omitted or null under the default policy, a persisted decision reuses when
+ * the live region hash matches; otherwise today's live-body parse applies.
  */
 export function buildFollowupPullRequestBody(
   issueNumber: number,
@@ -901,14 +828,20 @@ export function buildFollowupPullRequestBody(
   runner?: RunnerStamp,
   secrets: readonly (string | undefined)[] = [],
   closingKeyword?: string,
-  remaining?: readonly string[] | null | undefined
+  remaining?: readonly RemainingItem[] | null | undefined,
+  persisted?: { persistedClosing?: PersistedPrClosing; prNumber?: number }
 ): string {
   if (closingKeyword === "refs" || remaining != null) {
     return buildPullRequestBody(issueNumber, fileContents, runner, secrets, closingKeyword, remaining);
   }
   const built = buildPullRequestBody(issueNumber, fileContents, runner, secrets, closingKeyword, undefined);
   const region = jumiPrBodyRegion(liveBody) ?? liveBody;
-  if (isNonClosingLiveBody(region, issueNumber)) return rewriteClosingToRefs(built, issueNumber);
+  const reused =
+    persisted?.persistedClosing !== undefined && persisted?.prNumber !== undefined
+      ? persistedClosingDecision(persisted.persistedClosing, persisted.prNumber, region ?? null)
+      : undefined;
+  const nonClosing = reused !== undefined ? reused === "refs" : isNonClosingLiveBody(region, issueNumber);
+  if (nonClosing) return rewriteClosingToRefs(built, issueNumber);
   return built;
 }
 
@@ -1994,7 +1927,7 @@ export async function implementIssue(
 
         let incompleteHopped = false;
         let prFileContents: string | null = null;
-        let prRemaining: string[] | undefined;
+        let prRemaining: RemainingItem[] | undefined;
         let porcelain = "";
         const customConventions = hasCustomConventions(conventions);
         const implementBasePrompt = (forQueue: boolean): string | undefined => {
@@ -2238,21 +2171,38 @@ export async function implementIssue(
         let pr: Pull;
         try {
           const bodyWithVerify = verifyNote != null ? `${prFileContents ?? ""}\n\n${verifyNote}\n` : prFileContents;
+          const innerBody = buildPullRequestBody(
+            issueNumber,
+            bodyWithVerify,
+            runner,
+            workerPublishSecrets(loop.auth.token, jobChain),
+            conventions.closingKeyword,
+            prRemaining
+          );
+          const publishedBody = wrapJumiPrBody(innerBody);
           pr = await opts.api.createPullRequest(owner, repo, {
             title: renderPrTitle(conventions.prTitle, liveJob.title, issueNumber),
-            body: wrapJumiPrBody(
-              buildPullRequestBody(
-                issueNumber,
-                bodyWithVerify,
-                runner,
-                workerPublishSecrets(loop.auth.token, jobChain),
-                conventions.closingKeyword,
-                prRemaining
-              )
-            ),
+            body: publishedBody,
             head: branch,
             base: opts.job.defaultBranch,
           });
+          const publishedRegion = jumiPrBodyRegion(publishedBody) ?? publishedBody;
+          const publishedDecision = decidePrClosing(prRemaining, conventions.closingKeyword);
+          const publishedRecord: PersistedPrClosing = {
+            prNumber: pr.number,
+            decision: publishedDecision,
+            regionSha256: sha256Hex(publishedRegion),
+          };
+          try {
+            const current = await latches.get(latchKey);
+            const followup =
+              current.followup && typeof current.followup === "object" && !Array.isArray(current.followup)
+                ? { ...(current.followup as Record<string, unknown>) }
+                : {};
+            await latches.put(latchKey, { followup: { ...followup, prClosing: publishedRecord } });
+          } catch {
+            // Best-effort: the PR is already open.
+          }
         } catch (err) {
           await failProvenanceIntent(opts, errorMessage(err), undefined, log);
           throw err;

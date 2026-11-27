@@ -85,6 +85,11 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "9a6e0601ece2a50357ac6b2b6e380b6975b7b8453a2d3519e26b0b5f6d4626a4"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
@@ -137,6 +142,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "9a6e0601ece2a50357ac6b2b6e380b6975b7b8453a2d3519e26b0b5f6d4626a4"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -593,6 +603,32 @@
         "seq": 0
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "8ac12f0bd6a86036a78b60840c5bded669b18d50541ebedae16562fd0c86bbf8"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -601,7 +637,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 1
+        "seq": 2
       },
       {
         "key": {
@@ -618,13 +654,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "8ac12f0bd6a86036a78b60840c5bded669b18d50541ebedae16562fd0c86bbf8"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -645,7 +686,7 @@
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       }
     ],
     "input": {
@@ -670,6 +711,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "8ac12f0bd6a86036a78b60840c5bded669b18d50541ebedae16562fd0c86bbf8"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -3852,6 +3898,32 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "e394bb6b5e6648213aa74373ec5a399b2a8a427ffc6d701e8999348b3b032e08"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -3860,7 +3932,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -3877,13 +3949,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "e394bb6b5e6648213aa74373ec5a399b2a8a427ffc6d701e8999348b3b032e08"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       },
       {
         "key": {
@@ -3904,7 +3981,7 @@
           }
         },
         "seam": "latch",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -3929,6 +4006,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "e394bb6b5e6648213aa74373ec5a399b2a8a427ffc6d701e8999348b3b032e08"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -5112,6 +5194,32 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "a06413514128f16e01b6b6279cef88719d321c35f74c1c3756ee8f8ed63caf22"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -5120,7 +5228,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -5137,13 +5245,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "a06413514128f16e01b6b6279cef88719d321c35f74c1c3756ee8f8ed63caf22"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       },
       {
         "key": {
@@ -5164,7 +5277,7 @@
           }
         },
         "seam": "latch",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -5189,6 +5302,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "a06413514128f16e01b6b6279cef88719d321c35f74c1c3756ee8f8ed63caf22"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -6392,6 +6510,32 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "620e70b7cb8363c5249e7844c122b12168e7e9ef9f847d007946fa0357812017"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -6400,7 +6544,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -6417,13 +6561,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "620e70b7cb8363c5249e7844c122b12168e7e9ef9f847d007946fa0357812017"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       },
       {
         "key": {
@@ -6444,7 +6593,7 @@
           }
         },
         "seam": "latch",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -6469,6 +6618,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "620e70b7cb8363c5249e7844c122b12168e7e9ef9f847d007946fa0357812017"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -7583,6 +7737,32 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "80de1f789a070b3b4c1c912b2fa0ea730a9657b533f00526b5edf8eab835d085"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -7591,7 +7771,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -7608,13 +7788,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "80de1f789a070b3b4c1c912b2fa0ea730a9657b533f00526b5edf8eab835d085"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       },
       {
         "key": {
@@ -7635,7 +7820,7 @@
           }
         },
         "seam": "latch",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -7660,6 +7845,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "80de1f789a070b3b4c1c912b2fa0ea730a9657b533f00526b5edf8eab835d085"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
@@ -11829,6 +12019,32 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "9a6e0601ece2a50357ac6b2b6e380b6975b7b8453a2d3519e26b0b5f6d4626a4"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -11837,7 +12053,7 @@
         ],
         "method": "createIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "key": {
@@ -11854,13 +12070,18 @@
             "handledReviewFindings": [],
             "handledReviewIds": [],
             "lastHeadSha": "abc123",
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 127,
+              "regionSha256": "9a6e0601ece2a50357ac6b2b6e380b6975b7b8453a2d3519e26b0b5f6d4626a4"
+            },
             "prNumber": 127,
             "round": 1,
             "updatedAt": "<iso>"
           }
         },
         "seam": "latch",
-        "seq": 3
+        "seq": 4
       },
       {
         "key": {
@@ -11881,7 +12102,7 @@
           }
         },
         "seam": "latch",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -11906,6 +12127,11 @@
         "handledReviewFindings": [],
         "handledReviewIds": [],
         "lastHeadSha": "abc123",
+        "prClosing": {
+          "decision": "fixes",
+          "prNumber": 127,
+          "regionSha256": "9a6e0601ece2a50357ac6b2b6e380b6975b7b8453a2d3519e26b0b5f6d4626a4"
+        },
         "prNumber": 127,
         "round": 1,
         "updatedAt": "<iso>"
