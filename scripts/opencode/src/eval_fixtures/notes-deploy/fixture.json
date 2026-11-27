@@ -6,6 +6,7 @@
   "defaultBranch": "main",
   "expected": {
     "closingKeyword": "refs",
-    "minRemaining": 1
+    "minRemaining": 1,
+    "remainingMustContain": ["deploy"]
   }
 }

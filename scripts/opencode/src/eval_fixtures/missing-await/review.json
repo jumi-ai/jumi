@@ -2,6 +2,16 @@
   "defective": {
     "anchors": [{ "path": "notify.js", "start": 2, "end": 2 }],
     "mustContain": ["send(user)", "unhandled"],
+    "paraphrases": [
+      {
+        "title": "Fire-and-forget forEach leaves send(user) rejections unhandled",
+        "body": "notifyAll calls send(user) inside forEach without awaiting, so a send(user) rejection is unhandled and lost to the caller. Await the promises. Proof: send(user) rejects while notifyAll resolves; unhandled on this head."
+      },
+      {
+        "title": "Lost errors: send(user) promise is unhandled",
+        "body": "The per-user send(user) promise is never returned or awaited, so failures are unhandled rejections. Use Promise.all. Proof: send(user) rejection is unhandled here."
+      }
+    ],
     "note": "The missing await is on notify.js:2. A blocking finding on line 2 counts; the text must name the concrete failure (send(user) rejection is unhandled/lost), not only \"check this\"."
   },
   "repaired": {
