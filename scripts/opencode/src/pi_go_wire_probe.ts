@@ -77,6 +77,7 @@ export const REVIEW_EXPECTED_JUMI_TOOLS = [
   "jumi_set_verdict",
   "jumi_list_findings",
   "jumi_previous_findings",
+  "jumi_set_disposition",
 ] as const;
 
 /**
@@ -111,6 +112,7 @@ export const WIRE_TOOL_CONTRACTS: Record<string, WireToolContract> = {
   jumi_set_verdict: { required: ["state"], propTypes: { state: "string" } },
   jumi_list_findings: { required: [], propTypes: {} },
   jumi_previous_findings: { required: [], propTypes: {} },
+  jumi_set_disposition: { required: ["key", "disposition"], propTypes: { key: "string", disposition: "string" } },
   jumi_skip: { required: ["reason"], propTypes: { reason: "string" } },
   jumi_blocked_on: { required: ["ref", "reason"], propTypes: { ref: "string", reason: "string" } },
   jumi_set_pr_body: { required: ["markdown"], propTypes: { markdown: "string" } },

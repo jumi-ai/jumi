@@ -31,6 +31,7 @@ export const REVIEW_MCP_TOOL_NAMES = [
   "list_findings",
   "set_verdict",
   "previous_findings",
+  "set_disposition",
 ] as const;
 
 type ReviewMcpToolName = (typeof REVIEW_MCP_TOOL_NAMES)[number];
@@ -135,8 +136,29 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
     },
     {
       name: "previous_findings",
-      description: "Previous review finding lines for this pull, if this is a later review.",
+      description:
+        "Previous review findings for this pull, if this is a later review. Keyed entries are {key, text, severity, location?, status}; unkeyed entries are plain strings. Keyed entries need a disposition via set_disposition before a complete set_verdict.",
       inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "set_disposition",
+      description:
+        "State a disposition for one eligible keyed prior: still_present materialises it under its key (returns its finding handle for update_finding), fixed/withdrawn record a note and add no finding. Re-calling replaces the earlier disposition. Unknown or ineligible keys are errors.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          key: { type: "string" },
+          disposition: { type: "string", enum: ["still_present", "fixed", "withdrawn"] },
+          note: { type: "string" },
+          location: {
+            type: "object",
+            properties: { path: { type: "string" }, line: { type: "number" } },
+            required: ["path", "line"],
+          },
+          body_only: { type: "boolean" },
+        },
+        required: ["key", "disposition"],
+      },
     },
   ];
 }
@@ -176,6 +198,12 @@ function callTool(
     }
     case "previous_findings": {
       return { ok: true, text: JSON.stringify({ findings: store.listPreviousFindings() }) };
+    }
+    case "set_disposition": {
+      const result = store.setDisposition(args as unknown);
+      return result.ok
+        ? { ok: true, text: JSON.stringify("id" in result && result.id ? { id: result.id } : { recorded: true }) }
+        : { ok: false, text: result.error };
     }
     default:
       return { ok: false, text: `unknown tool: ${name}` };

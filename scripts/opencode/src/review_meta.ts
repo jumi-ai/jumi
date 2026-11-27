@@ -80,6 +80,12 @@ export interface MetaFindingEntry {
   cs?: string;
 }
 
+interface MetaDisposition {
+  key: string;
+  disposition: "still_present" | "fixed" | "withdrawn";
+  by: "reviewer" | "parent";
+}
+
 export interface MetaPayload {
   v: 1;
   forge: string;
@@ -90,6 +96,8 @@ export interface MetaPayload {
   /** sha256 hex of the exact posted top-level body with the block stripped. */
   md: string;
   findings: MetaFindingEntry[];
+  /** Reviewer + parent dispositions for eligible keyed priors; omitted when empty. Old readers ignore it. */
+  dispositions?: MetaDisposition[];
 }
 
 export interface MetaAssembleFinding {
@@ -121,6 +129,8 @@ export interface MetaAssembleFinding {
   expectedBody?: string;
   /** Body only: the extractor recovers this location from the rendered body. */
   bodyLocationVerified?: boolean;
+  /** Prior key carried by a `still_present` materialisation; preserved verbatim in the next block. */
+  priorKey?: string;
 }
 
 export interface MetaAssembleOpts {
@@ -137,6 +147,7 @@ export interface MetaAssembleOpts {
   /** Parent job id used for key minting (`k_<job>_<n>`). */
   jobId: string;
   findings: MetaAssembleFinding[];
+  dispositions?: MetaDisposition[];
   /** False when anything between store and post changed the text: suppress. */
   exactText: boolean;
   exactTextReason?: string;
@@ -410,10 +421,19 @@ export function assembleReviewMeta(webhookSecret: string, opts: MetaAssembleOpts
   }
   const md = sha256Hex(opts.bodyWithoutMeta);
   const seenOrdinals = new Set<number>();
+  const seenPriorKeys = new Set<string>();
   const findings: MetaFindingEntry[] = [];
   for (const finding of opts.findings) {
     let key = decideKey(finding, opts.marker);
-    if (key !== null) {
+    if (finding.priorKey) {
+      // A `still_present` materialisation keeps its prior key verbatim.
+      if (seenPriorKeys.has(finding.priorKey)) {
+        key = null;
+      } else {
+        seenPriorKeys.add(finding.priorKey);
+        key = finding.priorKey;
+      }
+    } else if (key !== null) {
       // Keys stay distinct per ordinal; a duplicate ordinal never collides:
       // the second claim loses its key.
       if (seenOrdinals.has(finding.ordinal)) key = null;
@@ -447,6 +467,7 @@ export function assembleReviewMeta(webhookSecret: string, opts: MetaAssembleOpts
     state: opts.state,
     md,
     findings,
+    ...(opts.dispositions && opts.dispositions.length > 0 ? { dispositions: [...opts.dispositions] } : {}),
   };
   const derived = deriveReviewMetaKey(webhookSecret);
   const finish = (withKeys: boolean): MetaAssembleResult => {
@@ -464,6 +485,7 @@ export function assembleReviewMeta(webhookSecret: string, opts: MetaAssembleOpts
               if (entry.cs !== undefined) copy.cs = entry.cs;
               return copy;
             }),
+            ...(payload.dispositions ? { dispositions: payload.dispositions } : {}),
           }
         : payload;
     const payloadHex = encodeMetaPayload(use);
@@ -502,14 +524,16 @@ export interface MetaStoreFinding {
   body: string;
   maintainerDecision?: "typed_true" | "typed_false" | "none";
   proof?: ReviewProof;
+  key?: string;
+  verbatim?: boolean;
 }
 
 /** Adapt a store record finding (proof/subtype come from the store, never text). */
 export function storeFindingForMeta(
   finding: Pick<
     ReviewMcpFindingRecord,
-    "path" | "line" | "severity" | "title" | "body" | "maintainerDecision" | "proof"
-  >
+    "path" | "line" | "severity" | "title" | "body" | "maintainerDecision" | "proof" | "key"
+  > & { verbatim?: boolean }
 ): MetaStoreFinding {
   return {
     ...(finding.path !== undefined ? { path: finding.path } : {}),
@@ -519,15 +543,22 @@ export function storeFindingForMeta(
     body: finding.body,
     ...(finding.maintainerDecision !== undefined ? { maintainerDecision: finding.maintainerDecision } : {}),
     ...(finding.proof !== undefined ? { proof: finding.proof } : {}),
+    ...(finding.key !== undefined ? { key: finding.key } : {}),
+    ...(finding.verbatim ? { verbatim: true } : {}),
   };
 }
 
 /**
  * Full published text of one store finding: the canonical first-line body
- * plus attached proof lines, exactly as `toMarkdown()` renders. Callers
- * compare this byte for byte with the posted block body.
+ * plus attached proof lines, exactly as `toMarkdown()` renders. Verbatim
+ * `still_present` findings render their exact bytes without canonicalization.
+ * Callers compare this byte for byte with the posted block body.
  */
 export function expectedStoreFindingText(store: MetaStoreFinding): string {
+  if (store.verbatim && store.key) {
+    if (!store.proof) return store.body;
+    return [store.body, ...renderProofLines(store.proof)].join("\n");
+  }
   const canonical = canonicalFindingLine(store.title, store.body, store.severity, store.maintainerDecision ?? "none");
   if (!store.proof) return canonical;
   return [canonical, ...renderProofLines(store.proof)].join("\n");
@@ -643,6 +674,7 @@ export function buildMetaAssembleFindings(opts: MetaBuildOpts): MetaBuildResult 
       ...(live ? { liveId: live.id, livePath: live.path, liveLine: live.line, liveBody: live.body } : {}),
       ...(expectedBody !== undefined ? { expectedBody } : {}),
       ...(placement === "body" ? { bodyLocationVerified: storeMatchesPosted } : {}),
+      ...(info.priorKey ? { priorKey: info.priorKey } : {}),
     });
   }
   // Cap-dropped store suggestions ride as keyless entries past the body ones.
@@ -676,6 +708,7 @@ interface ResolvedTyped {
   blockLine?: number;
   title: string;
   body: string;
+  priorKey?: string;
 }
 
 function resolveMetaTyped(
@@ -721,6 +754,7 @@ function resolveMetaTyped(
       body: store.body,
       ...(block.path !== undefined ? { blockPath: block.path } : {}),
       ...(block.line !== undefined ? { blockLine: block.line } : {}),
+      ...(store.key ? { priorKey: store.key } : {}),
     };
     if (store.path !== undefined) resolved.path = store.path;
     if (store.line !== undefined) resolved.line = store.line;
@@ -795,6 +829,7 @@ export interface TopLevelMetaInput {
   liveInlines?: MetaLiveInline[];
   expectedBodies?: ReadonlyMap<string, string>;
   singleFilePath?: string;
+  dispositions?: MetaDisposition[];
   /** False when anything between store and post changed the text: suppress. */
   exactText?: boolean;
   exactTextReason?: string;
@@ -845,6 +880,7 @@ export function attachReviewMeta(input: TopLevelMetaInput): string {
       marker: input.marker,
       jobId: input.jobId,
       findings: built.findings,
+      ...(input.dispositions ? { dispositions: input.dispositions } : {}),
       exactText: true,
       log,
     });
@@ -954,6 +990,7 @@ export function attachStickyReviewMeta(args: {
     ...(args.meta?.droppedSuggestions !== undefined ? { droppedSuggestions: args.meta.droppedSuggestions } : {}),
     ...(args.singleFilePath ? { singleFilePath: args.singleFilePath } : {}),
     ...(args.meta?.exactText === false ? { exactText: false as const } : {}),
+    ...(args.meta?.record?.dispositions ? { dispositions: args.meta.record.dispositions } : {}),
     log: args.log,
   });
 }
@@ -1008,6 +1045,7 @@ export function attachPostPullReviewMeta(args: {
     expectedBodies,
     ...(args.singleFilePath ? { singleFilePath: args.singleFilePath } : {}),
     ...(args.meta?.exactText === false ? { exactText: false as const } : {}),
+    ...(args.meta?.record?.dispositions ? { dispositions: args.meta.record.dispositions } : {}),
     log: args.log,
   });
 }

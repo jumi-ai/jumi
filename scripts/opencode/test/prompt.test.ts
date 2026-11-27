@@ -289,7 +289,7 @@ describe("buildPROpenedPrompt", () => {
 
   test("a later review tells the model how to treat resolved earlier findings", () => {
     const first = buildPROpenedPrompt({ repo: makeRepo(), pr: makePR(), prFiles: [] });
-    expect(first).not.toContain("do not record it with add_finding");
+    expect(first).not.toContain("dispose it as fixed (keyed)");
 
     const later = buildPROpenedPrompt({
       repo: makeRepo(),
@@ -297,9 +297,11 @@ describe("buildPROpenedPrompt", () => {
       prFiles: [],
       delta: { previousSha: "abc123", findings: ["src/a.ts:1: 🔴 bug: stale."], commits: [], files: [] },
     });
-    expect(later).toContain("JUMI_REVIEW.md replaces the previous review");
-    expect(later).toContain("A previous finding this head fixed is resolved: do not record it with add_finding");
-    expect(later).toContain("do not repeat its severity marker");
+    expect(later).toContain("Use previous_findings to see prior findings: keyed entries carry a key");
+    expect(later).toContain("call set_disposition({ key, disposition }) for each keyed prior");
+    expect(later).toContain("Text-era priors are plain strings with no key and need no disposition");
+    expect(later).toContain("dispose it as fixed (keyed)");
+    expect(later).toContain("mention it in plain prose");
     expect(later).toContain("Only finding lines with markers publish");
   });
 
