@@ -171,6 +171,16 @@ export interface HandleWorkerWebhookDeps {
     "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs"
   >;
   ciHome?: string;
+  /**
+   * Signed review-block verification material: the webhook secret the
+   * review publisher signs with plus the expected forge identity. Absent
+   * verifies nothing and consumers fall back to the legacy text classifier.
+   */
+  reviewTrust?: {
+    webhookSecret?: string;
+    forgeIdentity?: string;
+    giteaUrl?: string;
+  };
 }
 
 /** Gitea HookEventType.Event() maps issues/issue_assign/issue_label/issue_milestone → "issues". */
@@ -476,6 +486,7 @@ export async function cancelLedgerWorkerJobs(opts: {
   deploymentTrusted?: readonly string[];
   deploymentIgnore?: readonly string[];
   deploymentBlocking?: readonly string[];
+  reviewTrust?: HandleWorkerWebhookDeps["reviewTrust"];
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
   // A held suggestion `pending` must resolve before the latch wipe below destroys the only record of it.
@@ -495,6 +506,16 @@ export async function cancelLedgerWorkerJobs(opts: {
     deploymentBlocking: opts.deploymentBlocking,
     log: (message) => opts.logger?.(message),
     reason: "unassigned",
+    ...(opts.reviewTrust
+      ? {
+          trust: {
+            ...opts.reviewTrust,
+            owner: opts.owner,
+            repo: opts.repo,
+            log: (message: string) => opts.logger?.(message),
+          },
+        }
+      : {}),
   });
   await opts.store.clearIssueSkipLatch(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
@@ -1084,6 +1105,17 @@ export async function handleWorkerWebhookEvent(
               followupIgnoreLogins: effectiveFollowupPolicy.followupIgnoreLogins,
               defaultBranch: parsed.repository?.default_branch ?? rawPayload?.repository?.default_branch,
               logger,
+              ...(deps.reviewTrust
+                ? {
+                    trust: {
+                      ...deps.reviewTrust,
+                      owner,
+                      repo,
+                      prNumber,
+                      log: logger,
+                    },
+                  }
+                : {}),
             });
             if (release.outcome === "released") {
               if (deps.sits) {

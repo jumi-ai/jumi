@@ -354,6 +354,7 @@ export function renderProcessMetrics(): string {
 /**
  * What engine/worker pods serve on `/metrics`. Exporter health gauges only:
  * the durable `ai_tokens_*` / `ai_sessions` / `jumi_jobs_completed_total` /
+ * `jumi_jobs_reclaimed_total` / `jumi_jobs_reclaimed_leased_seconds_total` /
  * `jumi_job_duration_seconds_*` / `jumi_opencode_exits_total` /
  * `jumi_opencode_runner_exits_total` / `jumi_opencode_runner_quota_reset_seconds`
  * series now come from the router's ledger export, and serving the same names

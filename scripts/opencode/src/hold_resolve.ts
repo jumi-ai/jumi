@@ -1,6 +1,11 @@
 import { isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import type { InlineComment } from "./ports.ts";
-import { classifyInlineText } from "./review_facts.ts";
+import {
+  classifyInlineText,
+  type ResolvedReviewFacts,
+  type ReviewTrustCtx,
+  resolveReviewFacts,
+} from "./review_facts.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
 
@@ -41,19 +46,32 @@ function isSuggestionLikeInline(inline: InlineComment): boolean {
  * open thread carrying an answered `❓ maintainer:` question or a consumed
  * `💡` suggestion, and never a still-open `🔴`/`🟡` finding. Threads a person
  * or another bot started never match (marker plus bot login).
+ *
+ * When group `resolved` facts (from `resolveReviewFacts` over the review
+ * body plus its inline group) are provided and verified, severity comes from
+ * the signed entries — a `💡` suggestion in a `🔴`-named file resolves, a
+ * severity-less signed bug does not — matched by live comment id. Otherwise
+ * the legacy text classifier decides.
  */
-export function isResolvableHoldInline(inline: InlineComment, botUsername?: string): boolean {
+export function isResolvableHoldInline(
+  inline: InlineComment,
+  botUsername?: string,
+  resolved?: ResolvedReviewFacts
+): boolean {
   if (!isJumiOwnedOpenInline(inline, botUsername)) return false;
+  const typed =
+    resolved && resolved.source === "typed"
+      ? resolved.facts.findings.find((finding) => finding.inlineId === inline.id)
+      : undefined;
+  if (typed) {
+    if (typed.severity === "bug" || typed.severity === "risk") return false;
+    return typed.severity === "suggestion" || typed.questionKind === "maintainer";
+  }
   if (isBugLikeInline(inline)) return false;
   if (isRiskLikeInline(inline)) return false;
   if (classifyInlineText(inline.path, inline.body).maintainerQuestion) return true;
   if (isSuggestionLikeInline(inline)) return true;
   return false;
-}
-
-/** Subset of a held review group the release may resolve. */
-function resolvableHoldInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
-  return inlines.filter((inline) => isResolvableHoldInline(inline, botUsername));
 }
 
 function isMissingResolveMethod(err: unknown): boolean {
@@ -127,9 +145,26 @@ export async function resolveSettledHoldThreads(opts: {
   inlines: readonly InlineComment[];
   botUsername: string;
   log?: (message: string) => void;
+  /** Review body carrying the signed block for this inline group, when the publisher wrote one. */
+  reviewBody?: string | null | undefined;
+  /** Signed-block verification coordinates for this resolve decision. */
+  trust?: ReviewTrustCtx;
 }): Promise<{ resolved: number; failed: number; permission: boolean }> {
   const log = opts.log ?? (() => undefined);
-  const targets = resolvableHoldInlines(opts.inlines, opts.botUsername);
+  let resolvedFacts: ResolvedReviewFacts | undefined;
+  if (opts.reviewBody) {
+    try {
+      resolvedFacts = resolveReviewFacts({
+        body: opts.reviewBody,
+        inlines: opts.inlines,
+        botUsername: opts.botUsername,
+        ...(opts.trust ? { trust: opts.trust } : {}),
+      });
+    } catch {
+      resolvedFacts = undefined;
+    }
+  }
+  const targets = opts.inlines.filter((inline) => isResolvableHoldInline(inline, opts.botUsername, resolvedFacts));
   if (targets.length === 0) return { resolved: 0, failed: 0, permission: false };
   if (typeof opts.api?.resolvePullComment !== "function") {
     log(`hold resolve skipped for ${opts.owner}/${opts.repo}#${opts.prNumber}: resolvePullComment unavailable`);

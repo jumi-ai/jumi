@@ -93,6 +93,11 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
             handoffs: deps.handoffs,
             strictSlots: deps.strictSlots,
             automergeReconcile: deps.automergeReconcile,
+            reviewTrust: {
+              ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+              ...(config.forgeIdentity ? { forgeIdentity: config.forgeIdentity } : {}),
+              giteaUrl: config.giteaUrl,
+            },
           },
           logger,
           deliveryDedupe,

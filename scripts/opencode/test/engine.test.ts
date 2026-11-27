@@ -1178,12 +1178,12 @@ describe("processEngineTick", () => {
       const gate = new Promise<void>((resolve) => {
         started = resolve;
       });
-      const originalRelease = store.releaseLease.bind(store);
+      const originalRelease = store.shutdownRelease.bind(store);
       const callers: string[] = [];
-      store.releaseLease = async (id, leasedBy) => {
+      store.shutdownRelease = async (id, leasedBy, now) => {
         callers.push(leasedBy);
         store.rows[0]!.leasedBy = "engine-other";
-        return originalRelease(id, leasedBy);
+        return originalRelease(id, leasedBy, now);
       };
       const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),

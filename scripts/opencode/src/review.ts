@@ -106,6 +106,7 @@ import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./rev
 import {
   attachPostPullReviewMeta,
   attachStickyReviewMeta,
+  defaultForgeIdentity,
   type ReviewMetaPublishOpts,
   resolvePublishMeta,
   withMetaBase,
@@ -2743,6 +2744,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         cwd: opts.workspace,
         env: gitCmdEnv,
         log,
+        trust: {
+          ...(opts.meta?.webhookSecret ? { webhookSecret: opts.meta.webhookSecret } : {}),
+          forgeIdentity: opts.meta?.forgeIdentity ?? defaultForgeIdentity(opts.giteaUrl, opts.botUsername),
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: pr.number,
+        },
         reviewLabel,
         persist: (markdown) => persistOutcome({ kind: "markdown", markdown }),
         publish: (markdown, previousSha, findings) =>

@@ -11,7 +11,12 @@ import {
   isMaintainerQuestionsHoldEnabled,
   loadSettingsSnapshot,
 } from "./repo_settings.ts";
-import { buildReviewFacts, describeSuggestionsReason, parseLastCheckTrailer } from "./review_facts.ts";
+import {
+  describeSuggestionsReason,
+  parseLastCheckTrailer,
+  type ReviewTrustCtx,
+  resolveReviewFacts,
+} from "./review_facts.ts";
 import { inlinesForReviewGroup, reviewGroupIds } from "./review_groups.ts";
 import type { SkipLatchKey, SkipLatchStore } from "./skip_latches.ts";
 import {
@@ -263,6 +268,8 @@ export interface SettleFollowUpHoldOpts {
   deploymentBlocking?: readonly string[];
   log?: (message: string) => void;
   targetUrl?: string;
+  /** Signed-block verification coordinates for this settlement decision. */
+  trust?: ReviewTrustCtx;
 }
 
 /**
@@ -445,13 +452,24 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
       summaryReview != null ? inlinesForReviewGroup(summaryReview, rawReviews, rawInlines, opts.botUsername) : [];
     const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, rawReviews, opts.botUsername) : [];
 
-    const facts = buildReviewFacts({
+    const trustForReview: ReviewTrustCtx | undefined = opts.trust
+      ? {
+          ...opts.trust,
+          owner: opts.trust.owner ?? opts.owner,
+          repo: opts.trust.repo ?? opts.repo,
+          prNumber: opts.trust.prNumber ?? opts.prNumber,
+          headSha: opts.trust.headSha ?? currentHeadSha,
+          log,
+        }
+      : undefined;
+    const facts = resolveReviewFacts({
       body: reviewBody,
       inlines: reviewInlines,
       botUsername: opts.botUsername,
       prAuthorLogin: livePr.user?.login,
       blockingAuthors,
-    });
+      ...(trustForReview ? { trust: trustForReview } : {}),
+    }).facts;
     const completeSuccess = !facts.incomplete && facts.state === "success";
     const openBugs = facts.openBugs;
     const openRisks = facts.openRisks;
@@ -569,6 +587,8 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
         inlines: inlinesToResolve,
         botUsername: opts.botUsername,
         log,
+        reviewBody,
+        ...(trustForReview ? { trust: trustForReview } : {}),
       });
       return;
     }
@@ -586,6 +606,8 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
             inlines: retryInlines,
             botUsername: opts.botUsername,
             log,
+            reviewBody,
+            ...(trustForReview ? { trust: trustForReview } : {}),
           });
         }
       }

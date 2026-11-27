@@ -254,6 +254,24 @@ export function parseReviewMetaBlock(body: string): { payloadHex: string; sigHex
   return { payloadHex: match[1], sigHex: match[2] };
 }
 
+/**
+ * Lenient block parse that also reports an unknown `v=` version. The strict
+ * `parseReviewMetaBlock` only matches `v=1`; consumers use this to tell an
+ * unknown version (`bad-version`) apart from a missing block (`no-block`).
+ */
+export function parseReviewMetaBlockLenient(
+  body: string
+): { version: number; payloadHex: string; sigHex: string } | undefined {
+  const match = /<!--\s*jumi-review:meta\s+v=(\d+)\s+d=([0-9a-f]+)\s+s=([0-9a-f]+)\s*-->/.exec(body);
+  if (!match) return undefined;
+  return { version: Number.parseInt(match[1], 10), payloadHex: match[2], sigHex: match[3] };
+}
+
+/** Digest input for a body carrying exactly one block: the exact inverse of `insertReviewMetaBeforeTrailer`. */
+export function exciseReviewMetaBlock(body: string): string {
+  return exciseMetaBlock(body);
+}
+
 /** Count meta blocks in a body. */
 export function countReviewMetaBlocks(body: string): number {
   const matches = body.match(META_RE_GLOBAL);

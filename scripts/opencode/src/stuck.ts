@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
-import { buildReviewFacts } from "./review_facts.ts";
+import { buildReviewFacts, type ReviewTrustCtx, resolveReviewFacts } from "./review_facts.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./skip_why_texts.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
@@ -132,13 +132,16 @@ export function fingerprintError(error: string | null | undefined): string | und
 }
 
 /** Sorted blocking finding identities (`path|bucket|severity|summary`). Empty when no blocking finding. */
-export function blockingFindingIdentities(markdown: string | null | undefined): string[] {
+export function blockingFindingIdentities(markdown: string | null | undefined, trust?: ReviewTrustCtx): string[] {
   if (!markdown?.trim()) return [];
-  return buildReviewFacts({ body: markdown }).findingIdentities;
+  return resolveReviewFacts({ body: markdown, ...(trust ? { trust } : {}) }).facts.findingIdentities;
 }
 
-export function fingerprintFindingIdentity(markdown: string | null | undefined): string | undefined {
-  const identities = blockingFindingIdentities(markdown);
+export function fingerprintFindingIdentity(
+  markdown: string | null | undefined,
+  trust?: ReviewTrustCtx
+): string | undefined {
+  const identities = blockingFindingIdentities(markdown, trust);
   if (identities.length === 0) return undefined;
   return hashText(identities.join("\n"));
 }
@@ -195,29 +198,34 @@ export type FindingInlineInput = {
 /** Blocking identities from a top-level review body plus unresolved Jumi inlines. */
 function blockingFindingIdentitiesFromParts(
   reviewBody: string | null | undefined,
-  inlines?: readonly FindingInlineInput[] | null | undefined
+  inlines?: readonly FindingInlineInput[] | null | undefined,
+  trust?: ReviewTrustCtx
 ): string[] {
-  return buildReviewFacts({ body: reviewBody, inlines: inlines ?? [] }).findingIdentities;
+  return resolveReviewFacts({ body: reviewBody, inlines: inlines ?? [], ...(trust ? { trust } : {}) }).facts
+    .findingIdentities;
 }
 
 export function fingerprintFindingIdentityFromParts(
   reviewBody: string | null | undefined,
-  inlines?: readonly FindingInlineInput[] | null | undefined
+  inlines?: readonly FindingInlineInput[] | null | undefined,
+  trust?: ReviewTrustCtx
 ): string | undefined {
-  const identities = blockingFindingIdentitiesFromParts(reviewBody, inlines);
+  const identities = blockingFindingIdentitiesFromParts(reviewBody, inlines, trust);
   if (identities.length === 0) return undefined;
   return hashText(identities.join("\n"));
 }
 
 export function sameFindingDisplayFromParts(
   reviewBody: string | null | undefined,
-  inlines?: readonly FindingInlineInput[] | null | undefined
+  inlines?: readonly FindingInlineInput[] | null | undefined,
+  trust?: ReviewTrustCtx
 ): string | undefined {
-  return buildReviewFacts({ body: reviewBody, inlines: inlines ?? [] }).sameFindingDisplay;
+  return resolveReviewFacts({ body: reviewBody, inlines: inlines ?? [], ...(trust ? { trust } : {}) }).facts
+    .sameFindingDisplay;
 }
 
-function sameFindingLatchReason(markdown: string | null | undefined): string {
-  const display = buildReviewFacts({ body: markdown }).sameFindingDisplay;
+function sameFindingLatchReason(markdown: string | null | undefined, trust?: ReviewTrustCtx): string {
+  const display = resolveReviewFacts({ body: markdown, ...(trust ? { trust } : {}) }).facts.sameFindingDisplay;
   if (!display) return SAME_FINDING_STUCK;
   const reason = `${SAME_FINDING_STUCK} (${display})`;
   return reason.length > 300 ? `${reason.slice(0, 300).trimEnd()}…)` : reason;
@@ -225,9 +233,10 @@ function sameFindingLatchReason(markdown: string | null | undefined): string {
 
 export function sameFindingLatchReasonFromParts(
   reviewBody: string | null | undefined,
-  inlines?: readonly FindingInlineInput[] | null | undefined
+  inlines?: readonly FindingInlineInput[] | null | undefined,
+  trust?: ReviewTrustCtx
 ): string {
-  const display = sameFindingDisplayFromParts(reviewBody, inlines);
+  const display = sameFindingDisplayFromParts(reviewBody, inlines, trust);
   if (!display) return SAME_FINDING_STUCK;
   const reason = `${SAME_FINDING_STUCK} (${display})`;
   return reason.length > 300 ? `${reason.slice(0, 300).trimEnd()}…)` : reason;
