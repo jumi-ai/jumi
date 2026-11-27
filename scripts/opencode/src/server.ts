@@ -187,6 +187,17 @@ export interface RunReviewJobExtras {
   provenance?: import("./provenance.ts").ProvenanceStore;
   /** Postgres ledger for review stuck state. ProcessEngineTick wires `store.skipLatches`; without it review falls back to the HOME file. */
   skipLatches?: import("./skip_latches.ts").SkipLatchStore;
+  /**
+   * Pi session seams (loopback doubles in tests). Production passes none and
+   * builds the real Go session. Type-only: the Pi modules load dynamically
+   * on the pi path, never on legacy.
+   */
+  piSeams?: import("./pi_jobs.ts").PiJobSeams;
+  /**
+   * Pi deployment override (tests). Production resolves it from the process
+   * environment inside the pi branch.
+   */
+  piDeployment?: import("./pi_jobs.ts").PiDeployment;
 }
 
 export async function runReviewJob(
@@ -1092,6 +1103,36 @@ async function settleCiAbsent(
     return undefined;
   }
   logger(`ci-absent-exhausted ${row.jobKey}: reviewing with no CI`);
+  if ((config.harnessMode ?? "legacy") === "pi") {
+    // Same no-CI review through the Pi session; never a legacy runner.
+    const pi = await import("./pi_jobs.ts");
+    return pi.runPiReviewJob({
+      owner: row.owner,
+      repo: row.repo,
+      prNumber: row.prNumber,
+      headSha: row.headSha,
+      config: {
+        workdir: config.workdir,
+        home: config.home,
+        giteaUrl: config.giteaUrl,
+        giteaToken: config.giteaToken,
+        botUsername: config.botUsername,
+        blockingQuestionAuthors: config.blockingQuestionAuthors,
+        automergeRepos: config.automergeRepos,
+        trustedSenderLogins: config.trustedSenderLogins,
+        opencodeTimeoutMs: config.opencodeTimeoutMs,
+      },
+      api,
+      logger,
+      deployment: extras.piDeployment ?? pi.loadPiDeployment(),
+      prevError: row.error ?? extras.previousError ?? null,
+      ...(extras.persistResult ? { persist: extras.persistResult } : {}),
+      ...(extras.abortSignal ? { abortSignal: extras.abortSignal } : {}),
+      ...(extras.ciRelistDelayMs !== undefined ? { ciRelistDelayMs: extras.ciRelistDelayMs } : {}),
+      ...(extras.piSeams ? { seams: extras.piSeams } : {}),
+      assumeNoCi: true,
+    });
+  }
   return runReviewJob(config, job, api, logger, { ...extras, assumeNoCi: true });
 }
 
@@ -1104,8 +1145,9 @@ export async function processEngineTick(
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
-  // Explicit pi fails before any lease or spawn; legacy follows existing dispatch.
-  throwIfPiHarness(config.harnessMode ?? "legacy");
+  // Pi mode dispatches to the Pi executors below; legacy follows the existing
+  // dispatch. `runReviewJob` itself stays legacy-only (it throws on pi).
+  const isPi = (config.harnessMode ?? "legacy") === "pi";
   const nowMs = extras.now?.() ?? Date.now();
   // Hydrate process-local runner cooldowns from the persisted copy so a
   // restart does not resurrect a dead runner. Expired entries are pruned
@@ -1164,12 +1206,14 @@ export async function processEngineTick(
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
-  // Fenced attempt: never resume a live session in a different harness mode.
-  // Old rows (no stamp) read as legacy for compatibility.
+  // Fenced attempt: a session recorded under one harness mode is never
+  // resumed under the other. Old rows (no stamp) read as legacy for
+  // compatibility and run fresh in either mode. On a mismatch the row runs a
+  // fresh attempt in the current mode and the new save overwrites the other
+  // mode's reference; the lease is kept so the tick never loops.
   if (!harnessModeMatches((row as { harnessMode?: unknown }).harnessMode, config.harnessMode ?? "legacy")) {
-    await store.releaseLease(row.id, leasedBy).catch(() => undefined);
-    throw new Error(
-      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt required, never resuming a live session`
+    logger(
+      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt, never resuming the other mode's session`
     );
   }
   if (extras.abortSignal?.aborted) {
@@ -1324,7 +1368,39 @@ export async function processEngineTick(
           }
         }),
     };
-    let result = await runReviewJob(effectiveConfig, job, api, logger, runExtras);
+    let result = isPi
+      ? await (async () => {
+          // Pi path: the same lease, role policy, verdict contract, retries,
+          // quota holds, and publication as legacy; only the coding loop is
+          // Pi. The modules load dynamically so legacy never imports Pi.
+          const pi = await import("./pi_jobs.ts");
+          return pi.runPiReviewJob({
+            owner: row.owner,
+            repo: row.repo,
+            prNumber: row.prNumber,
+            headSha: row.headSha,
+            config: {
+              workdir: effectiveConfig.workdir,
+              home: effectiveConfig.home,
+              giteaUrl: effectiveConfig.giteaUrl,
+              giteaToken: effectiveConfig.giteaToken,
+              botUsername: effectiveConfig.botUsername,
+              blockingQuestionAuthors: effectiveConfig.blockingQuestionAuthors,
+              automergeRepos: effectiveConfig.automergeRepos,
+              trustedSenderLogins: effectiveConfig.trustedSenderLogins,
+              opencodeTimeoutMs: effectiveConfig.opencodeTimeoutMs,
+            },
+            api,
+            logger,
+            deployment: extras.piDeployment ?? pi.loadPiDeployment(),
+            prevError: row.error ?? extras.previousError ?? null,
+            persist: runExtras.persistResult,
+            abortSignal: abort.signal,
+            ...(extras.ciRelistDelayMs !== undefined ? { ciRelistDelayMs: extras.ciRelistDelayMs } : {}),
+            ...(extras.piSeams ? { seams: extras.piSeams } : {}),
+          });
+        })()
+      : await runReviewJob(effectiveConfig, job, api, logger, runExtras);
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
       stopHeartbeat();
@@ -1436,7 +1512,19 @@ export async function processEngineTick(
       // chain here (which can include runners excluded from this job) would
       // defeat that decision with an immediate retry that loops every tick.
       try {
-        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
+        // A Pi quota hold carries its attempt stamp through the requeue (the
+        // tick path never calls `saveResult`, which would block the requeue).
+        // Legacy quota errors carry no stamp and keep the existing behavior.
+        const piAttempt = (err as { piAttempt?: import("./pi_attempt.ts").PiAttemptStamp }).piAttempt;
+        const ok = await store.requeueInfra(
+          row.id,
+          leasedBy,
+          err.backoffMs,
+          err.marker,
+          undefined,
+          failedRunner,
+          piAttempt ? { harnessMode: "pi", piAttempt } : undefined
+        );
         const quotaUntil = Date.now() + err.backoffMs;
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(quotaUntil);
         else await store.recordRoleQuotaWait("engine", quotaUntil);
