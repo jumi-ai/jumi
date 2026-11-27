@@ -64,6 +64,8 @@ export const PI_REVIEW_SYSTEM_PREAMBLE =
 
 export const PI_REVIEW_TOOL_NAMES = [
   "jumi_add_finding",
+  "jumi_update_finding",
+  "jumi_remove_finding",
   "jumi_set_verdict",
   "jumi_list_findings",
   "jumi_previous_findings",
@@ -372,13 +374,22 @@ export function createPiReviewCustomTools(
     {
       name: "jumi_add_finding",
       label: "Add finding",
-      description: "Record one review finding. Path must be a changed file; line must be in the diff hunks.",
+      description:
+        "Record one review finding. Path must be a changed file; line must be in the diff hunks. Use needs_maintainer for maintainer-only questions (question only); use proof {location, command, excerpt} for bug/risk proof.",
       parameters: Type.Object({
         path: Type.Optional(Type.String()),
         line: Type.Optional(Type.Number()),
         severity: Type.String(),
         title: Type.Optional(Type.String()),
         body: Type.Optional(Type.String()),
+        needs_maintainer: Type.Optional(Type.Boolean()),
+        proof: Type.Optional(
+          Type.Object({
+            location: Type.Optional(Type.String()),
+            command: Type.Optional(Type.String()),
+            excerpt: Type.Optional(Type.String()),
+          })
+        ),
       }),
       execute: async (_id: string, params: Record<string, unknown>) => {
         const result = store.addFinding({
@@ -387,6 +398,8 @@ export function createPiReviewCustomTools(
           severity: params.severity as string,
           ...(params.title !== undefined ? { title: params.title as string } : {}),
           ...(params.body !== undefined ? { body: params.body as string } : {}),
+          ...(params.needs_maintainer !== undefined ? { needs_maintainer: params.needs_maintainer } : {}),
+          ...(params.proof !== undefined ? { proof: params.proof } : {}),
         });
         const text = result.ok ? JSON.stringify({ id: result.id }) : result.error;
         onCall?.({ name: "jumi_add_finding", args: params, ok: result.ok, text });
@@ -396,12 +409,65 @@ export function createPiReviewCustomTools(
       },
     },
     {
+      name: "jumi_update_finding",
+      label: "Update finding",
+      description:
+        "Update a recorded finding by id. needs_maintainer and proof follow the add_finding rules; omitting them preserves the previous value.",
+      parameters: Type.Object({
+        id: Type.String(),
+        path: Type.Optional(Type.String()),
+        line: Type.Optional(Type.Number()),
+        severity: Type.Optional(Type.String()),
+        title: Type.Optional(Type.String()),
+        body: Type.Optional(Type.String()),
+        needs_maintainer: Type.Optional(Type.Boolean()),
+        proof: Type.Optional(
+          Type.Object({
+            location: Type.Optional(Type.String()),
+            command: Type.Optional(Type.String()),
+            excerpt: Type.Optional(Type.String()),
+          })
+        ),
+      }),
+      execute: async (_id: string, params: Record<string, unknown>) => {
+        const result = store.updateFinding({ ...(params as { id: unknown }) });
+        const text = result.ok ? JSON.stringify({ updated: true }) : result.error;
+        onCall?.({ name: "jumi_update_finding", args: params, ok: result.ok, text });
+        return result.ok
+          ? { content: [{ type: "text", text }], details: {} }
+          : { content: [{ type: "text", text }], details: {}, isError: true };
+      },
+    },
+    {
+      name: "jumi_remove_finding",
+      label: "Remove finding",
+      description: "Remove a recorded finding by id.",
+      parameters: Type.Object({ id: Type.String() }),
+      execute: async (_id: string, params: Record<string, unknown>) => {
+        const result = store.removeFinding({ ...(params as { id: unknown }) });
+        const text = result.ok ? JSON.stringify({ removed: true }) : result.error;
+        onCall?.({ name: "jumi_remove_finding", args: params, ok: result.ok, text });
+        return result.ok
+          ? { content: [{ type: "text", text }], details: {} }
+          : { content: [{ type: "text", text }], details: {}, isError: true };
+      },
+    },
+    {
       name: "jumi_set_verdict",
       label: "Set verdict",
-      description: "Record the review verdict. Success with an open bug/risk is rejected.",
-      parameters: Type.Object({ state: Type.String(), reason: Type.Optional(Type.String()) }),
+      description:
+        "Record the review verdict. Success with an open bug/risk is rejected. Use incomplete (failure only) for could-not-finish without consulting the reason text.",
+      parameters: Type.Object({
+        state: Type.String(),
+        reason: Type.Optional(Type.String()),
+        incomplete: Type.Optional(Type.String()),
+      }),
       execute: async (_id: string, params: Record<string, unknown>) => {
-        const result = store.setVerdict({ state: params.state, reason: params.reason });
+        const result = store.setVerdict({
+          state: params.state,
+          reason: params.reason,
+          incomplete: params.incomplete,
+        });
         const text = result.ok ? JSON.stringify({ recorded: true }) : result.error;
         onCall?.({ name: "jumi_set_verdict", args: params, ok: result.ok, text });
         return result.ok
