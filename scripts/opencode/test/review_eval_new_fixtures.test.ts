@@ -65,10 +65,10 @@ const NEW_FIXTURES: Array<{
   {
     name: "path-traversal",
     file: "download.js",
-    line: 3,
+    line: 4,
     good: {
       path: "download.js",
-      line: 3,
+      line: 4,
       severity: "bug",
       title: 'Path traversal: filePath("/srv/files", "../secret") escapes base',
       body:
@@ -86,7 +86,7 @@ const NEW_FIXTURES: Array<{
         "Proof: outside the base on this head.",
     },
     vaguePath: "download.js",
-    vagueLine: 3,
+    vagueLine: 4,
   },
   {
     name: "missing-await",

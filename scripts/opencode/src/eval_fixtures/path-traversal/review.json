@@ -1,8 +1,8 @@
 {
   "defective": {
-    "anchors": [{ "path": "download.js", "start": 3, "end": 3 }],
+    "anchors": [{ "path": "download.js", "start": 4, "end": 4 }],
     "mustContain": ["../secret", "outside"],
-    "note": "The traversal is on download.js:3. A blocking finding on line 3 counts; the text must name the concrete failure (../secret resolving outside the base), not only \"check this\"."
+    "note": "The traversal is on download.js:4. A blocking finding on line 4 counts; the text must name the concrete failure (../secret resolving outside the base), not only \"check this\"."
   },
   "repaired": {
     "forbiddenSeverities": ["bug", "risk"]
