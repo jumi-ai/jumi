@@ -64,6 +64,11 @@ setup:
   timeout: 5
   on_failure: fail
   kinds: [review]
+verify:
+  run: bun run lint
+  timeout: 5
+  attempts: 1
+  kinds: [implement, followup]
 `;
 
 // Load key order for an empty file: `early` entries first, then the rest in
@@ -131,6 +136,7 @@ const expectedFullKeys = [
   "takeoverAuthors",
   "timeouts",
   "trustedSenders",
+  "verify",
   "workerReviewRules",
   "maintainerQuestionsHoldMerge",
   "suggestionsHoldMerge",
@@ -191,6 +197,7 @@ const invalidPerKey: Array<[string, string, string]> = [
     '"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"',
   ],
   ["setup", "setup: {}\n", '"setup.run" must be a non-blank string'],
+  ["verify", "verify: {}\n", '"verify.run" must be a non-blank string'],
   ["strict_branch_refresh", 'strict_branch_refresh: "yes"\n', '"strict_branch_refresh" must be a boolean'],
   ["review_carry", 'review_carry: "yes"\n', '"review_carry" must be a boolean'],
   ["retitle_adopted_prs", 'retitle_adopted_prs: "yes"\n', '"retitle_adopted_prs" must be a boolean'],
@@ -204,7 +211,7 @@ describe("repo_settings registry", () => {
   });
 
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(37);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(38);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);

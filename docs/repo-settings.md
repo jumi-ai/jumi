@@ -39,6 +39,7 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `branch_prefix` | non-blank string | `jumi` | Branch prefix for issue branches: `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`; no leading or trailing slash, no `..`. The full branch must pass `git check-ref-format`, and prefixes colliding with Jumi's internal refs (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are invalid. Branch recognition accepts the configured prefix and keeps accepting `jumi/issue-<N>-`, so PRs opened before a prefix change keep working. A branch name alone never makes a PR count as Jumi's: the existing author and identity checks still apply. Exactly one spelling: `branch-prefix` or `branchPrefix` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker branches keep today's format) |
 | `ci_gate` | mapping (may be empty) | `{}` (waits for required checks) | Chooses which CI checks gate reviews (see the `ci_gate.wait` row). Read from the default branch like every other key; a non-mapping value makes the whole file invalid | No deployer setting |
 | `ci_gate.wait` | `"all"` \| `"required"` \| `"none"` | `"required"` | `required` waits only for the base branch's required checks, falling back to every check when protection can't be read or names no required check besides `jumi/opencode-review`; `all` waits for every non-Jumi check whatever branch protection says (the pre-#502 behaviour, never resolves the required set); `none` never waits for pending or absent CI — the router gate dispatches at once and the review job runs, listing pending checks as still running so the reviewer never reads them as green. A red check fails the review and runs the CI follow-up in every mode. `ci_gate` must be a mapping, `wait` one of the three strings; unknown sub-keys and dash/camel spellings (`ci-gate`, `ciGate`) are rejected with the usual "did you mean" error, and any invalid value makes the whole file invalid | No deployer setting |
+
 | `closing_keyword` | `"closes"` \| `"refs"` | `"closes"` | `closes` keeps today's `Fixes #N` fallback body; `refs` uses a non-closing `Refs #N` fallback and asks the worker for a non-closing reference. When set to `refs`, a model body that uses a closing keyword for the worked issue is rewritten to `Refs #N`, and the issue stays open after merge. A blocker issue then stays unresolved until someone closes it. Exactly one spelling: `closing-keyword` or `closingKeyword` is an unknown key rejected with the usual "did you mean" error. A blank, non-string, or other value makes the whole file invalid | No deployer setting. Read from the default branch only |
 | `commit_message` | non-blank string template | `Implement #{issue}: {title}` | Commit message template for the commit Jumi's parent creates. The only placeholders are `{title}` and `{issue}`; any other `{...}` or stray brace makes the whole file invalid. When set, the worker prompt also names the template as the repository's commit message convention. Exactly one spelling: `commit-message` or `commitMessage` is an unknown key rejected with the usual "did you mean" error | No deployer setting. Read from the default branch only; forge issues only |
 | `conflict_regenerate` | list of `{file, run}` mappings | no repository entries (only the built-in helm locks regenerate) | Names lockfiles the conflict job rebuilds with a shell command instead of handing to the model: `file` is a lock basename (no slash, matched the same way as `Chart.lock`/`requirements.lock`), `run` is the shell command run in the directory that contains the conflicted file. The entry comes from the default branch only, never the pull request head, so a pull cannot add a command. The command runs in the worker sandbox with the same sanitized child environment the conflict model run gets (no forge token, same network policy), bounded by 10 minutes; when it fails, times out, or leaves the file conflicted or missing, the file is logged and handed to the model. Each mapping has exactly the keys `file` and `run`, both non-blank strings; a duplicate basename or a basename the built-ins own (`Chart.lock`, `requirements.lock`) makes the whole file invalid | No deployer setting |
@@ -76,6 +77,11 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `timeouts.implement` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` (worker default is 4h) | How long first implementations may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS`, same rule as `review`. Each kind has its own deployer maximum |
 | `timeouts.review` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` | How long reviews may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout, so a repository can only shorten out of the box); a value above the maximum runs with the maximum |
 | `trusted_senders` | list of logins | deployment list (`TRUSTED_SENDER_LOGINS`) or write access | Repository version of `TRUSTED_SENDER_LOGINS`. Applies everywhere that check applies: starting implement (assign / pickup label), steering follow-up, the `takeover_authors` admission check, and admitting the auto-merge label. When the deployment sets `TRUSTED_SENDER_LOGINS`, the effective list is the intersection: a repository can narrow it, never widen it. When the deployment leaves it unset, the repository list is the list (listing is the admit, same as the env list today, no forge permission lookup). Neither set keeps the write-access fallback. Combining two otherwise valid policies can leave no eligible senders: that explicitly empty effective list (`[]`, distinct from an absent policy) denies everyone without a forge lookup; only a truly unconfigured policy (or only blank deployment entries) keeps the write-access fallback. Logins match whole, case-insensitive; a blank or non-string entry makes the whole file invalid. An explicitly empty list is invalid (use `mode: off` or `mode: review-only` to stop work), the same reasoning as `allowed_runners`. An unreadable settings file falls back to the deployment behaviour, but an invalid file never widens access | Intersection (ceiling): when `TRUSTED_SENDER_LOGINS` is set, the effective list is the intersection; when unset, the repository list alone admits |
+| `verify` | mapping (see the four rows below) | absent (no verify) | Runs the repository's fast checks after the worker exits with commits and before the push, for `implement` and `follow-up` jobs only. Reviews never run verify; they read its `Verify:` line in the PR body. Read from the default branch only; a pull request cannot change its own verify. `run` is required; `timeout`, `attempts`, and `kinds` are optional. A code failure resumes the same runner session with the exact command and the redacted output tail; timeouts and infrastructure errors (missing command, spawn failure) never resume. Attempts are bounded; the job pushes anyway after the last one. Unknown sub-keys, a non-mapping `verify`, a missing or blank `run`, a non-integer or below-1 `timeout`, a negative or non-integer `attempts`, or a blank or unknown `kinds` entry makes the whole file invalid. Exactly one spelling per key; dash and camel spellings are unknown keys rejected with "did you mean" | Kill switch `JUMI_VERIFY_ENABLED` (unset defaults to on; `false` runs no verify); ceilings `JUMI_VERIFY_TIMEOUT_MAX_MS` and `JUMI_VERIFY_ATTEMPTS_MAX` (below) |
+| `verify.run` | non-blank string | — (required when `verify` is present) | Shell script run from the worktree root with `sh -e`, after commits and before the push. Runs in the same credential-free sandbox as `setup`: no forge or provider credentials. The worker prompt names this command so the worker can run the same thing first | No deployer setting |
+| `verify.timeout` | integer minutes, at least 1 | `10` | How long the verify command may run. A timeout never resumes the session; the job pushes with `Verify: not run (timeout ...)` in the PR body | Ceiling: `JUMI_VERIFY_TIMEOUT_MAX_MS` (unset defaults to 10 minutes, so a repository can only shorten out of the box); a value above the maximum applies as the maximum |
+| `verify.attempts` | non-negative integer (`0` is valid and means no resume) | `2` | How many times a code failure resumes the same runner session. A verify failure never counts as a runner failure and never uses the hop budget | Ceiling: `JUMI_VERIFY_ATTEMPTS_MAX` (unset defaults to 2; a higher file value applies as the maximum); `0` disables resumes |
+| `verify.kinds` | list of `"implement"`, `"followup"` | both | Which worker kinds run verify. Can only narrow; reviews never run verify. A blank or unknown entry makes the whole file invalid | No deployer setting |
 | `worker_review_rules` | boolean | `true` (on) | Shares the base-branch `REVIEW.md` rules with implement and follow-up workers: the severity bar and pre-write questions plus the sections that apply (implement gets repo-wide plus all path sections, follow-up gets the sections matching the PR's changed files; the reviewer-only `Not a finding` section is left out). `false` keeps workers on today's prompts. Exactly one spelling: `worker-review-rules` or `workerReviewRules` is an unknown key rejected with the usual "did you mean" error. A non-boolean value makes the whole file invalid | No deployer setting. Read from the default branch only |
 
 ## Complete example
@@ -157,6 +163,12 @@ setup: # preparation command run once per job before the first engine spawn
   timeout: 5 # whole minutes, default 10; ceiling: SETUP_TIMEOUT_MAX_MS
   on_failure: continue # continue (default) | fail
   kinds: [review, implement, followup, conflict] # default: all four
+
+verify: # fast checks run after the worker with commits and before the push
+  run: bun run lint:repo && bun run knip # one command, no tiers
+  timeout: 5 # whole minutes, default 10; ceiling: JUMI_VERIFY_TIMEOUT_MAX_MS
+  attempts: 2 # resumes on code failure, default 2; ceiling: JUMI_VERIFY_ATTEMPTS_MAX
+  kinds: [implement, followup] # default: both; reviews never run verify
 
 strict_branch_refresh: false # Gitea-only fallback when branch protection is unreadable (default false); GitHub ignores it
 review_carry: true # false turns off green-review carry across clean merges (default carries)
@@ -254,6 +266,17 @@ setup:
   kinds: [review, implement, followup, conflict]
 ```
 
+Run fast checks before every push (lint, typecheck, knip — never Postgres or
+image builds):
+
+```yaml
+verify:
+  run: bun run lint:repo && bun run knip
+  timeout: 5
+  attempts: 2
+  kinds: [implement, followup]
+```
+
 ## What happens when the file is missing, invalid, or unreadable
 
 "Unreadable" is a failed read (for example a forge error); the parent logs it. Missing
@@ -289,6 +312,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Worker review rules (`worker_review_rules`) | Share base-branch `REVIEW.md` rules with workers when the repo has one (nothing new when it does not) | Share when the file is valid; an invalid file starts no runner job, so nothing is shared (see Runners row) | Share (fail-open, logged); nothing new when the repo has no `REVIEW.md` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 | Setup (`setup`) | No setup: the job runs as today, with no extra log line and no prompt change | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No setup, logged; the job otherwise runs as today |
+| Verify (`verify`) | No verify: the job pushes as today, with no `Verify:` line | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No verify, logged; the job otherwise pushes as today |
 
 Two related guards: a pull request that changes `.jumi.yml` never auto-merges through
 Jumi (a schedule Jumi set earlier is cancelled when a Jumi push brings the file into the
@@ -314,6 +338,14 @@ never applied.
   instead of falling back), but egress is
   open. Prefer commands that only invoke installed tools; don't point
   `run` at a script a contributor can rewrite unless that's acceptable.
+- Before you set `verify.run`: the same trust rule as `setup.run` applies —
+  the command string comes from the default branch but runs against the
+  pull-request head in the same credential-free sandbox (no forge or provider
+  credentials), so anything it calls from the tree is pull-request code.
+  Keep it to fast static checks (lint, typecheck, knip); never point it at
+  suites that need Postgres, containers, or the network beyond what `setup`
+  allows. A code failure resumes the same runner session, so the command must
+  be one the worker can fix without weakening the check.
 - Every change to `.jumi.yml` needs a person's merge: a pull request that touches the
   file never auto-merges through Jumi, and turning auto-merge on (or changing any
   later setting) only takes effect once a person has merged it to the default branch.

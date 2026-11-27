@@ -44,6 +44,8 @@ describe("repo-settings docs", () => {
     expect(parsed.settings.reviewDrafts).toBe(true);
     expect(parsed.settings.workerReviewRules).toBe(true);
     expect(parsed.settings.maxSuggestions).toBe(2);
+    expect(parsed.settings.verify?.run).toContain("knip");
+    expect(parsed.settings.verify?.kinds).toEqual(["implement", "followup"]);
     expect(parsed.settings.reviewBudget.maxFiles).toBeDefined();
     expect(parsed.settings.reviewBudget.maxPatchBytes).toBeDefined();
     for (const key of TIMEOUT_KEYS) {

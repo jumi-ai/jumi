@@ -54,6 +54,7 @@ import { suggestionsHoldMergeSetting } from "./repo_settings_keys/suggestions_ho
 import { takeoverAuthorsSetting } from "./repo_settings_keys/takeover_authors.ts";
 import { timeoutsSetting } from "./repo_settings_keys/timeouts.ts";
 import { trustedSendersSetting } from "./repo_settings_keys/trusted_senders.ts";
+import { verifySetting } from "./repo_settings_keys/verify.ts";
 import { workerReviewRulesSetting } from "./repo_settings_keys/worker_review_rules.ts";
 import {
   type CiGateWait,
@@ -174,6 +175,7 @@ export const REPO_SETTINGS_REGISTRY = [
   takeoverAuthorsSetting,
   timeoutsSetting,
   trustedSendersSetting,
+  verifySetting,
   workerReviewRulesSetting,
 ];
 

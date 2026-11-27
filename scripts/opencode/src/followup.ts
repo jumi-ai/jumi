@@ -128,6 +128,15 @@ import {
   type SettingsSnapshot,
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
+import {
+  DEFAULT_VERIFY_ATTEMPTS,
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  effectiveVerifyAttempts,
+  effectiveVerifyTimeoutMs,
+  runVerifyToPush,
+  verifyForKind,
+  verifyTaskNote,
+} from "./repo_verify.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import { persistFindingResponses } from "./review_findings.ts";
 import { inlinesForReviewGroup } from "./review_groups.ts";
@@ -2073,6 +2082,20 @@ export async function implementFollowUp(
   const effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpenUpFront);
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
+  const followupVerifyEnabled = (opts as { verifyEnabled?: boolean }).verifyEnabled ?? true;
+  const followupVerify = followupVerifyEnabled ? verifyForKind(failOpenUpFront, "follow-up") : undefined;
+  const followupVerifyTimeoutMs = followupVerify
+    ? effectiveVerifyTimeoutMs(
+        followupVerify,
+        (opts as { verifyTimeoutMaxMs?: number }).verifyTimeoutMaxMs ?? DEFAULT_VERIFY_TIMEOUT_MS
+      )
+    : 0;
+  const followupVerifyAttempts = followupVerify
+    ? effectiveVerifyAttempts(
+        followupVerify,
+        (opts as { verifyAttemptsMax?: number }).verifyAttemptsMax ?? DEFAULT_VERIFY_ATTEMPTS
+      )
+    : 0;
   const claimed = await beginClaimedWorktree({
     ...opts,
     fallbackEngine: registeredEngine,
@@ -3175,10 +3198,11 @@ export async function implementFollowUp(
         }
 
         throwIfAborted(opts.abortSignal);
-        const followupTaskMarkdown = withTaskBlocks(buildTaskMarkdown(taskJob), {
-          ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
-          ...(followupReviewRules ? { workerReviewRules: followupReviewRules } : {}),
-        });
+        const followupTaskMarkdown =
+          withTaskBlocks(buildTaskMarkdown(taskJob), {
+            ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
+            ...(followupReviewRules ? { workerReviewRules: followupReviewRules } : {}),
+          }) + (followupVerify ? `\n${verifyTaskNote(followupVerify)}\n` : "");
         await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
         // Parent-staged inputs for the follow-up child: the issue's attachments
         // as well as any on the PR. Parent credentials only; the child has no
@@ -3343,6 +3367,7 @@ export async function implementFollowUp(
 
         const runEngine = async (
           label: string,
+          prompt?: string,
           extra?: { continueSession?: boolean }
         ): Promise<{ status: "skipped"; reason: string } | undefined> => {
           throwIfAborted(opts.abortSignal);
@@ -3371,6 +3396,7 @@ export async function implementFollowUp(
               jobId: opts.jobId ?? opts.job.delivery,
             },
             workerMcp: workerMcpRef,
+            ...(prompt != null ? { prompt } : {}),
             ...(extra?.continueSession ? { continueSession: true } : {}),
             logger: log,
             abortSignal: opts.abortSignal,
@@ -3465,6 +3491,7 @@ export async function implementFollowUp(
               }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
+                undefined,
                 { continueSession: true }
               );
               if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
@@ -3704,6 +3731,32 @@ export async function implementFollowUp(
             return { status: "skipped", reason };
           }
         }
+        let pushVerifyNote: string | undefined;
+        if (followupVerify) {
+          const verified = await runVerifyToPush({
+            workdir: worktree,
+            verify: followupVerify,
+            timeoutMs: followupVerifyTimeoutMs,
+            attempts: followupVerifyAttempts,
+            log,
+            runScript: (opts as { verifyRunScript?: import("./repo_verify.ts").RepoVerifyRunScript }).verifyRunScript,
+            resume: async (prompt) => {
+              const resumed = await runEngine(
+                `Re-running OpenCode after verify failure for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
+                prompt,
+                { continueSession: true }
+              );
+              return resumed ?? undefined;
+            },
+            recommit: async () => {
+              const next = await worktreePorcelain(loop);
+              await commitIfDirty(loop, next, `Address review on #${pr.number}: ${gate.snapshot.title}`);
+            },
+          });
+          if (verified.quotaSkip) return verified.quotaSkip;
+          pushVerifyNote = verified.note;
+          log(`verify ${verified.status}: ${pushVerifyNote}`);
+        }
         try {
           await pushClaimedBranchWithAutomergeRestore(loop, branch, {
             api: opts.api,
@@ -3734,7 +3787,21 @@ export async function implementFollowUp(
         throwIfAborted(opts.abortSignal);
         await persistConflictAttempt(mergeResult);
 
-        await refreshPullRequestBody(prFileContents, prRemaining);
+        const bodyForRefresh =
+          pushVerifyNote != null && prFileContents ? `${prFileContents}\n\n${pushVerifyNote}\n` : prFileContents;
+        await refreshPullRequestBody(bodyForRefresh, prRemaining);
+        if (pushVerifyNote != null && !prFileContents) {
+          try {
+            const live = await opts.api.getPR(owner, repo, pr.number);
+            const body = replaceJumiPrBodyRegion(
+              live.body,
+              `${jumiPrBodyRegion(live.body) ?? live.body ?? ""}\n\n${pushVerifyNote}\n`.trim()
+            );
+            if (body !== live.body) await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
+          } catch (err) {
+            log(`PR body not refreshed with verify note: ${errorMessage(err)}`);
+          }
+        }
         await refreshPullRequestTitle(workerStore.getPrTitle());
 
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();

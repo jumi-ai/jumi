@@ -2,6 +2,7 @@ import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile, SECRETS_DIR_ENV } fr
 import type { ForgeKind } from "./forge.ts";
 import { type HarnessMode, parseHarnessMode } from "./harness_mode.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
+import { DEFAULT_VERIFY_ATTEMPTS, DEFAULT_VERIFY_TIMEOUT_MS } from "./repo_verify.ts";
 import {
   type IndependentReviewConfig,
   loadRunnersCatalog,
@@ -68,6 +69,12 @@ export interface WorkerConfig {
   conflictTimeoutMaxMs: number;
   /** Deployer maximum for repository `setup` runs. Unset defaults to 10 minutes, so a repository can only shorten. */
   setupTimeoutMaxMs: number;
+  /** Global verify kill switch. Unset defaults to on; `false` disables every verify run. */
+  verifyEnabled: boolean;
+  /** Deployer maximum for repository `verify` runs. Unset defaults to 10 minutes, so a repository can only shorten. */
+  verifyTimeoutMaxMs: number;
+  /** Deployer ceiling for repository `verify.attempts`. Unset defaults to 2 resumes. */
+  verifyAttemptsMax: number;
   maxFollowupRounds: number;
   maxConflictRounds: number;
   databaseUrl?: string;
@@ -97,6 +104,30 @@ function automergeBit(value: string | undefined, fallback = true): boolean {
   if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
   throw new Error(`Invalid boolean for JUMI_AUTOMERGE_ENABLED: ${value}`);
+}
+
+function verifyBit(value: string | undefined, fallback = true): boolean {
+  if (value === undefined || value === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  throw new Error(`Invalid boolean for JUMI_VERIFY_ENABLED: ${value}`);
+}
+
+function verifyTimeoutMaxMs(resolved: Env): number {
+  const raw = resolved.JUMI_VERIFY_TIMEOUT_MAX_MS?.trim();
+  if (!raw) return DEFAULT_VERIFY_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_VERIFY_TIMEOUT_MS;
+  return parsed;
+}
+
+function verifyAttemptsMax(resolved: Env): number {
+  const raw = resolved.JUMI_VERIFY_ATTEMPTS_MAX?.trim();
+  if (!raw) return DEFAULT_VERIFY_ATTEMPTS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_VERIFY_ATTEMPTS;
+  return parsed;
 }
 
 export function automergeDeprecationWarning(env: Record<string, string | undefined> = process.env): string | undefined {
@@ -213,6 +244,9 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     followupTimeoutMaxMs: intEnv(resolved, "FOLLOWUP_TIMEOUT_MAX_MS", followupTimeoutMs),
     conflictTimeoutMaxMs: intEnv(resolved, "CONFLICT_TIMEOUT_MAX_MS", conflictTimeoutMs),
     setupTimeoutMaxMs,
+    verifyEnabled: verifyBit(resolved.JUMI_VERIFY_ENABLED, true),
+    verifyTimeoutMaxMs: verifyTimeoutMaxMs(resolved),
+    verifyAttemptsMax: verifyAttemptsMax(resolved),
     maxFollowupRounds: intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3),
     maxConflictRounds: intEnv(resolved, "MAX_CONFLICT_ROUNDS", 3),
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
