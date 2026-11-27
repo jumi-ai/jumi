@@ -441,6 +441,16 @@ verify_reviewer_runtime() {
     echo "offline Pi/legacy probe failed against the installed components" >&2
     exit 1
   fi
+  # Pi Go wire probe (#986): the real Pi SDK provider and Jumi's Go transport
+  # against an intercepted endpoint speaking the Go wire format, using the
+  # production session construction. Fails when a jumi_* tool is missing from
+  # any role/intent, renamed, or stripped of its schema/description.
+  if ! buildah run --user 10001:10001 --env HOME=/tmp/probe-home --env TMPDIR=/tmp "${ctr}" -- \
+    sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_go_wire_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Pi Go wire probe failed against the installed components" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "installed-tools manifest missing in reviewer image" >&2
