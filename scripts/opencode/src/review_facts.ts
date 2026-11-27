@@ -108,6 +108,8 @@ export interface ReviewFindingFact {
   identity: string | undefined;
   /** Live forge comment id for inline placements; undefined for body findings. */
   inlineId?: number | undefined;
+  /** Parent-minted finding key from the verified block (`null` when unkeyed or text source). */
+  key: string | null;
 }
 
 /**
@@ -538,6 +540,7 @@ export function buildReviewFacts(input: ReviewFactsInput): ReviewFacts {
       line: finding.line,
       hasProof: hasFindingProof(finding.body),
       identity: identityForBodyFinding(finding.path, finding.line, finding.body),
+      key: null,
     });
   }
   for (const inline of input.inlines ?? []) {
@@ -573,6 +576,7 @@ export function buildReviewFacts(input: ReviewFactsInput): ReviewFacts {
       hasProof: hasFindingProof(inline.body ?? ""),
       identity: identityForInline(inline.path, inline.new_position, inline.body),
       ...(typeof inline.id === "number" ? { inlineId: inline.id } : {}),
+      key: null,
     });
   }
 
@@ -1018,6 +1022,7 @@ function buildTypedFacts(input: ResolveReviewFactsInput, payload: MetaPayload): 
       line,
       hasProof: entry.proof === 1,
       identity: typedIdentityForBody(path, line, entry.s, parsedBody),
+      key: entry.k,
     });
   }
 
@@ -1046,6 +1051,7 @@ function buildTypedFacts(input: ResolveReviewFactsInput, payload: MetaPayload): 
         hasProof: entry.proof === 1,
         identity: typedIdentityForInline(path, line, entry.s, inline.body ?? ""),
         ...(typeof inline.id === "number" ? { inlineId: inline.id } : {}),
+        key: entry.k,
       });
       if (!isOpenJumiInline(inline, input.botUsername)) continue;
       if (severity === "bug") inlineBugCount++;
@@ -1088,6 +1094,7 @@ function buildTypedFacts(input: ResolveReviewFactsInput, payload: MetaPayload): 
       hasProof: hasFindingProof(inline.body ?? ""),
       identity: identityForInline(inline.path, inline.new_position, inline.body),
       ...(typeof inline.id === "number" ? { inlineId: inline.id } : {}),
+      key: null,
     });
     if (!isOpenJumiInline(inline, input.botUsername)) continue;
     if (cls.bugLike) inlineBugCount++;

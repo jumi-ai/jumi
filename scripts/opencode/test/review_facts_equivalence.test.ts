@@ -1154,6 +1154,7 @@ function fakeFacts(overrides: Partial<ReviewFacts> = {}): ReviewFacts {
         line: 3,
         hasProof: false,
         identity: undefined,
+        key: null,
       },
     ],
     findingIdentities: [],
@@ -1194,6 +1195,7 @@ describe("review facts fake producer (no body text)", () => {
           line: 3,
           hasProof: false,
           identity: undefined,
+          key: null,
         },
       ],
     });

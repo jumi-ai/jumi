@@ -455,8 +455,17 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
 
   const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
   const jumiInlinesForIdentity = unresolvedJumiInlines(items);
+  const extraReviewBodiesForIdentity = [
+    ...items.jumiReviews.map((review) => review.body ?? review.content ?? ""),
+    ...items.jumiStickies.map((comment) => comment.body ?? ""),
+  ];
   const findingIdentityHash = hasFeedback
-    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity, snapshotTrust)
+    ? fingerprintFindingIdentityFromParts(
+        reviewBodyForIdentity,
+        jumiInlinesForIdentity,
+        snapshotTrust,
+        extraReviewBodiesForIdentity
+      )
     : undefined;
 
   const getPrDiffHash = memoize(async (): Promise<string | undefined> => {
