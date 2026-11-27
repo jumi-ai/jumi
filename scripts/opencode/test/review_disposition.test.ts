@@ -288,9 +288,7 @@ describe("buildKeyedPriors", () => {
       }
     );
     const git = fakeGit({
-      "cat-file": () => {
-        throw new Error("missing");
-      },
+      "ls-tree": () => "",
     });
     const out = await buildKeyedPriors({
       comments: [makeComment({ id: 1, body: signed })],
@@ -308,6 +306,39 @@ describe("buildKeyedPriors", () => {
     });
     expect(out.verified).toBe(true);
     expect(out.keyed[0]?.autoWithdrawn).toBe(true);
+  });
+
+  test("existence lookup failure falls back to unverified text", async () => {
+    const body = stickyBody("src/a.ts:3: 🔴 Present bug.", FAIL_TRAILER, HEAD);
+    const signed = signSticky(
+      body,
+      [{ k: "k_job_1_1", s: "bug", p: "body", path: "src/a.ts", line: 3, proof: 0, o: 1 }],
+      {
+        head: HEAD,
+      }
+    );
+    const git = fakeGit({
+      "ls-tree": () => {
+        throw new Error("workspace git failure");
+      },
+    });
+    const out = await buildKeyedPriors({
+      comments: [makeComment({ id: 1, body: signed })],
+      reviews: [],
+      inlines: [],
+      botUsername: BOT,
+      marker: MARKER,
+      trust: { webhookSecret: SECRET, forgeIdentity: IDENTITY, owner: OWNER, repo: REPO, prNumber: PR },
+      currentHeadSha: HEAD,
+      prFilenames: new Set(["src/a.ts"]),
+      excludedFilenames: new Set(),
+      git,
+      cwd: "/tmp",
+      env: {},
+    });
+    expect(out.verified).toBe(false);
+    expect(out.keyed).toHaveLength(0);
+    expect(out.unkeyed.length).toBeGreaterThan(0);
   });
 });
 

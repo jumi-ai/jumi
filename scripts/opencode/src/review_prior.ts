@@ -344,9 +344,10 @@ export async function buildKeyedPriors(opts: {
       } else {
         let exists = true;
         try {
-          await opts.git(["cat-file", "-e", `HEAD:${p}`], { cwd: opts.cwd, env: opts.env });
+          const listing = await opts.git(["ls-tree", "HEAD", "--", p], { cwd: opts.cwd, env: opts.env });
+          exists = listing.trim() !== "";
         } catch {
-          exists = false;
+          return { keyed: [], unkeyed: fallbackLines, verified: false, previousSha: latest.sha };
         }
         if (!exists) {
           autoWithdrawn = true;
