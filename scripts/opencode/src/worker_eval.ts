@@ -23,13 +23,30 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type Engine, EngineFailedError } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
+import {
+  type EvalHarness,
+  ensureEvalRoots,
+  evalImageDigest,
+  evalPublicRepoVisibility,
+  evalUsageOrNull,
+  loadEvalLegacyRunners,
+  loadEvalPiDeployment,
+  parseEvalHarness,
+  piAllowedHostsForRoute,
+  resolveEvalPiRoute,
+} from "./eval_harness.ts";
 import { makeIssueApi } from "./forge_fake.ts";
 import { closesIssuePattern, refsIssuePattern, visibleClosingText } from "./gitea_issues.ts";
 import { implementIssue, jumiPrBodyRegion } from "./implement.ts";
+import { buildPiAttemptStamp, normalizePiAttemptUsage } from "./pi_attempt.ts";
+import { runPiHop } from "./pi_hop.ts";
+import { createPiGoSessionDeps } from "./pi_runtime.ts";
+import { runPiWorkerAttempt } from "./pi_worker.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
+import { formatRunnerStamp, type NamedRunner, runnerStamp } from "./runners.ts";
 import { errorMessage } from "./util/error.ts";
+import { WorkerResultStore } from "./worker_mcp.ts";
 import { type GitRunner, runGit } from "./workspace.ts";
 
 export const EVAL_INERT_HOST = "eval.invalid";
@@ -171,6 +188,7 @@ export type WorkerEvalVerdict = "pass" | "fail" | "inconclusive";
 
 export interface WorkerEvalRecord {
   fixture: string;
+  harness: EvalHarness;
   runner: string;
   runnerStamp: string;
   trial: number;
@@ -188,8 +206,14 @@ export interface WorkerEvalRecord {
   pushedSha?: string | null;
   baseSha: string;
   durationMs: number;
-  usage?: unknown;
+  usage: unknown;
   inconclusiveReason?: string;
+  imageDigest: string | null;
+  effectiveModel: string;
+  route: string | null;
+  payer: string | null;
+  pool: string | null;
+  outcome: string | null;
 }
 
 export interface WorkerEvalExpected {
@@ -442,9 +466,63 @@ export interface RunWorkerEvalCaseOptions {
   gradingGitTimeoutMs?: number;
   /** Test hook: runs against the bare after the PR is recorded, before grading. */
   afterPr?: (ctx: { barePath: string; tmpDir: string }) => Promise<void>;
+  harness?: EvalHarness;
+  piDeployment?: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] };
+  piRouteName?: string;
+  /** Test seam: Pi session deps (loopback model). Production builds the real Go session. */
+  piSessionDepsFor?: (
+    route: ReturnType<typeof resolveEvalPiRoute>,
+    sessionId: string
+  ) => Promise<{ modelRuntime: unknown; model: unknown }>;
+  /** Test seam: scripted Pi invoke replacing the SDK session (writes files + store). */
+  piInvoke?: (ctx: {
+    workdir: string;
+    store: WorkerResultStore;
+    route: ReturnType<typeof resolveEvalPiRoute>;
+    allowedFetchHosts: readonly string[];
+  }) => Promise<{ usage?: unknown }>;
+}
+
+export interface WorkerEvalPiContext {
+  deployment: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] };
+  routeName?: string;
+}
+
+function workerEvalBaseRecord(
+  opts: Pick<RunWorkerEvalCaseOptions, "fixture" | "runner" | "trial" | "harness">,
+  stamp: string
+): Omit<
+  WorkerEvalRecord,
+  | "durationMs"
+  | "verdict"
+  | "failedAssertions"
+  | "jobStatus"
+  | "closingKeyword"
+  | "remaining"
+  | "prBody"
+  | "hiddenCheck"
+  | "noSentinels"
+  | "baseSha"
+> {
+  const harness = opts.harness ?? "legacy";
+  return {
+    fixture: opts.fixture.name,
+    harness,
+    runner: opts.runner.name,
+    runnerStamp: stamp,
+    trial: opts.trial,
+    usage: null,
+    imageDigest: evalImageDigest(),
+    effectiveModel: opts.runner.model,
+    route: opts.runner.name,
+    payer: null,
+    pool: null,
+    outcome: null,
+  };
 }
 
 export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise<WorkerEvalRecord> {
+  if ((opts.harness ?? "legacy") === "pi") return runWorkerEvalCasePi(opts);
   const log = opts.logger ?? (() => undefined);
   const started = Date.now();
   const finish = (partial: Omit<WorkerEvalRecord, "durationMs">): WorkerEvalRecord => ({
@@ -453,10 +531,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
   });
   const stamp = formatRunnerStamp(runnerStamp(opts.runner));
   const baseRecord = {
-    fixture: opts.fixture.name,
-    runner: opts.runner.name,
-    runnerStamp: stamp,
-    trial: opts.trial,
+    ...workerEvalBaseRecord(opts, stamp),
     baseSha: "unknown",
   };
 
@@ -465,6 +540,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
   let barePath = "";
   let baseSha = "unknown";
   try {
+    await ensureEvalRoots([opts.homeRoot, opts.workdirRoot, opts.tmpRoot]);
     homeDir = await mkdtemp(join(opts.homeRoot, "eval-home-"));
     workdir = await mkdtemp(join(opts.workdirRoot, "eval-work-"));
     const tmp = await mkdtemp(join(opts.tmpRoot, "eval-tmp-"));
@@ -528,6 +604,9 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         clone_url: inertCloneUrl,
         default_branch: opts.fixture.defaultBranch,
         owner: { login: opts.fixture.owner },
+        // Synthetic fixtures are public, so the Contributor scope rule admits.
+        private: evalPublicRepoVisibility().private,
+        visibility: evalPublicRepoVisibility().visibility,
       }),
       listOpenPulls: async () => [],
       createPullRequest: async (
@@ -739,7 +818,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         ...(hiddenOutput ? { hiddenCheckOutput: hiddenOutput } : {}),
         noSentinels,
         pushedSha,
-        ...(usage !== undefined ? { usage } : {}),
+        usage: evalUsageOrNull(usage),
       });
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
@@ -802,6 +881,407 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
   }
 }
 
+export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promise<WorkerEvalRecord> {
+  const log = opts.logger ?? (() => undefined);
+  const started = Date.now();
+  const finish = (partial: Omit<WorkerEvalRecord, "durationMs">): WorkerEvalRecord => ({
+    ...partial,
+    durationMs: Date.now() - started,
+  });
+  const deployment = opts.piDeployment ?? loadEvalPiDeployment();
+  const { resolveEvalPiRouteNamed } = await import("./eval_harness.ts");
+  const resolved = opts.piRouteName
+    ? resolveEvalPiRouteNamed(opts.piRouteName, deployment)
+    : resolveEvalPiRoute(deployment);
+  const stampBase = formatRunnerStamp(runnerStamp(opts.runner));
+  const baseRecord = {
+    fixture: opts.fixture.name,
+    harness: "pi" as const,
+    runner: `pi:${resolved.name}`,
+    runnerStamp: stampBase,
+    trial: opts.trial,
+    baseSha: "unknown",
+    usage: null,
+    imageDigest: evalImageDigest(),
+    effectiveModel: resolved.model,
+    route: resolved.name,
+    payer: resolved.payer,
+    pool: resolved.fundingPool,
+    outcome: null as string | null,
+  };
+  const allowedFetchHosts = piAllowedHostsForRoute(resolved);
+
+  const inconclusive = (reason: string, outcome: string, usage: unknown = null): WorkerEvalRecord =>
+    finish({
+      ...baseRecord,
+      baseSha,
+      verdict: "inconclusive",
+      failedAssertions: [],
+      jobStatus: "error",
+      jobReason: reason,
+      closingKeyword: "none",
+      remaining: [],
+      prBody: "",
+      hiddenCheck: "skip",
+      noSentinels: true,
+      pushedSha: null,
+      usage: evalUsageOrNull(usage),
+      outcome,
+      inconclusiveReason: reason,
+    });
+
+  let homeDir = "";
+  let barePath = "";
+  let baseSha = "unknown";
+  try {
+    await ensureEvalRoots([opts.homeRoot, opts.workdirRoot, opts.tmpRoot]);
+    homeDir = await mkdtemp(join(opts.homeRoot, "eval-home-"));
+    const tmp = await mkdtemp(join(opts.tmpRoot, "eval-tmp-"));
+    const setup = await setupFixtureBare(opts.fixture, tmp, homeDir);
+    barePath = setup.barePath;
+    baseSha = setup.baseSha;
+    const gradingGitTimeoutMs = opts.gradingGitTimeoutMs ?? WORKER_EVAL_GRADING_GIT_TIMEOUT_MS;
+    const hiddenCheckTimeoutMs = opts.hiddenCheckTimeoutMs ?? WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS;
+    const gradeGit = (args: string[], cwd: string) => runWorkerEvalGit(args, cwd, homeDir, gradingGitTimeoutMs);
+    const clonePath = join(tmp, "pi-clone");
+    try {
+      await gradeGit(["clone", barePath, clonePath], tmp);
+    } catch (err) {
+      return inconclusive(
+        `eval git infrastructure: clone failed: ${errorMessage(err)}`.slice(0, 500),
+        "provider-failure"
+      );
+    }
+    const branch = `jumi/issue-${opts.fixture.issueNumber}-eval-t${opts.trial}`;
+    try {
+      await gradeGit(["checkout", "-B", branch], clonePath);
+    } catch (err) {
+      return inconclusive(
+        `eval git infrastructure: checkout failed: ${errorMessage(err)}`.slice(0, 500),
+        "provider-failure"
+      );
+    }
+
+    const store = new WorkerResultStore();
+    let piUsage: unknown = null;
+    let piOutcome: string = "ok";
+    try {
+      if (opts.piInvoke) {
+        const invoked = await opts.piInvoke({ workdir: clonePath, store, route: resolved, allowedFetchHosts });
+        piUsage = invoked.usage ?? null;
+      } else {
+        const sessionId = `eval-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
+        const deps = opts.piSessionDepsFor
+          ? await opts.piSessionDepsFor(resolved, sessionId)
+          : await createPiGoSessionDeps({ sessionId });
+        const prompt =
+          `Repository ${opts.fixture.owner}/${opts.fixture.repo}, issue #${opts.fixture.issueNumber}.\n` +
+          `Issue title: ${opts.fixture.title}\nIssue body:\n${opts.fixture.body}\n` +
+          `Implement the change in the worktree. Do not commit, push, or open pulls. Record results only through the jumi_* tools.`;
+        const hop = await runPiHop({
+          routes: [resolved.name],
+          catalog: deployment.catalog,
+          deploymentAllowlist: deployment.allowlist,
+          scope: "public",
+          role: "implement",
+          lease: { isLeaseHeld: async () => true, isCancelled: async () => false, isWorktreeSafe: async () => true },
+          invoke: async (invokedRoute, ctx) => {
+            const perDeps = opts.piSessionDepsFor
+              ? await opts.piSessionDepsFor(invokedRoute as never, ctx.sessionId)
+              : { modelRuntime: deps.modelRuntime, model: deps.model };
+            const seenStatuses: number[] = [];
+            const outerFetch = globalThis.fetch;
+            globalThis.fetch = (async (input: never, init: never) => {
+              const response = await outerFetch(input, init);
+              try {
+                seenStatuses.push(response.status);
+              } catch {}
+              return response;
+            }) as typeof fetch;
+            try {
+              const result = await runPiWorkerAttempt({
+                workdir: clonePath,
+                intent: "implement",
+                prompt,
+                store,
+                modelRuntime: perDeps.modelRuntime,
+                model: perDeps.model,
+                allowedFetchHosts,
+                timeoutMs: opts.timeoutMs,
+                logger: log,
+              });
+              const { piSessionToAdapterResult } = await import("./pi_jobs.ts");
+              return piSessionToAdapterResult(
+                result.status === "complete" ? "complete" : "incomplete",
+                result.reason,
+                "pi worker session finished",
+                seenStatuses
+              );
+            } finally {
+              globalThis.fetch = outerFetch;
+            }
+          },
+        });
+        if (hop.status !== "ok" || !hop.result) {
+          const kind = hop.result?.kind ?? "provider-failure";
+          const reasonText = hop.result?.message ?? hop.reason ?? "provider failure";
+          if (kind === "quota" || isQuotaText(reasonText)) {
+            const normalized = normalizePiAttemptUsage(hop.result?.usage ?? null);
+            const stamp = buildPiAttemptStamp({
+              route: resolved,
+              role: "implement",
+              outcome: "quota",
+              ...(normalized ? { usage: normalized } : {}),
+            });
+            return finish({
+              ...baseRecord,
+              baseSha,
+              verdict: "inconclusive",
+              failedAssertions: [],
+              jobStatus: "error",
+              jobReason: reasonText.slice(0, 500),
+              closingKeyword: "none",
+              remaining: [],
+              prBody: "",
+              hiddenCheck: "skip",
+              noSentinels: true,
+              pushedSha: null,
+              usage: evalUsageOrNull(stamp.usage ?? null),
+              outcome: "quota",
+              inconclusiveReason: reasonText.slice(0, 500),
+            });
+          }
+          if (/auth|unauthorized|forbidden|token/i.test(reasonText)) {
+            return inconclusive(reasonText.slice(0, 500), "auth-expired");
+          }
+          if (/timeout|timed out|deadline/i.test(reasonText)) {
+            return inconclusive(reasonText.slice(0, 500), "provider-failure");
+          }
+          return inconclusive(`harness crash: ${reasonText.slice(0, 500)}`, "provider-failure");
+        }
+        const normalized = normalizePiAttemptUsage(hop.result.usage ?? null);
+        piUsage = normalized ?? null;
+        piOutcome = hop.result.kind === "ok" ? "ok" : hop.result.kind;
+      }
+    } catch (err) {
+      const message = errorMessage(err);
+      if (isQuotaText(message)) return inconclusive(message.slice(0, 500), "quota", null);
+      if (/auth|unauthorized|forbidden|token/i.test(message))
+        return inconclusive(message.slice(0, 500), "auth-expired");
+      if (/timeout|timed out|deadline/i.test(message)) return inconclusive(message.slice(0, 500), "provider-failure");
+      return inconclusive(`harness crash: ${message}`.slice(0, 500), "provider-failure");
+    }
+
+    const prBody = store.getPrBody() ?? "";
+    const skipReason = store.getSkipReason?.() ?? null;
+    if (skipReason && (isQuotaText(skipReason) || isInconclusiveText(skipReason))) {
+      return inconclusive(skipReason.slice(0, 500), "quota", piUsage);
+    }
+    let statusText: string;
+    try {
+      statusText = await gradeGit(["status", "--porcelain"], clonePath);
+    } catch (err) {
+      return inconclusive(
+        `eval git infrastructure: status failed: ${errorMessage(err)}`.slice(0, 500),
+        "provider-failure",
+        piUsage
+      );
+    }
+    if (!statusText.trim() && !prBody.trim()) {
+      return finish({
+        ...baseRecord,
+        baseSha,
+        verdict: "fail",
+        failedAssertions: ["job-result-pr"],
+        jobStatus: "no-changes",
+        closingKeyword: "none",
+        remaining: [],
+        prBody: "",
+        hiddenCheck: "skip",
+        noSentinels: true,
+        pushedSha: null,
+        usage: evalUsageOrNull(piUsage),
+        outcome: piOutcome,
+      });
+    }
+    try {
+      await gradeGit(["add", "-A"], clonePath);
+      const again = await gradeGit(["status", "--porcelain"], clonePath);
+      if (again.trim()) {
+        await gradeGit(
+          ["-c", "user.name=jumi", "-c", "user.email=jumi@localhost", "commit", "-m", "pi eval change"],
+          clonePath
+        );
+      }
+    } catch (err) {
+      return inconclusive(
+        `eval git infrastructure: commit failed: ${errorMessage(err)}`.slice(0, 500),
+        "provider-failure",
+        piUsage
+      );
+    }
+    let pushedSha: string | null = null;
+    try {
+      await gradeGit(["push", "origin", `${branch}:${branch}`], clonePath);
+      pushedSha = (await gradeGit(["rev-parse", branch], barePath)).trim() || null;
+    } catch (err) {
+      return inconclusive(
+        `eval git infrastructure: push failed: ${errorMessage(err)}`.slice(0, 500),
+        "provider-failure",
+        piUsage
+      );
+    }
+    if (!pushedSha) {
+      return inconclusive("eval git infrastructure: PR head SHA unavailable", "provider-failure", piUsage);
+    }
+    if (opts.afterPr) {
+      const tmp2 = clonePath;
+      void tmp2;
+    }
+
+    const closingKeyword = parseEvalClosingKeyword(prBody, opts.fixture.issueNumber);
+    const remaining = parseEvalRemaining(prBody);
+    let hiddenCheckStatus: "pass" | "fail" | "skip" = "skip";
+    let hiddenOutput = "";
+    {
+      const verifyDir = await mkdtemp(join(tmp, "verify-")).catch(() => null);
+      if (!verifyDir)
+        return inconclusive("eval git infrastructure: verify checkout unavailable", "provider-failure", piUsage);
+      try {
+        try {
+          await gradeGit(["clone", barePath, verifyDir], tmp);
+        } catch (err) {
+          return inconclusive(
+            `eval git infrastructure: clone failed: ${errorMessage(err)}`.slice(0, 500),
+            "provider-failure",
+            piUsage
+          );
+        }
+        try {
+          await gradeGit(["checkout", pushedSha], verifyDir);
+        } catch (err) {
+          return inconclusive(
+            `eval git infrastructure: checkout failed: ${errorMessage(err)}`.slice(0, 500),
+            "provider-failure",
+            piUsage
+          );
+        }
+        const scriptPath = join(verifyDir, ".eval-hidden.sh");
+        try {
+          await writeFile(scriptPath, opts.fixture.hiddenCheck, "utf8");
+        } catch (err) {
+          return inconclusive(
+            `eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500),
+            "provider-failure",
+            piUsage
+          );
+        }
+        let result: WorkerHiddenCheckResult;
+        try {
+          result = await runWorkerHiddenCheck(scriptPath, verifyDir, homeDir, hiddenCheckTimeoutMs);
+        } catch (err) {
+          return inconclusive(
+            `eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500),
+            "provider-failure",
+            piUsage
+          );
+        }
+        hiddenOutput = result.output;
+        hiddenCheckStatus = result.code === 0 && !result.timedOut ? "pass" : "fail";
+        if (result.timedOut && !hiddenOutput) hiddenOutput = `hidden check timed out after ${hiddenCheckTimeoutMs}ms`;
+      } finally {
+        await rm(verifyDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+    let noSentinels = true;
+    {
+      let listed: string;
+      try {
+        listed = await gradeGit(["ls-tree", "-r", "--name-only", pushedSha], barePath);
+      } catch (err) {
+        return inconclusive(
+          `eval git infrastructure: ls-tree failed: ${errorMessage(err)}`.slice(0, 500),
+          "provider-failure",
+          piUsage
+        );
+      }
+      const leaked = listed
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter((path) => {
+          const base = path.split("/").pop() ?? path;
+          return base.startsWith("JUMI_") && base.endsWith(".md");
+        });
+      noSentinels = leaked.length === 0;
+    }
+    const failedAssertions: string[] = workerEvalClosingFailures(closingKeyword, remaining, opts.fixture.expected);
+    if (hiddenCheckStatus !== "pass") failedAssertions.push("hidden-check");
+    if (!noSentinels) failedAssertions.push("no-sentinels");
+    const normalizedUsage = normalizePiAttemptUsage((piUsage as never) ?? null);
+    const stamp = buildPiAttemptStamp({
+      route: resolved,
+      role: "implement",
+      outcome: (piOutcome as never) ?? "ok",
+      ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+    });
+    return finish({
+      ...baseRecord,
+      baseSha,
+      verdict: failedAssertions.length === 0 ? "pass" : "fail",
+      failedAssertions,
+      jobStatus: "pr",
+      closingKeyword,
+      remaining,
+      prBody,
+      hiddenCheck: hiddenCheckStatus,
+      ...(hiddenOutput ? { hiddenCheckOutput: hiddenOutput } : {}),
+      noSentinels,
+      pushedSha,
+      usage: evalUsageOrNull(stamp.usage ?? piUsage ?? null),
+      outcome: stamp.outcome,
+    });
+  } catch (err) {
+    const message = errorMessage(err);
+    if (isQuotaText(message) || isInconclusiveText(message)) {
+      return finish({
+        ...baseRecord,
+        baseSha,
+        verdict: "inconclusive",
+        failedAssertions: [],
+        jobStatus: "error",
+        jobReason: message,
+        closingKeyword: "none",
+        remaining: [],
+        prBody: "",
+        hiddenCheck: "skip",
+        noSentinels: true,
+        pushedSha: null,
+        usage: null,
+        outcome: "provider-failure",
+        inconclusiveReason: message,
+      });
+    }
+    return finish({
+      ...baseRecord,
+      baseSha,
+      verdict: "inconclusive",
+      failedAssertions: [],
+      jobStatus: "error",
+      jobReason: message,
+      closingKeyword: "none",
+      remaining: [],
+      prBody: "",
+      hiddenCheck: "skip",
+      noSentinels: true,
+      pushedSha: null,
+      usage: null,
+      outcome: "provider-failure",
+      inconclusiveReason: `harness crash: ${message}`,
+    });
+  }
+}
+
 export interface RunWorkerEvalOptions {
   fixtures: LoadedWorkerEvalFixture[];
   runners: NamedRunner[];
@@ -813,57 +1293,102 @@ export interface RunWorkerEvalOptions {
   engineForRunner?: (runner: NamedRunner) => Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
+  harnesses?: EvalHarness[];
+  piSessionDepsFor?: RunWorkerEvalCaseOptions["piSessionDepsFor"];
+  piInvokeForRoute?: (routeName: string) => RunWorkerEvalCaseOptions["piInvoke"];
+}
+
+async function writeWorkerEvalRecords(
+  outDir: string,
+  preexisting: string[],
+  lines: string[],
+  runId: string
+): Promise<void> {
+  await mkdir(outDir, { recursive: true });
+  await writeFile(join(outDir, `results-${runId}.jsonl`), `${lines.join("\n")}\n`);
+  await writeFile(join(outDir, "results.jsonl"), `${[...preexisting, ...lines].join("\n")}\n`);
 }
 
 export async function runWorkerEval(opts: RunWorkerEvalOptions): Promise<WorkerEvalRecord[]> {
-  await mkdir(opts.outDir, { recursive: true });
+  await ensureEvalRoots([opts.outDir, opts.workdirRoot, opts.homeRoot, opts.tmpRoot]);
   const log = opts.logger ?? (() => undefined);
+  const harnesses = opts.harnesses ?? ["legacy"];
+  // Misconfigured Pi fails before the first fixture and writes no records.
+  let piDeployment: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] } | undefined;
+  if (harnesses.includes("pi")) {
+    piDeployment = loadEvalPiDeployment();
+    resolveEvalPiRoute(piDeployment);
+  }
   const records: WorkerEvalRecord[] = [];
   const lines: string[] = [];
+  const runId = `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
+  let preexisting: string[] = [];
+  try {
+    const current = await readFile(join(opts.outDir, "results.jsonl"), "utf8");
+    preexisting = current.split("\n").filter((line) => line.trim().length > 0);
+  } catch {
+    preexisting = [];
+  }
   const flush = async () => {
-    await writeFile(join(opts.outDir, "results.jsonl"), `${lines.join("\n")}\n`);
+    await writeWorkerEvalRecords(opts.outDir, preexisting, lines, runId);
   };
-  for (const fixture of opts.fixtures) {
-    for (const runner of opts.runners) {
-      for (let trial = 1; trial <= opts.trials; trial++) {
-        let record: WorkerEvalRecord;
-        try {
-          record = await runWorkerEvalCase({
-            fixture,
-            runner,
-            trial,
-            workdirRoot: opts.workdirRoot,
-            homeRoot: opts.homeRoot,
-            tmpRoot: opts.tmpRoot,
-            ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
-            ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
-            logger: log,
-          });
-        } catch (err) {
-          const message = errorMessage(err);
-          record = {
-            fixture: fixture.name,
-            runner: runner.name,
-            runnerStamp: formatRunnerStamp(runnerStamp(runner)),
-            trial,
-            verdict: "inconclusive",
-            failedAssertions: [],
-            jobStatus: "error",
-            jobReason: message,
-            closingKeyword: "none",
-            remaining: [],
-            prBody: "",
-            hiddenCheck: "skip",
-            noSentinels: true,
-            pushedSha: null,
-            baseSha: "unknown",
-            durationMs: 0,
-            inconclusiveReason: `harness crash: ${message}`,
-          };
+  for (const harness of harnesses) {
+    for (const fixture of opts.fixtures) {
+      for (const runner of opts.runners) {
+        for (let trial = 1; trial <= opts.trials; trial++) {
+          let record: WorkerEvalRecord;
+          try {
+            record = await runWorkerEvalCase({
+              fixture,
+              runner,
+              trial,
+              workdirRoot: opts.workdirRoot,
+              homeRoot: opts.homeRoot,
+              tmpRoot: opts.tmpRoot,
+              ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
+              ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+              logger: log,
+              harness,
+              ...(piDeployment ? { piDeployment } : {}),
+              ...(opts.piSessionDepsFor ? { piSessionDepsFor: opts.piSessionDepsFor } : {}),
+              ...(opts.piInvokeForRoute && harness === "pi" && piDeployment
+                ? { piInvoke: opts.piInvokeForRoute(piDeployment.allowlist[0]!) }
+                : {}),
+            });
+          } catch (err) {
+            const message = errorMessage(err);
+            record = {
+              fixture: fixture.name,
+              harness,
+              runner: harness === "pi" && piDeployment ? `pi:${piDeployment.allowlist[0]}` : runner.name,
+              runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+              trial,
+              verdict: "inconclusive",
+              failedAssertions: [],
+              jobStatus: "error",
+              jobReason: message,
+              closingKeyword: "none",
+              remaining: [],
+              prBody: "",
+              hiddenCheck: "skip",
+              noSentinels: true,
+              pushedSha: null,
+              baseSha: "unknown",
+              durationMs: 0,
+              usage: null,
+              imageDigest: evalImageDigest(),
+              effectiveModel: runner.model,
+              route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
+              payer: null,
+              pool: null,
+              outcome: "provider-failure",
+              inconclusiveReason: `harness crash: ${message}`,
+            };
+          }
+          records.push(record);
+          lines.push(JSON.stringify(record));
+          await flush();
         }
-        records.push(record);
-        lines.push(JSON.stringify(record));
-        await flush();
       }
     }
   }
@@ -875,13 +1400,19 @@ function printWorkerEvalHelp(): void {
 without publishing. Operator-run only; nothing is scheduled.
 
 Usage:
-  bun run src/worker_eval.ts --out <output-dir> [--fixture <name>] [--runners <name1,name2>] [--trials <n>]
+  bun run src/worker_eval.ts --out <output-dir> [--fixture <name>] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi]
 
 Fixtures are committed under src/eval_fixtures/. Each record in
-<out>/results.jsonl carries fixture, runner, trial, verdict
+<out>/results.jsonl carries fixture, harness (legacy|pi), runner, trial, verdict
 (pass / fail / inconclusive), failed assertion names, the published closing
-keyword and remaining list, hidden-check status, and duration. Auth, quota,
-timeouts and harness crashes record inconclusive, never fail.
+keyword and remaining list, hidden-check status, duration, image digest,
+effective model, payer/route, wall time and usage (null when unknown).
+Auth, quota, timeouts and harness crashes record inconclusive, never fail.
+The legacy baseline runs exactly one explicitly selected runner (via --runners)
+from a minimal catalog holding only that runner, with no fallback.
+A Pi run needs JUMI_PI_PROFILES_FILE plus JUMI_PI_ALLOWED_ROUTES naming the
+wired Go route; the fake forge reports the repo as public and allowedFetchHosts
+is just that endpoint.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
@@ -890,12 +1421,14 @@ function parseWorkerEvalArgs(argv: string[]): {
   fixture?: string;
   runners?: string[];
   trials: number;
+  harness?: string;
   help: boolean;
 } {
   let out: string | undefined;
   let fixture: string | undefined;
   let runners: string[] | undefined;
   let trials = 1;
+  let harness: string | undefined;
   let help = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -921,28 +1454,15 @@ function parseWorkerEvalArgs(argv: string[]): {
     } else if (arg.startsWith("--trials=")) {
       const parsed = Number.parseInt(arg.slice("--trials=".length), 10);
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
-    } else if (arg === "--") break;
+    } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
+    else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
+    else if (arg === "--") break;
   }
-  return { out, fixture, runners, trials, help };
+  return { out, fixture, runners, trials, harness, help };
 }
 
 function loadWorkerEvalCliRunners(runnerNames: string[] | undefined): NamedRunner[] {
-  const env = process.env as Record<string, string | undefined>;
-  const fromEnv = {
-    model: env.OPENCODE_MODEL?.trim() ? env.OPENCODE_MODEL : "openai/gpt-5.5",
-    ...(env.OPENCODE_VARIANT ? { variant: env.OPENCODE_VARIANT } : {}),
-    ...(env.OPENCODE_FALLBACK_MODEL ? { fallbackModel: env.OPENCODE_FALLBACK_MODEL } : {}),
-    ...(env.OPENCODE_FALLBACK_VARIANT ? { fallbackVariant: env.OPENCODE_FALLBACK_VARIANT } : {}),
-  };
-  const catalog = loadRunnersCatalog(env.JUMI_RUNNERS_FILE, fromEnv, "gitea");
-  const ordered = orderedRunners(catalog);
-  if (!runnerNames || runnerNames.length === 0) return ordered;
-  const byName = new Map(ordered.map((runner) => [runner.name, runner]));
-  return runnerNames.map((name) => {
-    const found = byName.get(name);
-    if (!found) throw new Error(`Unknown runner ${name} (chain: ${ordered.map((r) => r.name).join(", ")})`);
-    return found;
-  });
+  return loadEvalLegacyRunners(runnerNames);
 }
 
 async function main(): Promise<void> {
@@ -963,10 +1483,11 @@ async function main(): Promise<void> {
     fixtures.push(await loadWorkerEvalFixture(name));
   }
   const runners = loadWorkerEvalCliRunners(args.runners);
+  const harnesses = parseEvalHarness(args.harness);
   const workdirRoot = join(env.WORKDIR ?? "/work", "jumi-worker-eval");
   const homeRoot = env.HOME?.trim() ? env.HOME : "/data";
   const tmpRoot = process.env.TMPDIR?.trim() ? process.env.TMPDIR : tmpdir();
-  await mkdir(workdirRoot, { recursive: true });
+  await ensureEvalRoots([workdirRoot, join(homeRoot, "jumi-worker-eval-homes"), join(tmpRoot, "jumi-worker-eval")]);
   const records = await runWorkerEval({
     fixtures,
     runners,
@@ -975,9 +1496,10 @@ async function main(): Promise<void> {
     workdirRoot,
     homeRoot: join(homeRoot, "jumi-worker-eval-homes"),
     tmpRoot: join(tmpRoot, "jumi-worker-eval"),
+    harnesses,
     logger: (message) => console.log(`[worker-eval] ${message}`),
   });
-  const summary = records.map((r) => `${r.fixture}/${r.runner}#${r.trial}:${r.verdict}`).join(" ");
+  const summary = records.map((r) => `${r.fixture}/${r.harness}/${r.runner}#${r.trial}:${r.verdict}`).join(" ");
   console.log(`[worker-eval] done: ${records.length} records -> ${args.out}/results.jsonl ${summary}`);
 }
 
