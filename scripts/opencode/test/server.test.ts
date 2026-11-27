@@ -54,6 +54,7 @@ describe("createFetchHandler", () => {
     // names here would double them for anyone scraping every pod.
     expect(body).not.toContain("ai_tokens_total{");
     expect(body).not.toContain("jumi_jobs_completed_total");
+    expect(body).not.toContain("jumi_jobs_reclaimed_total");
     expect(body).not.toContain("jumi_opencode_exits_total");
     expect(body).not.toContain("jumi_review_jobs");
     expect(body).not.toContain("jumi_webhooks_total");

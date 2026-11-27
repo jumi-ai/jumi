@@ -721,12 +721,12 @@ describe("processWorkerTick", () => {
     await store.enqueueIssue(makeIssueJob());
     const abort = new AbortController();
     const started = Promise.withResolvers<void>();
-    const originalRelease = store.releaseLease.bind(store);
+    const originalRelease = store.shutdownRelease.bind(store);
     const callers: string[] = [];
-    store.releaseLease = async (id, leasedBy) => {
+    store.shutdownRelease = async (id, leasedBy, now) => {
       callers.push(leasedBy);
       store.rows[0]!.leasedBy = "worker-other";
-      return originalRelease(id, leasedBy);
+      return originalRelease(id, leasedBy, now);
     };
     const tick = processWorkerTick(
       store,

@@ -72,6 +72,7 @@ const holder = role === "worker" ? "worker-1" : "engine-1";
 const kinds = role === "worker" ? WORKER_JOB_KINDS : undefined;
 let reported = false;
 const originalRelease = store.releaseLease.bind(store);
+const originalShutdownRelease = store.shutdownRelease.bind(store);
 const originalExpire = store.expireLease.bind(store);
 const workerApi = { comments: [], statuses: [] } as unknown as IssueApi & ProbeApi;
 const reviewApi = shutdownReviewApi();
@@ -88,6 +89,11 @@ async function reportFreed(id: number, leasedBy: string, how: string) {
 }
 store.releaseLease = async (id, leasedBy) => {
   const ok = await originalRelease(id, leasedBy);
+  if (ok && leasedBy === holder) await reportFreed(id, leasedBy, "release");
+  return ok;
+};
+store.shutdownRelease = async (id, leasedBy, now) => {
+  const ok = await originalShutdownRelease(id, leasedBy, now);
   if (ok && leasedBy === holder) await reportFreed(id, leasedBy, "release");
   return ok;
 };
