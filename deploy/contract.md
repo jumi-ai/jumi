@@ -144,6 +144,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_SECRETS_FILE`
 - `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
+- `JUMI_FORGE_IDENTITY`
 - `JUMI_GIT_NAME`
 - `JUMI_GIT_EMAIL`
 - `FOLLOWUP_IGNORE_LOGINS`
