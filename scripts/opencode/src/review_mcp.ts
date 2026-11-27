@@ -61,7 +61,7 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
     {
       name: "add_finding",
       description:
-        "Record one review finding. Path must be a changed, non-excluded file; line must be in the diff hunks.",
+        "Record one review finding. Path must be a changed, non-excluded file; line must be in the diff hunks. Use needs_maintainer for maintainer-only questions (question severity only) instead of typing the marker by hand; use proof {location, command, excerpt} for bug/risk proof instead of typing Proof: by hand.",
       inputSchema: {
         type: "object",
         properties: {
@@ -70,13 +70,23 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
           severity: { type: "string", enum: ["bug", "risk", "question", "suggestion"] },
           title: { type: "string" },
           body: { type: "string" },
+          needs_maintainer: { type: "boolean" },
+          proof: {
+            type: "object",
+            properties: {
+              location: { type: "string" },
+              command: { type: "string" },
+              excerpt: { type: "string" },
+            },
+          },
         },
         required: ["severity"],
       },
     },
     {
       name: "update_finding",
-      description: "Update a recorded finding by id.",
+      description:
+        "Update a recorded finding by id. needs_maintainer and proof follow the add_finding rules; omitting them preserves the previous value.",
       inputSchema: {
         type: "object",
         properties: {
@@ -86,6 +96,15 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
           severity: { type: "string", enum: ["bug", "risk", "question", "suggestion"] },
           title: { type: "string" },
           body: { type: "string" },
+          needs_maintainer: { type: "boolean" },
+          proof: {
+            type: "object",
+            properties: {
+              location: { type: "string" },
+              command: { type: "string" },
+              excerpt: { type: "string" },
+            },
+          },
         },
         required: ["id"],
       },
@@ -103,10 +122,14 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
     {
       name: "set_verdict",
       description:
-        "Record the review verdict. Success with an open bug/risk is rejected; failure needs a bug/risk finding or an explicit could-not-finish reason. Last call wins.",
+        "Record the review verdict. Success with an open bug/risk is rejected; failure needs a bug/risk finding or an explicit could-not-finish reason. Use incomplete (failure only) for could-not-finish without consulting the reason text. Last call wins.",
       inputSchema: {
         type: "object",
-        properties: { state: { type: "string", enum: ["success", "failure"] }, reason: { type: "string" } },
+        properties: {
+          state: { type: "string", enum: ["success", "failure"] },
+          reason: { type: "string" },
+          incomplete: { type: "string", enum: ["none", "could_not_finish", "head_moved", "dirty_tree", "no_artifact"] },
+        },
         required: ["state"],
       },
     },
@@ -131,6 +154,8 @@ function callTool(
         severity: args.severity as string,
         ...(args.title !== undefined ? { title: args.title as string } : {}),
         ...(args.body !== undefined ? { body: args.body as string } : {}),
+        ...(args.needs_maintainer !== undefined ? { needs_maintainer: args.needs_maintainer } : {}),
+        ...(args.proof !== undefined ? { proof: args.proof } : {}),
       });
       return result.ok ? { ok: true, text: JSON.stringify({ id: result.id }) } : { ok: false, text: result.error };
     }
@@ -146,7 +171,7 @@ function callTool(
       return { ok: true, text: JSON.stringify({ findings: store.listFindings() }) };
     }
     case "set_verdict": {
-      const result = store.setVerdict({ state: args.state, reason: args.reason });
+      const result = store.setVerdict({ state: args.state, reason: args.reason, incomplete: args.incomplete });
       return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
     }
     case "previous_findings": {

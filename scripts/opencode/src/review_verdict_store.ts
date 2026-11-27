@@ -9,6 +9,20 @@
  * discovering it afterwards.
  */
 
+import {
+  canonicalFindingLine,
+  canonicalIncompleteReason,
+  countMaintainerStoreFindingsTyped,
+  isMaintainerStoreFindingTyped,
+  type MaintainerDecision,
+  normalizeProofInput,
+  parseIncomplete,
+  parseNeedsMaintainer,
+  type ReviewIncomplete,
+  type ReviewProof,
+  renderProofLines,
+  validateAllProofs,
+} from "./review_verdict_typed.ts";
 import { buildCheckTrailer } from "./verdict.ts";
 
 export type ReviewMcpSeverity = "bug" | "risk" | "question" | "suggestion";
@@ -25,6 +39,8 @@ export interface ReviewMcpFindingInput {
   severity: ReviewMcpSeverity | string;
   title?: string;
   body?: string;
+  needs_maintainer?: unknown;
+  proof?: unknown;
 }
 
 export interface ReviewMcpFindingRecord {
@@ -34,11 +50,14 @@ export interface ReviewMcpFindingRecord {
   severity: ReviewMcpSeverity;
   title: string;
   body: string;
+  maintainerDecision?: MaintainerDecision;
+  proof?: ReviewProof;
 }
 
 export interface ReviewMcpVerdict {
   state: "success" | "failure";
   reason?: string;
+  incomplete?: ReviewIncomplete;
 }
 
 interface ReviewRecordFinding {
@@ -48,6 +67,8 @@ interface ReviewRecordFinding {
   severity: ReviewMcpSeverity;
   title: string;
   body: string;
+  maintainerDecision?: MaintainerDecision;
+  proof?: ReviewProof;
 }
 
 interface ReviewRecordCounts {
@@ -55,7 +76,7 @@ interface ReviewRecordCounts {
   risk: number;
   question: number;
   suggestion: number;
-  /** Subset of `question` already addressed to the maintainer (`❓ maintainer:`). */
+  /** Subset of `question` already addressed to the maintainer (`❓ maintainer:`). Always written (zero included). */
   maintainerQuestion?: number;
 }
 
@@ -65,6 +86,7 @@ export interface ReviewRecord {
   reason?: string;
   findings: ReviewRecordFinding[];
   counts: ReviewRecordCounts;
+  incomplete?: ReviewIncomplete;
 }
 
 export type ReviewMcpError = { ok: false; error: string };
@@ -120,153 +142,10 @@ export interface ReviewVerdictStoreOpts {
 const COULD_NOT_FINISH_RE =
   /could not finish|incomplete|no (output|artifact|verdict|findings)|dirty tree|head moved|missing/i;
 
-function severityMarker(severity: ReviewMcpSeverity): string {
-  switch (severity) {
-    case "bug":
-      return "🔴 bug";
-    case "risk":
-      return "🟡 risk";
-    case "suggestion":
-      return "💡 simpler";
-    case "question":
-      return "❓ q";
-  }
-}
-
-/** Check trailers embedded in hostile titles/bodies: the text parser strips them before counting. */
-function stripEmbeddedChecks(text: string): string {
-  return text
-    .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/gi, " ")
-    .replace(/<!--\s*jumi-review:[^>]*-->/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Canonical finding line for `toMarkdown()`: a single severity marker, never
- * a doubled `❓ q: ❓ maintainer:` / `💡 simpler: 💡 simpler:` prefix and never
- * a marker repeated from the body (`❓ maintainer: … ❓ maintainer: …`). The
- * model already writes its own marker (`❓ maintainer:`, `💡 simpler:`) and
- * may repeat it in the body; the store canonicalizes the title and the body
- * separately (stripping that severity's leading markers from each), joins the
- * remainders, and puts one canonical marker in front so the text parser
- * matches and an unlocated line never parses as a located finding (the
- * canonical `word:` keeps a colon inside any would-be path, which the path
- * validator rejects).
- */
-function stripQuestionPart(part: string): { content: string; isMaintainer: boolean } {
-  // For questions, strip embedded check/review trailers first, mirroring the
-  // text parser's maintainer count (which runs on stripped comment text):
-  // otherwise the canonical prefix and the record count disagree on hostile
-  // inputs that hide a marker behind a check literal.
-  let cur = stripEmbeddedChecks(part);
-  cur = cur.replace(/^(?:\*\*|__)?\s*/, "");
-  let isMaintainer = false;
-  for (;;) {
-    const maint = /^(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:\s*/iu.exec(cur);
-    if (maint) {
-      const rest = cur.slice(maint[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-      isMaintainer = true;
-      cur = rest;
-      if (!cur) break;
-      continue;
-    }
-    const generic = /^(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:|❓)\s*/iu.exec(cur);
-    if (generic && generic[0].length > 0) {
-      cur = cur.slice(generic[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-      // A doubled `❓ q: ❓ maintainer:` still leads with a maintainer
-      // marker after the generic strip: loop to catch it. Stripping to
-      // empty is allowed per part so a bare marker still canonicalizes to
-      // a single marker once the parts are rejoined.
-      if (!cur) break;
-      continue;
-    }
-    break;
-  }
-  return { content: cur, isMaintainer };
-}
-
-function stripSeverityPart(part: string, severity: ReviewMcpSeverity): string {
-  // Other severities keep the raw text so a check-only body still counts,
-  // matching the raw-line risk/suggestion counters; embedded checks are not
-  // stripped here.
-  let cur = part.replace(/\s+/g, " ").trim();
-  cur = cur.replace(/^(?:\*\*|__)?\s*/, "");
-  const re =
-    severity === "suggestion"
-      ? /^(?:💡\s*(?:simpler\s*:|suggestions?\s*:)?|(?:simpler|suggestions?)\s*:|💡)\s*/iu
-      : severity === "bug"
-        ? /^(?:🔴\s*(?:bug\s*:)?|bug\s*:|🔴)\s*/iu
-        : /^(?:🟡\s*(?:risk\s*:)?|risk\s*:|🟡)\s*/iu;
-  for (;;) {
-    const m = re.exec(cur);
-    if (!m || m[0].length === 0) break;
-    cur = cur.slice(m[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-    if (!cur) break;
-  }
-  return cur;
-}
-
-/** Canonicalize title and body separately, then join with one marker in front. */
-function canonicalFindingLine(
-  title: string | undefined,
-  body: string | undefined,
-  severity: ReviewMcpSeverity
-): string {
-  if (severity === "question") {
-    const t = stripQuestionPart(title ?? "");
-    const b = stripQuestionPart(body ?? "");
-    const isMaintainer = t.isMaintainer || b.isMaintainer;
-    const combined = [t.content, b.content].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-    const base = isMaintainer ? "❓ maintainer" : "❓ q";
-    return combined ? `${base}: ${combined}` : `${base}:`;
-  }
-  const t = stripSeverityPart(title ?? "", severity);
-  const b = stripSeverityPart(body ?? "", severity);
-  let combined = [t, b].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-  if (!combined) {
-    // A finding whose whole text is markers (`🟡` + `🟡`) still publishes
-    // with a body so the parser counts it, matching the typed input. The
-    // body is the bare emoji so the line keeps one canonical `word:` prefix.
-    const raw = [title ?? "", body ?? ""].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-    if (raw) {
-      if (severity === "bug") combined = "🔴";
-      else if (severity === "risk") combined = "🟡";
-      else if (severity === "suggestion") combined = "💡";
-    }
-  }
-  if (severity === "suggestion") return combined ? `💡 simpler: ${combined}` : `💡 simpler:`;
-  if (severity === "bug") return combined ? `🔴 bug: ${combined}` : `🔴 bug:`;
-  return combined ? `🟡 risk: ${combined}` : `🟡 risk:`;
-}
-
-/**
- * Whether a stored finding is a maintainer-only `❓`: a question whose
- * title or whose body leads with the prescribed `❓ maintainer:` marker
- * (tolerating a doubled `❓ q: ❓ maintainer:` prefix, so old rows still
- * count). A `❓ maintainer:` buried in the middle of both parts does not
- * count, matching the text parser which only reads the published first line.
- */
 export function isMaintainerStoreFinding(
-  finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">
+  finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body"> & { maintainerDecision?: MaintainerDecision }
 ): boolean {
-  if (finding.severity !== "question") return false;
-  // Agreement with the text parser runs on the canonical markdown, not the
-  // raw input: each part is canonicalized separately by `toMarkdown()`, so a
-  // `❓ maintainer:` leading either part publishes as `❓ maintainer:` and
-  // must count here too.
-  return canonicalFindingLine(finding.title, finding.body, "question").startsWith("❓ maintainer:");
-}
-
-/** Count the maintainer-only `❓` findings among stored findings. */
-function countMaintainerStoreFindings(
-  findings: ReadonlyArray<Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">>
-): number {
-  let count = 0;
-  for (const finding of findings) {
-    if (isMaintainerStoreFinding(finding)) count++;
-  }
-  return count;
+  return isMaintainerStoreFindingTyped(finding);
 }
 
 /**
@@ -281,6 +160,7 @@ export class ReviewVerdictStore {
   private readonly previous: readonly string[];
   private nextId = 1;
   private verdict: ReviewMcpVerdict | undefined;
+  private incomplete: ReviewIncomplete = "none";
   private closed = false;
 
   constructor(opts: ReviewVerdictStoreOpts) {
@@ -323,7 +203,8 @@ export class ReviewVerdictStore {
   }
 
   getVerdict(): ReviewMcpVerdict | undefined {
-    return this.verdict ? { ...this.verdict } : undefined;
+    if (!this.verdict) return undefined;
+    return { ...this.verdict, ...(this.incomplete !== "none" ? { incomplete: this.incomplete } : {}) };
   }
 
   listFindings(): ReviewMcpFindingRecord[] {
@@ -374,15 +255,34 @@ export class ReviewVerdictStore {
     const title = (input.title ?? "").trim();
     const body = (input.body ?? "").trim();
     if (!title && !body) return { ok: false, error: "finding needs a title or a body" };
+    const hasMaintainerKey = input.needs_maintainer !== undefined && input.needs_maintainer !== null;
+    const maint = parseNeedsMaintainer(hasMaintainerKey ? input.needs_maintainer : undefined, input.severity as string);
+    if (!maint.ok) return maint;
+    if (hasMaintainerKey && input.severity !== "question") {
+      return { ok: false, error: "needs_maintainer is only valid on a question" };
+    }
+    const proofRaw = (input as { proof?: unknown }).proof;
+    const proofParsed = normalizeProofInput(proofRaw);
+    if (!proofParsed.ok) return proofParsed;
     const id = `f${this.nextId++}`;
-    this.findings.set(id, {
+    const record: ReviewMcpFindingRecord = {
       id,
       ...(location.path ? { path: location.path } : {}),
       ...(location.line != null ? { line: location.line } : {}),
       severity: input.severity as ReviewMcpSeverity,
       title,
       body,
-    });
+      maintainerDecision: maint.decision,
+      ...(proofParsed.proof ? { proof: proofParsed.proof } : {}),
+    };
+    const prevNext = this.nextId;
+    this.findings.set(id, record);
+    const proofCheck = this.checkProofs([...this.findings.values()]);
+    if (!proofCheck.ok) {
+      this.findings.delete(id);
+      this.nextId = prevNext - 1;
+      return proofCheck;
+    }
     this.clearStaleSuccess();
     return { ok: true, id };
   }
@@ -406,14 +306,43 @@ export class ReviewVerdictStore {
     const title = input.title === undefined ? current.title : String(input.title).trim();
     const body = input.body === undefined ? current.body : String(input.body).trim();
     if (!title && !body) return { ok: false, error: "finding needs a title or a body" };
-    this.findings.set(id, {
+    const severity = severityRaw as ReviewMcpSeverity;
+    let decision: MaintainerDecision = current.maintainerDecision ?? "none";
+    const hasMaintainerKey = input.needs_maintainer !== undefined && input.needs_maintainer !== null;
+    if (severity !== "question") {
+      if (hasMaintainerKey) return { ok: false, error: "needs_maintainer is only valid on a question" };
+      decision = "none";
+    } else if (hasMaintainerKey) {
+      const parsed = parseNeedsMaintainer(input.needs_maintainer, severity);
+      if (!parsed.ok) return parsed;
+      decision = parsed.decision;
+    }
+    let proof = current.proof;
+    if ((input as { proof?: unknown }).proof !== undefined) {
+      const raw = (input as { proof?: unknown }).proof;
+      if (raw === null) proof = undefined;
+      else {
+        const parsed = normalizeProofInput(raw);
+        if (!parsed.ok) return parsed;
+        proof = parsed.proof;
+      }
+    }
+    const next: ReviewMcpFindingRecord = {
       id,
       ...(location.path ? { path: location.path } : {}),
       ...(location.line != null ? { line: location.line } : {}),
-      severity: severityRaw,
+      severity,
       title,
       body,
-    });
+      maintainerDecision: decision,
+      ...(proof ? { proof } : {}),
+    };
+    this.findings.set(id, next);
+    const proofCheck = this.checkProofs([...this.findings.values()]);
+    if (!proofCheck.ok) {
+      this.findings.set(id, current);
+      return proofCheck;
+    }
     this.clearStaleSuccess();
     return { ok: true };
   }
@@ -449,55 +378,112 @@ export class ReviewVerdictStore {
   private clearStaleSuccess(): void {
     if (this.verdict?.state === "success" && this.blockingOpen() > 0) {
       this.verdict = undefined;
+      this.incomplete = "none";
     }
   }
 
-  setVerdict(input: { state: unknown; reason?: unknown }): { ok: true } | ReviewMcpError {
+  private renderFor(list: readonly ReviewMcpFindingRecord[], verdict?: ReviewMcpVerdict): string {
+    const lines: string[] = [];
+    for (const f of list) {
+      const canonical = canonicalFindingLine(f.title, f.body, f.severity, f.maintainerDecision);
+      lines.push(f.path && f.line != null ? `${f.path}:${f.line}: ${canonical}` : canonical);
+      if (f.proof) lines.push(...renderProofLines(f.proof));
+    }
+    const trailer = verdict
+      ? buildCheckTrailer(verdict.state, verdict.reason)
+      : "<!-- jumi-check: failure; Incomplete review: no verdict -->";
+    return [...lines, trailer].join("\n");
+  }
+
+  private checkProofs(
+    list: readonly ReviewMcpFindingRecord[],
+    verdict?: ReviewMcpVerdict
+  ): { ok: true } | ReviewMcpError {
+    if (!list.some((f) => f.proof)) return { ok: true };
+    const byId = new Map(list.map((f) => [f.id, f]));
+    const renderOrder = (order: readonly { id: string; proof?: ReviewProof }[]): string => {
+      const lines: string[] = [];
+      for (const item of order) {
+        if (item.id === "__sentinel__") {
+          const s = item as unknown as ReviewMcpFindingRecord;
+          lines.push(`${s.path}:${s.line}: 🔴 bug: sentinel probe`);
+          continue;
+        }
+        const orig = byId.get(item.id);
+        if (!orig) continue;
+        const proof = (item as { proof?: ReviewProof }).proof;
+        const canonical = canonicalFindingLine(orig.title, orig.body, orig.severity, orig.maintainerDecision);
+        lines.push(orig.path && orig.line != null ? `${orig.path}:${orig.line}: ${canonical}` : canonical);
+        if (proof) lines.push(...renderProofLines(proof));
+      }
+      const v = verdict ?? this.verdict;
+      const trailer = v
+        ? buildCheckTrailer(v.state, v.reason)
+        : "<!-- jumi-check: failure; Incomplete review: no verdict -->";
+      return [...lines, trailer].join("\n");
+    };
+    const res = validateAllProofs(
+      list.map((f) => ({
+        id: f.id,
+        path: f.path,
+        line: f.line,
+        severity: f.severity,
+        title: f.title,
+        body: f.body,
+        maintainerDecision: f.maintainerDecision,
+        proof: f.proof,
+      })),
+      renderOrder
+    );
+    return res.ok ? { ok: true } : res;
+  }
+
+  setVerdict(input: { state: unknown; reason?: unknown; incomplete?: unknown }): { ok: true } | ReviewMcpError {
     const closed = this.assertOpen();
     if (closed) return closed;
     const state = input.state;
     if (state !== "success" && state !== "failure") {
       return { ok: false, error: `bad verdict state: ${String(state)} (want success|failure)` };
     }
-    const reason = input.reason == null ? "" : String(input.reason).trim();
+    const parsedIncomplete = parseIncomplete((input as { incomplete?: unknown }).incomplete, state as string);
+    if (!parsedIncomplete.ok) return parsedIncomplete;
+    let reason = input.reason == null ? "" : String(input.reason).trim();
+    if (!reason && parsedIncomplete.incomplete !== "none")
+      reason = canonicalIncompleteReason(parsedIncomplete.incomplete);
     if (state === "success" && this.blockingOpen() > 0) {
       return { ok: false, error: "success rejected: open bug/risk findings remain" };
     }
-    if (state === "failure" && this.blockingOpen() === 0 && !COULD_NOT_FINISH_RE.test(reason)) {
-      return {
-        ok: false,
-        error: "failure needs at least one bug/risk finding or an explicit could-not-finish reason",
-      };
+    if (state === "failure" && this.blockingOpen() === 0) {
+      const bypass = parsedIncomplete.incomplete !== "none";
+      if (!bypass && !COULD_NOT_FINISH_RE.test(reason)) {
+        return {
+          ok: false,
+          error: "failure needs at least one bug/risk finding or an explicit could-not-finish reason",
+        };
+      }
     }
-    this.verdict = reason ? { state, reason } : { state };
+    const next: ReviewMcpVerdict = {
+      state: state as "success" | "failure",
+      ...(reason ? { reason } : {}),
+      ...(parsedIncomplete.incomplete !== "none" ? { incomplete: parsedIncomplete.incomplete } : {}),
+    };
+    const proofCheck = this.checkProofs([...this.findings.values()], next);
+    if (!proofCheck.ok) return proofCheck;
+    this.verdict = reason
+      ? { state: state as "success" | "failure", reason }
+      : { state: state as "success" | "failure" };
+    this.incomplete = parsedIncomplete.incomplete;
+    if (this.incomplete !== "none") this.verdict = { ...this.verdict, incomplete: this.incomplete };
     return { ok: true };
   }
 
   /**
-   * Markdown equivalent of today's `JUMI_REVIEW.md`: one finding line per
-   * recorded finding, then exactly one `jumi-check` trailer. Findings without
-   * a path/line publish as severity-marker body lines.
+   * Markdown equivalent of today's `JUMI_REVIEW.md`: one finding block per
+   * recorded finding (first line plus attached `Proof:` continuation lines),
+   * then exactly one `jumi-check` trailer.
    */
   toMarkdown(): string {
-    const lines: string[] = [];
-    for (const finding of this.findings.values()) {
-      // Canonical single marker: the model already writes its own marker
-      // (`❓ maintainer:`, `💡 simpler:`) and may repeat it in the body;
-      // canonicalizing title and body separately strips each part's leading
-      // markers so the published body carries one marker the text parser
-      // matches, and an unlocated line never parses as a located finding.
-      const canonical = canonicalFindingLine(finding.title, finding.body, finding.severity);
-      if (finding.path && finding.line != null) {
-        lines.push(`${finding.path}:${finding.line}: ${canonical}`);
-      } else {
-        lines.push(canonical);
-      }
-    }
-    const verdict = this.verdict;
-    const trailer = verdict
-      ? buildCheckTrailer(verdict.state, verdict.reason)
-      : "<!-- jumi-check: failure; Incomplete review: no verdict -->";
-    return [...lines, trailer].join("\n");
+    return this.renderFor([...this.findings.values()], this.verdict);
   }
 
   /**
@@ -508,7 +494,7 @@ export class ReviewVerdictStore {
    * what the store knows.
    */
   toRecord(): ReviewRecord {
-    const counts: ReviewRecordCounts = { bug: 0, risk: 0, question: 0, suggestion: 0 };
+    const counts: ReviewRecordCounts = { bug: 0, risk: 0, question: 0, suggestion: 0, maintainerQuestion: 0 };
     const findings: ReviewRecordFinding[] = [];
     for (const finding of this.findings.values()) {
       counts[finding.severity] += 1;
@@ -519,10 +505,13 @@ export class ReviewVerdictStore {
         severity: finding.severity,
         title: finding.title,
         body: finding.body,
+        ...(finding.maintainerDecision && finding.maintainerDecision !== "none"
+          ? { maintainerDecision: finding.maintainerDecision }
+          : {}),
+        ...(finding.proof ? { proof: finding.proof } : {}),
       });
     }
-    const maintainerQuestion = countMaintainerStoreFindings([...this.findings.values()]);
-    if (maintainerQuestion > 0) counts.maintainerQuestion = maintainerQuestion;
+    counts.maintainerQuestion = countMaintainerStoreFindingsTyped([...this.findings.values()]);
     if (!this.verdict) {
       return { version: 1, state: "incomplete", findings, counts };
     }
@@ -532,6 +521,7 @@ export class ReviewVerdictStore {
       ...(this.verdict.reason ? { reason: this.verdict.reason } : {}),
       findings,
       counts,
+      ...(this.incomplete !== "none" ? { incomplete: this.incomplete } : {}),
     };
   }
 }

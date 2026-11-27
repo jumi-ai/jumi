@@ -354,6 +354,8 @@ describe("pi offline structured review", () => {
             "read",
             "bash",
             "jumi_add_finding",
+            "jumi_update_finding",
+            "jumi_remove_finding",
             "jumi_set_verdict",
             "jumi_list_findings",
             "jumi_previous_findings",
@@ -562,12 +564,18 @@ describe("pi offline structured review", () => {
     // The harness exposes exactly the role-scoped Jumi tools (plus guarded read/bash).
     expect([...PI_REVIEW_TOOL_NAMES]).toEqual([
       "jumi_add_finding",
+      "jumi_update_finding",
+      "jumi_remove_finding",
       "jumi_set_verdict",
       "jumi_list_findings",
       "jumi_previous_findings",
     ]);
     const toolName: PiReviewToolName = "jumi_set_verdict";
     expect([...PI_REVIEW_TOOL_NAMES]).toContain(toolName);
+    const updateName: PiReviewToolName = "jumi_update_finding";
+    expect([...PI_REVIEW_TOOL_NAMES]).toContain(updateName);
+    const removeName: PiReviewToolName = "jumi_remove_finding";
+    expect([...PI_REVIEW_TOOL_NAMES]).toContain(removeName);
     // The legacy engine keeps its own derivation; Pi never inherits it.
     expect(resolveReviewVerdictContract({ runnerType: "opencode", explicit: "legacy" })).toBe("legacy");
     expect(resolvePiVerdictContract(resolveReviewVerdictContract({ runnerType: "opencode", explicit: "legacy" }))).toBe(
