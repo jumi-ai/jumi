@@ -63,6 +63,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `OPENCODE_WELLKNOWN_TOKEN`
 - `CODEX_AUTH_FILE`
 - `JUMI_SEARXNG_URL`
+- `JUMI_FORGE_IDENTITY`
 - `HOME`
 - `WORKDIR`
 - `QUEUE_CONCURRENCY`
@@ -329,6 +330,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `OPENCODE_WELLKNOWN_TOKEN`
 - `CODEX_AUTH_FILE`
 - `JUMI_SEARXNG_URL`
+- `JUMI_FORGE_IDENTITY`
 - `HOME`
 - `WORKDIR`
 - `GRADLE_SEED_HOME`

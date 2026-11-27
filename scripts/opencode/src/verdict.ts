@@ -330,6 +330,56 @@ export function parseReviewFindings(text: string, opts?: { singleFilePath?: stri
   return findings;
 }
 
+/**
+ * Every published finding block in order, located or not: the raw first line,
+ * the optional location, the full block body, and the raw continuation lines.
+ * `parseReviewFindings` covers only located findings; unlocated
+ * severity-marker lines publish too (they count in the body counters) and the
+ * signed summary block lists them as well, so this is the block source the
+ * meta builder resolves against.
+ */
+export interface PublishedFindingBlock {
+  path?: string;
+  line?: number;
+  /** Raw first line as written (with the location prefix when located). */
+  first: string;
+  /** Full block body: first-line body plus continuation lines. */
+  body: string;
+  /** Raw continuation lines after the first (for the competing-syntax rule). */
+  rest: string[];
+}
+
+export function publishedFindingBlocks(
+  text: string,
+  opts?: { singleFilePath?: string; keep?: readonly string[] }
+): PublishedFindingBlock[] {
+  const { blocks } = collectFindingBlocks(text, opts);
+  const out: PublishedFindingBlock[] = [];
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    const rest = block.lines.slice(1).map((line) => line.trimEnd());
+    const finding = findingFromLine(block.first, opts);
+    if (finding) {
+      out.push({
+        path: finding.path,
+        line: finding.line,
+        first: block.first.trimEnd(),
+        body: fullFindingBody(finding, block.lines),
+        rest,
+      });
+      continue;
+    }
+    if (isFindingMarkerLine(block.first)) {
+      out.push({
+        first: block.first.trimEnd(),
+        body: [stripFindingPrefix(block.first), ...rest].join("\n").trim(),
+        rest,
+      });
+    }
+  }
+  return out;
+}
+
 const SEVERITY_EMOJI_RE = /^(🔴|🟡|💡|❓)\s*/u;
 const SEVERITY_WORD_RE = /^(bug|risk|simpler|suggestions?|questions?|q)\s*:\s*/i;
 

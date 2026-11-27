@@ -330,6 +330,12 @@ export async function runReviewJob(
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
+      meta: {
+        webhookSecret: config.webhookSecret,
+        giteaUrl: config.giteaUrl,
+        ...(config.forgeIdentity ? { forgeIdentity: config.forgeIdentity } : {}),
+        jobId: extras.jobId ?? job.delivery,
+      },
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
       botUsername: config.botUsername,
       blockingQuestionAuthors: config.blockingQuestionAuthors,
@@ -834,6 +840,12 @@ export async function publishPersistedJob(
     resultReason: row.resultReason,
     error: row.error,
     logger,
+    meta: {
+      webhookSecret: config.webhookSecret,
+      giteaUrl: config.giteaUrl,
+      ...(config.forgeIdentity ? { forgeIdentity: config.forgeIdentity } : {}),
+      jobId: `row-${row.id}`,
+    },
   });
   return result;
 }

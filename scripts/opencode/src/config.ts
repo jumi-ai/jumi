@@ -37,6 +37,8 @@ export interface ServiceConfig {
   ignoreConflictsLabel: string;
   blockingQuestionAuthors: string[];
   automergeRepos: string[];
+  /** Optional override for the signed review-meta forge identity. Unset derives `host/bot` from the forge URL. */
+  forgeIdentity?: string;
   /** Global auto-merge kill switch. Unset defaults to on; `false` disables every schedule. */
   automergeEnabled: boolean;
   model: string;
@@ -289,6 +291,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     ...forgeBind,
     githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
+    forgeIdentity: optionalEnv(resolved, "JUMI_FORGE_IDENTITY"),
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     trustedSenderLogins: csvEnv(resolved, "TRUSTED_SENDER_LOGINS"),
     ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",
