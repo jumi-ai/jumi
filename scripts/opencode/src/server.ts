@@ -332,7 +332,9 @@ export async function runReviewJob(
       giteaToken: config.giteaToken,
       meta: {
         webhookSecret: config.webhookSecret,
+        giteaUrl: config.giteaUrl,
         ...(config.forgeIdentity ? { forgeIdentity: config.forgeIdentity } : {}),
+        jobId: extras.jobId ?? job.delivery,
       },
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
       botUsername: config.botUsername,
