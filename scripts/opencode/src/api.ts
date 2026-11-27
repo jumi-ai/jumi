@@ -47,6 +47,7 @@ function toRepo(repo: GiteaRepo): Repo {
     clone_url: repo.clone_url,
     default_branch: repo.default_branch,
     owner: actor(repo.owner),
+    ...(typeof repo.private === "boolean" ? { private: repo.private } : {}),
     ...(repo.default_merge_style ? { defaultMergeStyle: repo.default_merge_style } : {}),
     ...(repo.allow_merge_commits !== undefined ? { allowMergeCommits: repo.allow_merge_commits } : {}),
     ...(repo.allow_squash_merge !== undefined ? { allowSquashMerge: repo.allow_squash_merge } : {}),

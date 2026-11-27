@@ -22,7 +22,7 @@ import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { type HandoffStore, handoffsFor } from "./handoff.ts";
-import { harnessModeMatches, normalizeHarnessMode, throwIfPiHarness } from "./harness_mode.ts";
+import { harnessModeMatches, normalizeHarnessMode } from "./harness_mode.ts";
 import { settleHeldCancelThroughGate } from "./hold_cancel.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
@@ -93,6 +93,17 @@ export interface RunWorkerJobExtras {
   now?: () => number;
   /** One-shot jobs inject a full-clone runtime (no shared cache). Long-running keeps the standing pod. */
   runtime?: StandingPodRuntime;
+  /**
+   * Pi session seams (loopback doubles in tests). Production passes none and
+   * builds the real Go session. Type-only: the Pi modules load dynamically
+   * on the pi path, never on legacy.
+   */
+  piSeams?: import("./pi_jobs.ts").PiJobSeams;
+  /**
+   * Pi deployment override (tests). Production resolves it from the process
+   * environment inside the pi branch.
+   */
+  piDeployment?: import("./pi_jobs.ts").PiDeployment;
 }
 
 function log(message: string) {
@@ -612,8 +623,9 @@ export async function processWorkerTick(
   pids?: Map<string, number>
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
-  // Explicit pi fails before any lease or spawn; legacy follows existing dispatch.
-  throwIfPiHarness(config.harnessMode ?? "legacy");
+  // Pi mode dispatches to the Pi executors below; legacy follows the existing
+  // dispatch.
+  const isPi = (config.harnessMode ?? "legacy") === "pi";
   const nowMs = extras.now?.() ?? Date.now();
   if (extras.runnerCooldowns && typeof store.listRunnerCooldowns === "function") {
     try {
@@ -658,12 +670,14 @@ export async function processWorkerTick(
   }
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), WORKER_JOB_KINDS);
   if (!row) return "idle";
-  // Fenced attempt: never resume a live session in a different harness mode.
-  // Old rows (no stamp) read as legacy for compatibility.
+  // Fenced attempt: a session recorded under one harness mode is never
+  // resumed under the other. Old rows (no stamp) read as legacy for
+  // compatibility and run fresh in either mode. On a mismatch the row runs a
+  // fresh attempt in the current mode and the new save overwrites the other
+  // mode's reference; the lease is kept so the tick never loops.
   if (!harnessModeMatches((row as { harnessMode?: unknown }).harnessMode, config.harnessMode ?? "legacy")) {
-    await store.releaseLease(row.id, leasedBy).catch(() => undefined);
-    throw new Error(
-      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt required, never resuming a live session`
+    logger(
+      `Harness mode changed (recorded ${normalizeHarnessMode((row as { harnessMode?: unknown }).harnessMode)} vs current ${config.harnessMode ?? "legacy"}): fresh fenced attempt, never resuming the other mode's session`
     );
   }
   if (extras.abortSignal?.aborted) {
@@ -1025,8 +1039,42 @@ export async function processWorkerTick(
     const runImplement = extras.implement ?? implementIssue;
     const runFollowUp = extras.followUp ?? implementFollowUp;
     const runConflict = extras.conflict ?? implementConflict;
-    const result =
-      job.mode === "conflict"
+    const result = isPi
+      ? await (async () => {
+          // Pi path: the same lease, role policy, retries, quota holds, and
+          // publication as legacy; only the coding loop is Pi. The modules
+          // load dynamically so legacy never imports Pi.
+          const pi = await import("./pi_jobs.ts");
+          const piKind = row.kind === "conflict" ? "conflict" : row.kind === "follow-up" ? "follow-up" : "implement";
+          return pi.runPiWorkerJob({
+            kind: piKind,
+            owner: row.owner,
+            repo: row.repo,
+            issueNumber: job.issueNumber,
+            ...(job.prNumber !== undefined ? { prNumber: job.prNumber } : {}),
+            ...(job.headSha ? { headSha: job.headSha } : {}),
+            title: job.title,
+            body: job.body,
+            ...(job.defaultBranch ? { defaultBranch: job.defaultBranch } : {}),
+            ...(job.cloneUrl ? { cloneUrl: job.cloneUrl } : {}),
+            config: {
+              workdir: effectiveConfig.workdir,
+              home: effectiveConfig.home,
+              giteaUrl: effectiveConfig.giteaUrl,
+              giteaToken: effectiveConfig.giteaToken,
+              botUsername: effectiveConfig.botUsername,
+              opencodeTimeoutMs: effectiveConfig.opencodeTimeoutMs,
+            },
+            api,
+            logger,
+            deployment: extras.piDeployment ?? pi.loadPiDeployment(),
+            prevError: row.error,
+            save: (persisted) => store.saveResult(rowId, leasedBy, persisted),
+            abortSignal: abort.signal,
+            ...(extras.piSeams ? { seams: extras.piSeams } : {}),
+          });
+        })()
+      : job.mode === "conflict"
         ? await runConflict({
             ...shared,
             timeoutMs: effectiveConfig.conflictTimeoutMs,
@@ -1364,7 +1412,19 @@ export async function processWorkerTick(
       // defeat that decision with an immediate retry that loops every tick.
       try {
         const now = Date.now();
-        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
+        // A Pi quota hold carries its attempt stamp through the requeue (the
+        // tick path never calls `saveResult`, which would block the requeue).
+        // Legacy quota errors carry no stamp and keep the existing behavior.
+        const piAttempt = (err as { piAttempt?: import("./pi_attempt.ts").PiAttemptStamp }).piAttempt;
+        await store.requeueInfra(
+          row.id,
+          leasedBy,
+          err.backoffMs,
+          err.marker,
+          undefined,
+          failedRunner,
+          piAttempt ? { harnessMode: "pi", piAttempt } : undefined
+        );
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(now + err.backoffMs);
         else await store.recordRoleQuotaWait("worker", now + err.backoffMs);
         logDiagnostic(logger, "opencode_quota_wait", {

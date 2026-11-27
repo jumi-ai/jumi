@@ -2,6 +2,7 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { type HarnessMode, parseHarnessMode } from "./harness_mode.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
+import { validatePiStartupEnv } from "./pi_env.ts";
 import {
   type IndependentReviewConfig,
   loadRunnersCatalog,
@@ -260,9 +261,17 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // so the contract gate sees the optional key. Unset or blank means all Pi
   // routes stay off; runtime reads it via `piAllowedRoutesFromEnv`.
   void optionalEnv(resolved, "JUMI_PI_ALLOWED_ROUTES");
+  // Deployment-owned Pi profile catalog file (`src/pi_env.ts`); read here so
+  // the contract gate sees the optional key. Never read in legacy mode.
+  void optionalEnv(resolved, "JUMI_PI_PROFILES_FILE");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const setupTimeoutMaxMs = intEnv(resolved, "SETUP_TIMEOUT_MAX_MS", 10 * 60 * 1000);
+  // Deployment-only harness selector is validated below: pi mode needs the
+  // profiles file, a non-empty allowlist, and only wired routes, and fails
+  // process start naming the cause. Legacy mode never reads the file.
+  const harnessMode = parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE"));
+  if (harnessMode === "pi") validatePiStartupEnv(resolved);
   const maxFiles = intEnv(resolved, "MAX_FILES", 100);
   const maxPatchBytes = intEnv(resolved, "MAX_PATCH_BYTES", 500_000);
   const maxFilesMax = intEnv(resolved, "MAX_FILES_MAX", maxFiles);
@@ -323,8 +332,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),
     maxIncompleteRetries: intEnv(resolved, MAX_INCOMPLETE_RETRIES_ENV, 2),
     // Deployment-only harness selector: unset is legacy, invalid fails startup.
-    // Never inferred from forge, never from repository settings.
-    harnessMode: parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE")),
+    // Never inferred from forge, never from repository settings. Pi startup was
+    // validated above (`validatePiStartupEnv` fails pi start naming the cause).
+    harnessMode,
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
     boardPeerUrl: optionalEnv(resolved, "BOARD_PEER_URL"),
     boardPeerToken: optionalEnv(resolved, "BOARD_PEER_TOKEN"),

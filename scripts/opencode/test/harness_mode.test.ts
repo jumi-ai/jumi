@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import {
   HARNESS_MODE_ENV,
@@ -34,8 +37,26 @@ function fakeReviewApi(): any {
   };
 }
 
-function fakeIssueApi(): any {
-  return {};
+const PI_GO_PROFILE = {
+  provider: "opencode-go",
+  model: "muse-spark-1.3-contributor",
+  endpoint: "https://opencode.ai/zen/go/v1",
+  fundingPool: "go-pool",
+  payer: "go-subscription",
+  credentialRef: "env:EXAMPLE_GO_KEY",
+  scopes: ["public"],
+  sku: "contributor",
+};
+
+async function piCatalogFile(): Promise<{ dir: string; path: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "jumi-harness-pi-"));
+  const path = join(dir, "profiles.json");
+  await writeFile(path, JSON.stringify({ "pi-go-spark": PI_GO_PROFILE }));
+  return { dir, path };
+}
+
+function piDeployment(): { mode: "pi"; catalog: Record<string, never>; allowlist: string[] } {
+  return { mode: "pi", catalog: { "pi-go-spark": PI_GO_PROFILE } as never, allowlist: ["pi-go-spark"] };
 }
 
 describe("JUMI_HARNESS_MODE", () => {
@@ -57,7 +78,7 @@ describe("JUMI_HARNESS_MODE", () => {
     expect(() => loadWorkerConfig({ ...WORKER_BASE, JUMI_HARNESS_MODE: "bogus" })).toThrow("JUMI_HARNESS_MODE");
   });
 
-  test("two factory configs on the same release: unset and explicit legacy share dispatch", () => {
+  test("two factory configs on the same release: unset and explicit legacy share dispatch", async () => {
     const unsetReviewer = loadConfig({ ...REVIEWER_BASE });
     const legacyReviewer = loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "legacy" });
     expect(unsetReviewer.harnessMode).toBe("legacy");
@@ -73,40 +94,136 @@ describe("JUMI_HARNESS_MODE", () => {
     expect(legacyWorker.chain).toEqual(unsetWorker.chain);
     expect(legacyWorker.runners).toEqual(unsetWorker.runners);
 
-    // Same release, same catalogs: pi factory keeps the catalog unchanged.
-    const piReviewer = loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "pi" });
-    expect(piReviewer.harnessMode).toBe("pi");
-    expect(piReviewer.chain).toEqual(unsetReviewer.chain);
-    expect(piReviewer.runners).toEqual(unsetReviewer.runners);
-    const piWorker = loadWorkerConfig({ ...WORKER_BASE, JUMI_HARNESS_MODE: "pi" });
-    expect(piWorker.harnessMode).toBe("pi");
-    expect(piWorker.chain).toEqual(unsetWorker.chain);
+    // Same release, same catalogs: the pi factory keeps the runner catalog
+    // unchanged once its deployment file and allowlist are set.
+    const { dir, path } = await piCatalogFile();
+    try {
+      const piEnv = { JUMI_HARNESS_MODE: "pi", JUMI_PI_PROFILES_FILE: path, JUMI_PI_ALLOWED_ROUTES: "pi-go-spark" };
+      const piReviewer = loadConfig({ ...REVIEWER_BASE, ...piEnv });
+      expect(piReviewer.harnessMode).toBe("pi");
+      expect(piReviewer.chain).toEqual(unsetReviewer.chain);
+      expect(piReviewer.runners).toEqual(unsetReviewer.runners);
+      const piWorker = loadWorkerConfig({ ...WORKER_BASE, ...piEnv });
+      expect(piWorker.harnessMode).toBe("pi");
+      expect(piWorker.chain).toEqual(unsetWorker.chain);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
-  test("explicit pi fails clearly without spawning legacy (reviewer)", async () => {
-    const store = new MemoryReviewJobStore();
-    const config = loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "pi" });
-    let spawned = false;
-    const api = {
-      getPR: async () => {
-        spawned = true;
-        throw new Error("must not spawn");
-      },
-    };
-    await expect(processEngineTick(store, config, api as never, "lease-1")).rejects.toBeInstanceOf(
-      PiHarnessNotImplementedError
-    );
-    expect(spawned).toBe(false);
+  test("explicit pi fails process start naming the cause (reviewer)", async () => {
+    // No profiles file: start fails naming the key, before any lease or spawn.
+    expect(() => loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "pi" })).toThrow("JUMI_PI_PROFILES_FILE");
+    const { dir, path } = await piCatalogFile();
+    try {
+      // A profiles file with an empty allowlist fails naming the allowlist.
+      expect(() => loadConfig({ ...REVIEWER_BASE, JUMI_HARNESS_MODE: "pi", JUMI_PI_PROFILES_FILE: path })).toThrow(
+        "JUMI_PI_ALLOWED_ROUTES"
+      );
+      // A valid Go deployment loads, and the tick attempts the Pi path
+      // without spawning legacy.
+      const config = loadConfig({
+        ...REVIEWER_BASE,
+        JUMI_HARNESS_MODE: "pi",
+        JUMI_PI_PROFILES_FILE: path,
+        JUMI_PI_ALLOWED_ROUTES: "pi-go-spark",
+      });
+      const store = new MemoryReviewJobStore();
+      await store.enqueue({
+        delivery: "d1",
+        owner: "o",
+        repo: "r",
+        prNumber: 1,
+        action: "synchronize",
+        headSha: "abc",
+        receivedAt: new Date().toISOString(),
+      } as never);
+      let spawned = false;
+      const api = {
+        getPR: async () => {
+          throw new Error("forge down (expected: pi path reads the PR before any spawn)");
+        },
+      };
+      const tick = await processEngineTick(
+        store,
+        config,
+        api as never,
+        "lease-1",
+        {
+          engine: async () => {
+            spawned = true;
+            throw new Error("must not spawn legacy on pi");
+          },
+          piDeployment: piDeployment(),
+        } as never,
+        () => undefined
+      );
+      expect(tick).toBe("processed");
+      expect(spawned).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
     expect(() => throwIfPiHarness("pi")).toThrow(PiHarnessNotImplementedError);
     expect(() => throwIfPiHarness("legacy")).not.toThrow();
   });
 
-  test("explicit pi fails clearly without spawning legacy (worker)", async () => {
-    const store = new MemoryReviewJobStore();
-    const config = loadWorkerConfig({ ...WORKER_BASE, JUMI_HARNESS_MODE: "pi" });
-    await expect(processWorkerTick(store, config, fakeIssueApi(), "lease-1")).rejects.toBeInstanceOf(
-      PiHarnessNotImplementedError
-    );
+  test("explicit pi fails process start and never spawns legacy (worker)", async () => {
+    expect(() => loadWorkerConfig({ ...WORKER_BASE, JUMI_HARNESS_MODE: "pi" })).toThrow("JUMI_PI_PROFILES_FILE");
+    const { dir, path } = await piCatalogFile();
+    try {
+      const config = loadWorkerConfig({
+        ...WORKER_BASE,
+        JUMI_HARNESS_MODE: "pi",
+        JUMI_PI_PROFILES_FILE: path,
+        JUMI_PI_ALLOWED_ROUTES: "pi-go-spark",
+      });
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue({
+        delivery: "d1",
+        owner: "o",
+        repo: "r",
+        issueNumber: 1,
+        action: "opened",
+        title: "t",
+        body: "b",
+        htmlUrl: "https://gitea.example/o/r/issues/1",
+        issueUpdatedAt: new Date().toISOString(),
+        defaultBranch: "main",
+        cloneUrl: "https://gitea.example/o/r.git",
+        receivedAt: new Date().toISOString(),
+      });
+      let spawned = false;
+      const stub = async (): Promise<never> => {
+        spawned = true;
+        throw new Error("must not spawn legacy on pi");
+      };
+      const api = {
+        getRepo: async () => ({
+          name: "r",
+          full_name: "o/r",
+          html_url: "https://gitea.example/o/r",
+          clone_url: "https://gitea.example/o/r.git",
+          default_branch: "main",
+          owner: { login: "o" },
+          private: true,
+        }),
+      };
+      const tick = await processWorkerTick(
+        store,
+        config,
+        api as never,
+        "lease-1",
+        { implement: stub, followUp: stub, conflict: stub, piDeployment: piDeployment() } as never,
+        () => undefined
+      );
+      expect(tick).toBe("processed");
+      expect(spawned).toBe(false);
+      const row = await store.get(1);
+      expect(row?.harnessMode).toBe("pi");
+      expect(row?.piOutcome).toBe("denied");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
     void fakeReviewApi;
   });
 

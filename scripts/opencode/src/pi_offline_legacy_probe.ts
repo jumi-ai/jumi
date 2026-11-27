@@ -11,8 +11,9 @@
  * - Legacy startup/dispatch for both roles without Pi credentials: real
  *   `loadConfig`/`loadWorkerConfig` plus the production dispatch gates
  *   (`processEngineTick`/`processWorkerTick`) on a memory ledger.
- * - Pi failure without rescue: `JUMI_HARNESS_MODE=pi` fails with
- *   `PiHarnessNotImplementedError` before any spawn, never falling back.
+ * - Pi failure without rescue: `JUMI_HARNESS_MODE=pi` fails process start
+ *   naming `JUMI_PI_PROFILES_FILE`, an empty allowlist, or an unwired route,
+ *   and both ticks attempt the Pi path without spawning legacy.
  *
  * A source import or `--version` check cannot pass this probe: every case
  * below executes the real session or the real dispatch gate. No Docker
@@ -29,7 +30,6 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, createProvider } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
-import { PiHarnessNotImplementedError } from "./harness_mode.ts";
 import { runPiReviewAttempt } from "./pi_review.ts";
 import { runPiWorkerAttempt } from "./pi_worker.ts";
 import { MemoryReviewJobStore } from "./review_jobs.ts";
@@ -356,61 +356,181 @@ async function main(): Promise<number> {
     push("legacy startup and dispatch for both roles without Pi credentials", false, errorMessage(err));
   }
 
-  // --- Pi failure without rescue for both roles ---
+  // --- Pi fails process start clearly without spawning legacy ---
   try {
-    let reviewerSpawned = false;
-    const piReviewer = loadConfig({ ...REVIEWER_BASE, HOME: freshHome, JUMI_HARNESS_MODE: "pi" } as never);
-    const reviewStore = new MemoryReviewJobStore();
-    await reviewStore.enqueue({
-      delivery: "probe-d1",
-      owner: "o",
-      repo: "r",
-      prNumber: 1,
-      action: "synchronize",
-      headSha: "abc",
-      receivedAt: new Date().toISOString(),
-    } as never);
-    let reviewerThrew = false;
+    let legacySpawned = false;
+    const legacyEngine = async (..._args: never[]): Promise<never> => {
+      legacySpawned = true;
+      throw new Error("must not spawn legacy on pi");
+    };
+    // 1. Missing profiles file fails naming the key (both roles).
+    let missingFile = false;
     try {
-      await processEngineTick(
+      loadConfig({ ...REVIEWER_BASE, HOME: freshHome, JUMI_HARNESS_MODE: "pi" } as never);
+    } catch (err) {
+      missingFile = /JUMI_PI_PROFILES_FILE/.test(errorMessage(err));
+    }
+    let missingFileWorker = false;
+    try {
+      loadWorkerConfig({ ...WORKER_BASE, HOME: freshHome, JUMI_HARNESS_MODE: "pi" } as never);
+    } catch (err) {
+      missingFileWorker = /JUMI_PI_PROFILES_FILE/.test(errorMessage(err));
+    }
+    // 2. A profiles file with an empty allowlist fails naming the allowlist.
+    const catalogDir = await mkdtemp(join(tmpdir(), "jumi-image-probe-pi-catalog-"));
+    try {
+      const goCatalogPath = join(catalogDir, "profiles.json");
+      await writeFile(
+        goCatalogPath,
+        JSON.stringify({
+          "pi-go-spark": {
+            provider: "opencode-go",
+            model: "muse-spark-1.3-contributor",
+            endpoint: "https://opencode.ai/zen/go/v1",
+            fundingPool: "go-pool",
+            payer: "go-subscription",
+            credentialRef: "env:EXAMPLE_GO_KEY",
+            scopes: ["public"],
+            sku: "contributor",
+          },
+        })
+      );
+      let emptyAllowlist = false;
+      try {
+        loadConfig({
+          ...REVIEWER_BASE,
+          HOME: freshHome,
+          JUMI_HARNESS_MODE: "pi",
+          JUMI_PI_PROFILES_FILE: goCatalogPath,
+        } as never);
+      } catch (err) {
+        emptyAllowlist = /JUMI_PI_ALLOWED_ROUTES/.test(errorMessage(err));
+      }
+      // 3. An allowlisted route with no wired transport fails as "route not wired".
+      const unwiredPath = join(catalogDir, "unwired.json");
+      await writeFile(
+        unwiredPath,
+        JSON.stringify({
+          "pi-chatgpt-oss": {
+            provider: "openai",
+            model: "gpt-6.2-sol",
+            endpoint: "https://api.openai.com/v1",
+            fundingPool: "chatgpt-pool",
+            payer: "chatgpt-subscription",
+            credentialRef: "operator:chatgpt-login",
+            scopes: ["public"],
+          },
+        })
+      );
+      let unwiredReviewer = false;
+      try {
+        loadConfig({
+          ...REVIEWER_BASE,
+          HOME: freshHome,
+          JUMI_HARNESS_MODE: "pi",
+          JUMI_PI_PROFILES_FILE: unwiredPath,
+          JUMI_PI_ALLOWED_ROUTES: "pi-chatgpt-oss",
+        } as never);
+      } catch (err) {
+        unwiredReviewer = /route not wired/.test(errorMessage(err));
+      }
+      let unwiredWorker = false;
+      try {
+        loadWorkerConfig({
+          ...WORKER_BASE,
+          HOME: freshHome,
+          JUMI_HARNESS_MODE: "pi",
+          JUMI_PI_PROFILES_FILE: unwiredPath,
+          JUMI_PI_ALLOWED_ROUTES: "pi-chatgpt-oss",
+        } as never);
+      } catch (err) {
+        unwiredWorker = /route not wired/.test(errorMessage(err));
+      }
+      // 4. A valid Go deployment loads, and both ticks attempt the Pi path
+      // without touching the legacy engine. The review tick observes the
+      // forge read (then fails closed with no network); the worker tick
+      // fails the visibility read closed into a private refusal.
+      const deployment = {
+        mode: "pi" as const,
+        catalog: JSON.parse(await readFile(goCatalogPath, "utf8")),
+        allowlist: ["pi-go-spark"],
+      };
+      const piReviewer = loadConfig({
+        ...REVIEWER_BASE,
+        HOME: freshHome,
+        JUMI_HARNESS_MODE: "pi",
+        JUMI_PI_PROFILES_FILE: goCatalogPath,
+        JUMI_PI_ALLOWED_ROUTES: "pi-go-spark",
+      } as never);
+      const reviewStore = new MemoryReviewJobStore();
+      await reviewStore.enqueue({
+        delivery: "probe-d1",
+        owner: "o",
+        repo: "r",
+        prNumber: 1,
+        action: "synchronize",
+        headSha: "abc",
+        receivedAt: new Date().toISOString(),
+      } as never);
+      let forgeRead = false;
+      const reviewTick = await processEngineTick(
         reviewStore,
         piReviewer,
         {
           getPR: async () => {
-            reviewerSpawned = true;
-            throw new Error("must not spawn legacy on pi");
+            forgeRead = true;
+            throw new Error("forge unreachable (expected in probe)");
           },
         } as never,
-        "probe-lease"
+        "probe-lease",
+        { engine: legacyEngine, piDeployment: deployment } as never
       );
-    } catch (err) {
-      reviewerThrew = err instanceof PiHarnessNotImplementedError;
+      const piWorker = loadWorkerConfig({
+        ...WORKER_BASE,
+        HOME: freshHome,
+        JUMI_HARNESS_MODE: "pi",
+        JUMI_PI_PROFILES_FILE: goCatalogPath,
+        JUMI_PI_ALLOWED_ROUTES: "pi-go-spark",
+      } as never);
+      const workerStore = new MemoryReviewJobStore();
+      await workerStore.enqueueIssue({
+        delivery: "probe-w1",
+        owner: "o",
+        repo: "r",
+        issueNumber: 1,
+        action: "opened",
+        title: "probe",
+        body: "probe",
+        htmlUrl: "https://gitea.example/o/r/issues/1",
+        issueUpdatedAt: new Date().toISOString(),
+        defaultBranch: "main",
+        cloneUrl: "https://gitea.example/o/r.git",
+        receivedAt: new Date().toISOString(),
+      });
+      const workerTick = await processWorkerTick(workerStore, piWorker, {} as never, "probe-lease", {
+        implement: legacyEngine,
+        followUp: legacyEngine,
+        conflict: legacyEngine,
+        piDeployment: deployment,
+      } as never);
+      push(
+        "pi harness fails without rescue to legacy for both roles",
+        piReviewer.harnessMode === "pi" &&
+          piWorker.harnessMode === "pi" &&
+          missingFile &&
+          missingFileWorker &&
+          emptyAllowlist &&
+          unwiredReviewer &&
+          unwiredWorker &&
+          forgeRead &&
+          reviewTick === "processed" &&
+          workerTick === "processed" &&
+          !legacySpawned,
+        `missingFile=${missingFile}/${missingFileWorker} empty=${emptyAllowlist} unwired=${unwiredReviewer}/${unwiredWorker} forgeRead=${forgeRead} ticks=${reviewTick}/${workerTick} spawned=${legacySpawned}`
+      );
+    } finally {
+      await rm(catalogDir, { recursive: true, force: true });
     }
-    const piWorker = loadWorkerConfig({ ...WORKER_BASE, HOME: freshHome, JUMI_HARNESS_MODE: "pi" } as never);
-    const workerStore = new MemoryReviewJobStore();
-    await workerStore.enqueue({
-      delivery: "probe-w1",
-      owner: "o",
-      repo: "r",
-      issueNumber: 1,
-      action: "opened",
-      receivedAt: new Date().toISOString(),
-    } as never);
-    let workerThrew = false;
-    try {
-      await processWorkerTick(workerStore, piWorker, {} as never, "probe-lease");
-    } catch (err) {
-      workerThrew = err instanceof PiHarnessNotImplementedError;
-    }
-    push(
-      "pi harness fails without rescue to legacy for both roles",
-      piReviewer.harnessMode === "pi" &&
-        piWorker.harnessMode === "pi" &&
-        reviewerThrew &&
-        workerThrew &&
-        !reviewerSpawned,
-      `reviewerThrew=${reviewerThrew} workerThrew=${workerThrew} spawned=${reviewerSpawned}`
-    );
   } catch (err) {
     push("pi harness fails without rescue to legacy for both roles", false, errorMessage(err));
   }

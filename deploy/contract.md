@@ -10,9 +10,11 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 
 ## GitOps
 
-`JUMI_HARNESS_MODE` is deployment-only (`legacy` or `pi`) for reviewer, worker, and one-shot Jobs. Unset or empty is `legacy`; any other value fails process start. The two factories are independent deployments of the same release: never infer the mode from forge, never allow a repository override, and never change live config. `legacy` follows the existing runner dispatch with unchanged catalogs and no Pi import, initialization, or credentials; explicit `pi` fails clearly without spawning legacy until the Pi harness lands.
+`JUMI_HARNESS_MODE` is deployment-only (`legacy` or `pi`) for reviewer, worker, and one-shot Jobs. Unset or empty is `legacy`; any other value fails process start. The two factories are independent deployments of the same release: never infer the mode from forge, never allow a repository override, and never change live config. `legacy` follows the existing runner dispatch with unchanged catalogs and no Pi import, initialization, or credentials; `pi` runs reviews and the three worker intents through the existing Pi sessions on the OpenCode Go route, keeping leases, role policy, the required verdict contract, retries, quota holds, push, and publication exactly as in legacy. A Pi failure never starts a legacy process.
 
-`JUMI_PI_ALLOWED_ROUTES` is the deployment-owned Pi route allowlist (CSV of profile names) for reviewer, worker, and one-shot Jobs. Unset or blank means all Pi production routes stay off; having a profile, key, installed adapter, or discovered model never enables a route. A repository may narrow the list, never add to it.
+`JUMI_PI_ALLOWED_ROUTES` is the deployment-owned Pi route allowlist (CSV of profile names) for reviewer, worker, and one-shot Jobs. Unset or blank means all Pi production routes stay off; having a profile, key, installed adapter, or discovered model never enables a route. A repository may narrow the list, never add to it. The route chain is the allowlist order, capped at two routes per attempt.
+
+`JUMI_PI_PROFILES_FILE` is the deployment-owned Pi profile catalog file (JSON object of named profiles) for reviewer, worker, and one-shot Jobs. Unset with `JUMI_HARNESS_MODE=pi` fails process start naming the key. It is never read in legacy mode. Only the OpenCode Go route is wired: an allowlisted route whose transport is not wired yet fails process start as "route not wired". Data scope comes from the forge's repository visibility read at job time: private, non-public, or unreadable means private, and private work is refused with a clear reason before any request reaches the Contributor route. Every Pi attempt writes its attempt stamp (`harness_mode` plus the named profile, role, model, funding pool, payer, outcome, and stated usage); unknown usage stays NULL.
 
 ### reviewer
 
@@ -87,6 +89,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_ALLOW_UNSANDBOXED_REVIEWS`
 - `JUMI_HARNESS_MODE`
 - `JUMI_PI_ALLOWED_ROUTES`
+- `JUMI_PI_PROFILES_FILE`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
@@ -188,6 +191,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
 - `JUMI_HARNESS_MODE`
 - `JUMI_PI_ALLOWED_ROUTES`
+- `JUMI_PI_PROFILES_FILE`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
@@ -354,6 +358,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
 - `JUMI_HARNESS_MODE`
 - `JUMI_PI_ALLOWED_ROUTES`
+- `JUMI_PI_PROFILES_FILE`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`

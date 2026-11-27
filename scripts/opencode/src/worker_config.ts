@@ -2,6 +2,7 @@ import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile, SECRETS_DIR_ENV } fr
 import type { ForgeKind } from "./forge.ts";
 import { type HarnessMode, parseHarnessMode } from "./harness_mode.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
+import { validatePiStartupEnv } from "./pi_env.ts";
 import { DEFAULT_VERIFY_ATTEMPTS, DEFAULT_VERIFY_TIMEOUT_MS } from "./repo_verify.ts";
 import {
   type IndependentReviewConfig,
@@ -190,6 +191,9 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   // so the contract gate sees the optional key. Unset or blank means all Pi
   // routes stay off; runtime reads it via `piAllowedRoutesFromEnv`.
   void optionalEnv(resolved, "JUMI_PI_ALLOWED_ROUTES");
+  // Deployment-owned Pi profile catalog file (`src/pi_env.ts`); read here so
+  // the contract gate sees the optional key. Never read in legacy mode.
+  void optionalEnv(resolved, "JUMI_PI_PROFILES_FILE");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);
   const conflictTimeoutMs = intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000);
@@ -203,6 +207,9 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: opts.requireWebhookSecret ?? true });
   const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
   const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv, forgeBind.forge);
+  // Pi startup fails here naming the cause; legacy mode never reads the file.
+  const harnessMode = parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE"));
+  if (harnessMode === "pi") validatePiStartupEnv(resolved);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
@@ -253,8 +260,9 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
     // Deployment-only harness selector: unset is legacy, invalid fails startup.
-    // Never inferred from forge, never from repository settings.
-    harnessMode: parseHarnessMode(optionalEnv(resolved, "JUMI_HARNESS_MODE")),
+    // Never inferred from forge, never from repository settings. Pi startup was
+    // validated above (`validatePiStartupEnv` fails pi start naming the cause).
+    harnessMode,
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
     ...checkpointFromEnv(resolved),
   };

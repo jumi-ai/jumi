@@ -333,7 +333,13 @@ export interface ReviewJobStore {
     backoffMs: number,
     marker: string,
     now?: Date,
-    failedRunner?: string | null
+    failedRunner?: string | null,
+    /**
+     * Additive attempt-mode stamp for the requeued row. Quota holds requeue
+     * without a `saveResult`, so a Pi quota attempt carries its stamp here;
+     * legacy callers omit it and the row keeps its existing stamp columns.
+     */
+    stamp?: { harnessMode?: unknown; piAttempt?: PiAttemptStamp }
   ): Promise<boolean>;
   releaseLease(id: number, leasedBy: string): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
@@ -2074,7 +2080,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     backoffMs: number,
     marker: string,
     now = new Date(),
-    failedRunner?: string | null
+    failedRunner?: string | null,
+    stamp?: { harnessMode?: unknown; piAttempt?: PiAttemptStamp }
   ): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
@@ -2090,6 +2097,16 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       // next attempt rotates past it instead of reusing a stale name. A
       // non-runner backoff clears to null for a fresh draw.
       row.resultRunner = failedRunner ?? null;
+      // A Pi quota hold carries its attempt stamp through the requeue: only
+      // a non-legacy mode is stored, and only a complete stamp is stored, so
+      // old whole-row assertions keep passing. Legacy callers omit the stamp
+      // and the row keeps its existing stamp columns untouched.
+      if (stamp !== undefined) {
+        const mode = (stamp as { harnessMode?: unknown }).harnessMode;
+        if (typeof mode === "string" && mode !== "" && mode !== "legacy") row.harnessMode = mode;
+        else if (mode === "legacy") delete row.harnessMode;
+        applyPiAttemptToRecord(row, stamp.piAttempt);
+      }
       return true;
     });
   }
@@ -5367,8 +5384,12 @@ export class PgReviewJobStore implements ReviewJobStore {
     backoffMs: number,
     marker: string,
     now = new Date(),
-    failedRunner?: string | null
+    failedRunner?: string | null,
+    stamp?: { harnessMode?: unknown; piAttempt?: PiAttemptStamp }
   ): Promise<boolean> {
+    const modeRaw = (stamp as { harnessMode?: unknown } | undefined)?.harnessMode;
+    const modeValue = modeRaw === "pi" ? "pi" : null;
+    const pi = piAttemptStampToRecord(stamp?.piAttempt);
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
@@ -5377,12 +5398,42 @@ export class PgReviewJobStore implements ReviewJobStore {
              leased_until = $3::timestamptz,
              error = $4,
              result_runner = $5,
+             harness_mode = COALESCE($6, harness_mode),
+             pi_profile = COALESCE($7, pi_profile),
+             pi_role = COALESCE($8, pi_role),
+             pi_model = COALESCE($9, pi_model),
+             pi_funding_pool = COALESCE($10, pi_funding_pool),
+             pi_payer = COALESCE($11, pi_payer),
+             pi_outcome = COALESCE($12, pi_outcome),
+             pi_tokens_input = COALESCE($13, pi_tokens_input),
+             pi_tokens_cache_read = COALESCE($14, pi_tokens_cache_read),
+             pi_tokens_output = COALESCE($15, pi_tokens_output),
+             pi_tokens_cache_write = COALESCE($16, pi_tokens_cache_write),
+             pi_tokens_reasoning = COALESCE($17, pi_tokens_reasoning),
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
             AND result_markdown IS NULL AND result_reason IS NULL
             AND ${BACKOFF_ERROR_PREDICATE}
            RETURNING id`,
-        [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker, failedRunner ?? null]
+        [
+          id,
+          leasedBy,
+          new Date(now.getTime() + backoffMs).toISOString(),
+          marker,
+          failedRunner ?? null,
+          modeValue,
+          pi.piProfile,
+          pi.piRole,
+          pi.piModel,
+          pi.piFundingPool,
+          pi.piPayer,
+          pi.piOutcome,
+          pi.piTokensInput,
+          pi.piTokensCacheRead,
+          pi.piTokensOutput,
+          pi.piTokensCacheWrite,
+          pi.piTokensReasoning,
+        ]
       )
     );
     return rows.length > 0;
