@@ -972,8 +972,18 @@ describe("pi one-shot job", () => {
         getPRFiles: async () => [makeFile()],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
       });
-      const engineConfig = makeConfig({ workdir: work!, home: home!, harnessMode: "pi" });
-      const workerConfig = makeWorkerConfig({ workdir: work!, home: home!, harnessMode: "pi" });
+      const engineConfig = makeConfig({
+        workdir: work!,
+        home: home!,
+        harnessMode: "pi",
+        opencodeWellKnownUrl: "disabled",
+      });
+      const workerConfig = makeWorkerConfig({
+        workdir: work!,
+        home: home!,
+        harnessMode: "pi",
+        opencodeWellKnownUrl: "disabled",
+      });
       const result = await runOneShotJob({
         store,
         jobId: 1,
