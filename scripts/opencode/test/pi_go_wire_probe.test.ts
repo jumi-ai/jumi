@@ -87,8 +87,14 @@ describe("go wire tool declarations", () => {
     );
     // add_finding requires severity, so the missing required list must fail.
     expect(checkWireTools(stripped, REVIEW_EXPECTED_JUMI_TOOLS)).toContain("jumi_add_finding");
-    // An empty-contract tool keeps passing with the same stripped shape.
+    // An empty-contract tool keeps passing with the same stripped shape (plus codemode, which is required).
     const listOnly: Array<Record<string, unknown>> = [
+      {
+        type: "function",
+        name: "codemode",
+        description: "codemode",
+        parameters: { type: "object", required: [], properties: {} },
+      },
       {
         type: "function",
         name: "jumi_list_findings",
@@ -116,5 +122,10 @@ describe("go wire tool declarations", () => {
     const bad = [...wireTools(["jumi_set_pr_body"]), { type: "function", name: "grep", description: "search" }];
     expect(checkWireTools(bad, ["jumi_set_pr_body"])).toContain("grep");
     expect(checkWireTools("not-an-array", ["jumi_set_pr_body"])).not.toBeNull();
+  });
+
+  test("missing codemode fails while on mode passes", () => {
+    const withoutCodemode = wireTools(REVIEW_EXPECTED_JUMI_TOOLS).filter((tool) => tool.name !== "codemode");
+    expect(checkWireTools(withoutCodemode, REVIEW_EXPECTED_JUMI_TOOLS)).toContain("codemode");
   });
 });

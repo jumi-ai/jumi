@@ -198,11 +198,13 @@ async function initRepoWithFixture(): Promise<{ dir: string; cleanup: () => Prom
 }
 
 describe("pi offline worker", () => {
-  test("trusted loader exposes no discovery; role preamble names the intent", async () => {
+  test("trusted loader exposes only codemode; role preamble names the intent", async () => {
     for (const intent of ["implement", "follow-up", "conflict"] as PiWorkerIntent[]) {
       const loader = createTrustedPiWorkerResourceLoader("BASE-DATA-123", intent);
       await loader.reload();
-      expect(loader.getExtensions().extensions).toEqual([]);
+      const extensions = loader.getExtensions().extensions;
+      expect(extensions).toHaveLength(1);
+      expect([...(extensions[0] as unknown as { tools: Map<string, unknown> }).tools.keys()]).toEqual(["codemode"]);
       expect(loader.getSkills().skills).toEqual([]);
       expect(loader.getPrompts().prompts).toEqual([]);
       expect(loader.getThemes().themes).toEqual([]);
@@ -361,7 +363,7 @@ describe("pi offline worker", () => {
             model: model as never,
             modelRuntime: runtime as never,
             resourceLoader: loader,
-            tools: ["read", "bash", "edit", "write", ...piWorkerToolsForIntent(intent)],
+            tools: ["read", "bash", "edit", "write", "codemode", ...piWorkerToolsForIntent(intent)],
             customTools: [
               ...createPiWorkerCustomTools(new WorkerResultStore(), intent),
               createGuardedPiReadTool({ cwd: dir, deniedPrefixes: [] }),
@@ -371,14 +373,16 @@ describe("pi offline worker", () => {
           });
           try {
             const active = session.getActiveToolNames();
-            for (const required of ["read", "bash", "edit", "write", ...expectations[intent]]) {
+            for (const required of ["read", "bash", "edit", "write", "codemode", ...expectations[intent]]) {
               expect(active).toContain(required);
             }
             const all = new Set(Object.values(PI_WORKER_TOOLS_BY_INTENT).flat());
             for (const other of all) {
               if (!expectations[intent].includes(other)) expect(active).not.toContain(other);
             }
-            for (const search of ["grep", "find", "ls"]) expect(active).not.toContain(search);
+            for (const search of ["grep", "find", "ls", "tool_search", "powershell"])
+              expect(active).not.toContain(search);
+            expect([...active].some((name) => name.startsWith("mcp__") || name.startsWith("mcp_"))).toBe(false);
           } finally {
             session.dispose();
           }
@@ -391,7 +395,9 @@ describe("pi offline worker", () => {
       const current = settings.getSettings() as Record<string, unknown>;
       expect(current.defaultTools).toContain("edit");
       expect(current.defaultTools).toContain("write");
+      expect(current.defaultTools).toContain("codemode");
       expect(current.defaultTools).toContain("jumi_skip");
+      expect((current as { codemode: { mode: string } }).codemode).toMatchObject({ mode: "on" });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

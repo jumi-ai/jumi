@@ -45,13 +45,19 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   createAgentSession,
-  createExtensionRuntime,
   type ResourceLoader,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineFailedError } from "./engine.ts";
+import {
+  collectPiCodemodeCalls,
+  createTrustedPiLoaderWithCodemode,
+  findCodemodeEscape,
+  PI_CODEMODE_TOOL_NAME,
+  withPiCodemodeScratch,
+} from "./pi_codemode.ts";
 import { buildPiSessionEnv, createGuardedPiReadTool } from "./pi_review.ts";
 import { validateFindingResponse } from "./review_findings.ts";
 import {
@@ -99,7 +105,7 @@ export function piWorkerToolsForIntent(intent: PiWorkerIntent): readonly string[
   return [...PI_WORKER_TOOLS_BY_INTENT[intent]];
 }
 
-/** Trusted loader: no discovery of any kind. Base instructions are prompt data. */
+/** Trusted loader: no discovery, plus the one deliberate built-in exception. */
 export function createTrustedPiWorkerResourceLoader(
   baseInstructions?: string,
   intent?: PiWorkerIntent
@@ -108,19 +114,7 @@ export function createTrustedPiWorkerResourceLoader(
   const systemPrompt = baseInstructions?.trim()
     ? `${PI_WORKER_SYSTEM_PREAMBLE}${role}\n\n<base_instructions>\n${baseInstructions.trim()}\n</base_instructions>`
     : `${PI_WORKER_SYSTEM_PREAMBLE}${role}`;
-  return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {},
-    reload: async () => {},
-  };
+  return createTrustedPiLoaderWithCodemode(systemPrompt);
 }
 
 /** In-memory settings: no telemetry, no update checks, no packages, no retries. */
@@ -132,7 +126,8 @@ export function createPiWorkerSettings(intent: PiWorkerIntent): SettingsManager 
     enableInstallTelemetry: false,
     packages: [],
     extensions: [],
-    defaultTools: ["read", "bash", "edit", "write", ...piWorkerToolsForIntent(intent)],
+    codemode: { mode: "on" },
+    defaultTools: ["read", "bash", "edit", "write", PI_CODEMODE_TOOL_NAME, ...piWorkerToolsForIntent(intent)],
   } as Parameters<typeof SettingsManager.inMemory>[0]);
 }
 
@@ -1241,27 +1236,29 @@ export async function runPiWorkerAttempt(opts: PiWorkerAttemptOptions): Promise<
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
     const roleTools = piWorkerToolsForIntent(opts.intent);
-    const created = await createAgentSession({
-      cwd: opts.workdir,
-      agentDir,
-      model: opts.model as never,
-      modelRuntime: opts.modelRuntime as never,
-      resourceLoader,
-      tools: ["read", "bash", "edit", "write", ...roleTools],
-      customTools: [
-        ...createPiWorkerCustomTools(opts.store, opts.intent, (record) => toolCalls.push(record)),
-        guardedBash,
-        guardedRead,
-        guardedEdit,
-        guardedWrite,
-      ] as never[],
-      sessionManager,
-      settingsManager,
-    });
+    const created = await withPiCodemodeScratch(scratchDir, () =>
+      createAgentSession({
+        cwd: opts.workdir,
+        agentDir,
+        model: opts.model as never,
+        modelRuntime: opts.modelRuntime as never,
+        resourceLoader,
+        tools: ["read", "bash", "edit", "write", PI_CODEMODE_TOOL_NAME, ...roleTools],
+        customTools: [
+          ...createPiWorkerCustomTools(opts.store, opts.intent, (record) => toolCalls.push(record)),
+          guardedBash,
+          guardedRead,
+          guardedEdit,
+          guardedWrite,
+        ] as never[],
+        sessionManager,
+        settingsManager,
+      })
+    );
     session = created.session;
     const running = created.session;
     const active = new Set(session.getActiveToolNames());
-    for (const required of ["read", "bash", "edit", "write", ...roleTools]) {
+    for (const required of ["read", "bash", "edit", "write", PI_CODEMODE_TOOL_NAME, ...roleTools]) {
       if (!active.has(required)) {
         throw new EngineFailedError(`pi worker refused: required tool not active: ${required}`, false);
       }
@@ -1273,10 +1270,15 @@ export async function runPiWorkerAttempt(opts: PiWorkerAttemptOptions): Promise<
         throw new EngineFailedError(`pi worker refused: out-of-role tool active: ${other}`, false);
       }
     }
-    // Search tools stay disabled; every other built-in beyond the loadout fails.
-    for (const extra of ["grep", "find", "ls", "powershell"]) {
+    // Search tools and MCP/tool-search stay disabled; every other built-in beyond the loadout fails.
+    for (const extra of ["grep", "find", "ls", "powershell", "tool_search"]) {
       if (active.has(extra)) {
         throw new EngineFailedError(`pi worker refused: search tool must stay disabled: ${extra}`, false);
+      }
+    }
+    for (const name of active) {
+      if (name.startsWith("mcp__") || name.startsWith("mcp_")) {
+        throw new EngineFailedError(`pi worker refused: non-role tool active: ${name}`, false);
       }
     }
 
@@ -1298,11 +1300,31 @@ export async function runPiWorkerAttempt(opts: PiWorkerAttemptOptions): Promise<
     }
     try {
       if (!callerAborted) {
-        await running.prompt(opts.prompt);
+        await withPiCodemodeScratch(scratchDir, () => running.prompt(opts.prompt));
       }
     } finally {
       clearTimeout(timer);
       opts.abortSignal?.removeEventListener("abort", onAbort);
+    }
+    try {
+      const codemodeCalls = collectPiCodemodeCalls(sessionManager.getBranch() as readonly unknown[]);
+      for (const call of codemodeCalls) {
+        toolCalls.push({ name: call.name, args: call.args, ok: call.ok, text: call.text });
+      }
+      const escapedPath = findCodemodeEscape(codemodeCalls, scratchDir, opts.workdir);
+      if (escapedPath) {
+        const observed = await parentGitDiff(opts.workdir);
+        return {
+          status: "incomplete",
+          reason: `Incomplete worker: codemode file write escaped scratch: ${escapedPath.slice(0, 120)}`,
+          destinations,
+          toolCalls,
+          diff: observed.diff,
+          dirty: observed.dirty,
+        };
+      }
+    } catch {
+      // Evidence collection never fails the attempt.
     }
     if (callerAborted) {
       const observed = await parentGitDiff(opts.workdir);
