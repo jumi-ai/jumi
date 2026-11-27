@@ -133,6 +133,7 @@ describe("pi attempt stamp", () => {
       getRunDurations: async () => [],
       getReviewSuggestionTotals: async () => [],
       getReviewFindingTotals: async () => [],
+      getJobReclaimTotals: async () => [],
     });
     expect(metrics).toContain("ai_tokens_total");
     expect(metrics).not.toContain("pi_profile");

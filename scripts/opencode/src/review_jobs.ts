@@ -140,6 +140,55 @@ export function makeReclaimOwner(): string {
   }
 }
 
+/**
+ * Bounded reasons for a lost lease attempt (issue #994). Every reclaim that
+ * throws away running time records exactly one of these; a reclaim of a
+ * cancel-requested row (settles to `cancelled`) records nothing.
+ */
+const JOB_RECLAIM_REASONS = ["lease_expired_requeued", "lease_expired_exhausted", "shutdown_released"] as const;
+type JobReclaimReason = (typeof JOB_RECLAIM_REASONS)[number];
+
+function isJobReclaimReason(value: string | null | undefined): value is JobReclaimReason {
+  return value === "lease_expired_requeued" || value === "lease_expired_exhausted" || value === "shutdown_released";
+}
+
+/** One durable reclaim event: the lost attempt's kind, reason, and running time. */
+export interface NewJobReclaimRow {
+  kind: JobKind;
+  reason: JobReclaimReason;
+  /** Seconds the lost attempt had been running when it was reclaimed/released. */
+  leasedSeconds: number;
+}
+
+/** Ledger totals for one `{kind, reason}` reclaim series. */
+export interface JobReclaimTotalRow {
+  kind: string;
+  reason: string;
+  count: number;
+  leasedSeconds: number;
+}
+
+export const JOB_RECLAIMS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS jumi_job_reclaims (
+  id BIGSERIAL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  leased_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS jumi_job_reclaims_kind_reason
+  ON jumi_job_reclaims (kind, reason);
+`;
+
+/** Elapsed running time for a lost attempt, in seconds. Unknown start reads as 0. */
+function leasedSecondsSince(startedAt: number | null | undefined, nowMs: number): number {
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return 0;
+  const elapsed = (nowMs - startedAt) / 1000;
+  if (!Number.isFinite(elapsed) || elapsed < 0) return 0;
+  return elapsed;
+}
+
 /** Prefix for a terminal implement skipped behind open issue dependencies. */
 const BLOCKED_ON_PREFIX = "blocked on ";
 
@@ -181,6 +230,14 @@ export interface ReviewJobRecord {
   attempt: number;
   leasedBy: string | null;
   leasedUntil: number | null;
+  /**
+   * When the current attempt started running (ms since epoch). Set on every
+   * `lease`/`leaseJobById`, preserved across heartbeats and `expireLease`,
+   * cleared when the row leaves `leased` for `queued`/`cancelled`/terminal.
+   * Absent (NULL) on rows written before the reclaim-metrics rollout and
+   * read as absent; a reclaim of such a row records 0 leased seconds.
+   */
+  leasedStartedAt?: number | null;
   resultMarkdown: string | null;
   /** Formatted runner stamp for the spawn that produced `resultMarkdown`. */
   resultRunner?: string | null;
@@ -342,6 +399,14 @@ export interface ReviewJobStore {
     stamp?: { harnessMode?: unknown; piAttempt?: PiAttemptStamp }
   ): Promise<boolean>;
   releaseLease(id: number, leasedBy: string): Promise<boolean>;
+  /**
+   * Shutdown release for SIGTERM/SIGINT (issue #994): the same fenced
+   * `queued` transition as `releaseLease`, plus one durable
+   * `shutdown_released` reclaim event with the attempt's running time. No
+   * attempt is consumed. Returns false when the row is not releasable (then
+   * the caller falls back to `expireLease` like the old shutdown path).
+   */
+  shutdownRelease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
   markPublished(
     id: number,
@@ -379,6 +444,15 @@ export interface ReviewJobStore {
   getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]>;
   /** Ledger run durations by (kind, exit class), one per spawn attempt, for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
+  /**
+   * Durable lost-lease attempts (issue #994): one row per reclaim that threw
+   * away running time (`lease_expired_requeued`, `lease_expired_exhausted`,
+   * `shutdown_released`). No repo, job key, pod, or runner labels.
+   * Fail-open like usage rows: callers swallow errors and never fail the job.
+   */
+  recordJobReclaim(rows: NewJobReclaimRow[]): Promise<void>;
+  /** Ledger reclaim totals by (kind, reason): counts and summed leased seconds. */
+  getJobReclaimTotals(): Promise<JobReclaimTotalRow[]>;
   /**
    * Durable per-review 💡 counts: one row per published review (runner, forge,
    * posted after the cap, dropped by the cap, earlier 💡 not repeated).
@@ -912,6 +986,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_cache_read BIGINT;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_output BIGINT;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_cache_write BIGINT;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pi_tokens_reasoning BIGINT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS leased_started_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -1140,6 +1215,7 @@ function applyMarkPublishedRow(
     row.state = "cancelled";
     row.leasedBy = null;
     row.leasedUntil = null;
+    delete row.leasedStartedAt;
     row.updatedAt = ts;
     return { cancelled: true, requeued: false };
   }
@@ -1151,6 +1227,7 @@ function applyMarkPublishedRow(
     row.resultReason = null;
     row.leasedBy = null;
     row.leasedUntil = null;
+    delete row.leasedStartedAt;
     row.updatedAt = ts;
     return { cancelled: false, requeued: true };
   }
@@ -1159,6 +1236,7 @@ function applyMarkPublishedRow(
   row.publishedAt = ts;
   row.leasedBy = null;
   row.leasedUntil = null;
+  delete row.leasedStartedAt;
   row.updatedAt = ts;
   return { cancelled: false, requeued: false };
 }
@@ -1466,6 +1544,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   private nextKickId = 1;
   private nextRunUsageId = 1;
   readonly runUsage: Array<NewRunUsageRow & { id: number }> = [];
+  private nextReclaimId = 1;
+  readonly jobReclaims: Array<NewJobReclaimRow & { id: number; createdAt: number }> = [];
   private nextSuggestionId = 1;
   readonly reviewSuggestions: Array<ReviewSuggestionCounts & { id: number }> = [];
   private nextFindingId = 1;
@@ -1945,6 +2025,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.state = "leased";
       row.leasedBy = leasedBy;
       row.leasedUntil = ts + leaseMs;
+      row.leasedStartedAt = ts;
       row.updatedAt = ts;
       return { ...row };
     });
@@ -1970,6 +2051,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.state = "leased";
       row.leasedBy = leasedBy;
       row.leasedUntil = ts + leaseMs;
+      row.leasedStartedAt = ts;
       row.updatedAt = ts;
       return { leased: true as const, row: { ...row } };
     });
@@ -2091,6 +2173,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.state = "queued";
       row.leasedBy = null;
       row.leasedUntil = ts + backoffMs;
+      delete row.leasedStartedAt;
       row.error = marker;
       row.updatedAt = ts;
       // Record the runner that just failed (or clear when unknown) so the
@@ -2120,7 +2203,32 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.state = "queued";
       row.leasedBy = null;
       row.leasedUntil = null;
+      delete row.leasedStartedAt;
       row.updatedAt = ts;
+      return true;
+    });
+  }
+
+  shutdownRelease(id: number, leasedBy: string, now = new Date()): Promise<boolean> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy) return false;
+      if (hasPersistedResult(row)) return false;
+      const ts = now.getTime();
+      const kind = rowKind(row);
+      const leasedSeconds = leasedSecondsSince(row.leasedStartedAt, ts);
+      row.state = "queued";
+      row.leasedBy = null;
+      row.leasedUntil = null;
+      delete row.leasedStartedAt;
+      row.updatedAt = ts;
+      this.jobReclaims.push({
+        id: this.nextReclaimId++,
+        kind,
+        reason: "shutdown_released",
+        leasedSeconds,
+        createdAt: ts,
+      });
       return true;
     });
   }
@@ -2281,6 +2389,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           row.state = "cancelled";
           row.leasedBy = null;
           row.leasedUntil = null;
+          delete row.leasedStartedAt;
           row.cancelRequested = false;
           row.updatedAt = ts;
           if (isFollowUpKind(kind)) {
@@ -2309,17 +2418,38 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         if (isInfraRetryMarker(row.error)) row.error = null;
         if (row.attempt >= maxAttempts) {
           const reason = maxAttemptsReasonFor(rowKind(row));
+          const lostKind = rowKind(row);
+          const leasedSeconds = leasedSecondsSince(row.leasedStartedAt, ts);
           row.error = reason;
           row.resultReason = reason;
           row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
+          this.jobReclaims.push({
+            id: this.nextReclaimId++,
+            kind: lostKind,
+            reason: "lease_expired_exhausted",
+            leasedSeconds,
+            createdAt: ts,
+          });
           publish.push({ ...row });
           continue;
         }
-        row.state = "queued";
-        row.leasedBy = null;
-        row.leasedUntil = null;
-        requeued.push({ ...row });
+        {
+          const lostKind = rowKind(row);
+          const leasedSeconds = leasedSecondsSince(row.leasedStartedAt, ts);
+          row.state = "queued";
+          row.leasedBy = null;
+          row.leasedUntil = null;
+          delete row.leasedStartedAt;
+          this.jobReclaims.push({
+            id: this.nextReclaimId++,
+            kind: lostKind,
+            reason: "lease_expired_requeued",
+            leasedSeconds,
+            createdAt: ts,
+          });
+          requeued.push({ ...row });
+        }
       }
       return { requeued, publish };
     });
@@ -2431,6 +2561,38 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         durations.push({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds });
       }
       return durations;
+    });
+  }
+
+  recordJobReclaim(rows: NewJobReclaimRow[]): Promise<void> {
+    return this.locked(() => {
+      const now = Date.now();
+      for (const row of rows) {
+        if (!isJobReclaimReason(row.reason)) continue;
+        const kind = row.kind || REVIEW_KIND;
+        const leasedSeconds =
+          typeof row.leasedSeconds === "number" && Number.isFinite(row.leasedSeconds)
+            ? Math.max(0, row.leasedSeconds)
+            : 0;
+        this.jobReclaims.push({ id: this.nextReclaimId++, kind, reason: row.reason, leasedSeconds, createdAt: now });
+      }
+    });
+  }
+
+  getJobReclaimTotals(): Promise<JobReclaimTotalRow[]> {
+    return this.locked(() => {
+      const sums = new Map<string, JobReclaimTotalRow>();
+      for (const row of this.jobReclaims) {
+        const key = `${row.kind}\0${row.reason}`;
+        const existing = sums.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.leasedSeconds += row.leasedSeconds;
+        } else {
+          sums.set(key, { kind: row.kind, reason: row.reason, count: 1, leasedSeconds: row.leasedSeconds });
+        }
+      }
+      return [...sums.values()];
     });
   }
 
@@ -3487,6 +3649,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.state = "cancelled";
       row.leasedBy = null;
       row.leasedUntil = null;
+      delete row.leasedStartedAt;
       row.cancelRequested = false;
       row.updatedAt = Date.now();
       if (!isFollowUpKind(kind)) return;
@@ -4037,6 +4200,7 @@ type ReviewJobRow = {
   attempt: unknown;
   leased_by: unknown;
   leased_until: unknown;
+  leased_started_at?: unknown;
   result_markdown: unknown;
   result_runner?: unknown;
   result_json?: unknown;
@@ -4179,6 +4343,9 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     attempt: num(row.attempt),
     leasedBy: strOrNull(row.leased_by),
     leasedUntil: epoch(row.leased_until),
+    // Old rows predate the reclaim-metrics column and read as absent: only
+    // carry a non-null start so existing whole-row assertions do not change.
+    ...(epoch(row.leased_started_at) == null ? {} : { leasedStartedAt: epoch(row.leased_started_at) }),
     resultMarkdown: strOrNull(row.result_markdown),
     resultRunner: strOrNull(row.result_runner),
     // Old rows predate the column and read as absent: omit the field instead
@@ -4322,6 +4489,7 @@ const REQUIRED_LEDGER_TABLES = [
   "issue_handoffs",
   "jumi_review_suggestions",
   "jumi_review_findings",
+  "jumi_job_reclaims",
   "review_handover_pending",
   "strict_refresh_slots",
   "follow_up_wake_causes",
@@ -4352,6 +4520,7 @@ const REQUIRED_REVIEW_JOB_COLUMNS = [
   "pi_tokens_output",
   "pi_tokens_cache_write",
   "pi_tokens_reasoning",
+  "leased_started_at",
 ] as const;
 
 /**
@@ -4427,6 +4596,7 @@ async function pgMarkPublishedUpdate(
            cancel_requested = FALSE,
            leased_by = NULL,
            leased_until = NULL,
+           leased_started_at = NULL,
            updated_at = NOW()
        WHERE id = $1 AND leased_by = $2 AND state = 'leased'
        RETURNING state, job_key, kind, owner, repo, issue_number, payload`,
@@ -4571,6 +4741,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
         await tx.unsafe(REVIEW_SUGGESTIONS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_FINDINGS_SCHEMA_SQL);
+        await tx.unsafe(JOB_RECLAIMS_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
         await tx.unsafe(RUNNER_COOLDOWNS_SCHEMA_SQL);
         // Columns added after the table first shipped: existing deployments
@@ -5132,7 +5303,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     const runnable = `(leased_until IS NULL OR leased_until <= $3::timestamptz)`;
     const query = serializeWorkers
       ? `UPDATE review_jobs
-         SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
+         SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, leased_started_at = $3::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
            WHERE state = 'queued' AND kind = ANY($4::text[]) AND ${runnable}
@@ -5150,7 +5321,7 @@ export class PgReviewJobStore implements ReviewJobStore {
          )
          RETURNING *`
       : `UPDATE review_jobs
-         SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
+         SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, leased_started_at = $3::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
            WHERE state = 'queued' AND kind = ANY($4::text[]) AND ${runnable}
@@ -5187,7 +5358,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         const rows = asRows<ReviewJobRow>(
           await this.sql.unsafe(
             `UPDATE review_jobs
-             SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
+             SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, leased_started_at = $4::timestamptz, updated_at = NOW()
              WHERE id = $3
                AND state = 'queued'
                AND (leased_until IS NULL OR leased_until <= $4::timestamptz)
@@ -5396,6 +5567,7 @@ export class PgReviewJobStore implements ReviewJobStore {
          SET state = 'queued',
              leased_by = NULL,
              leased_until = $3::timestamptz,
+             leased_started_at = NULL,
              error = $4,
              result_runner = $5,
              harness_mode = COALESCE($6, harness_mode),
@@ -5443,7 +5615,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
+         SET state = 'queued', leased_by = NULL, leased_until = NULL, leased_started_at = NULL, updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
             AND result_markdown IS NULL AND result_reason IS NULL
             AND ${BACKOFF_ERROR_PREDICATE}
@@ -5452,6 +5624,41 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows.length > 0;
+  }
+
+  async shutdownRelease(id: number, leasedBy: string, now = new Date()): Promise<boolean> {
+    return this.sql.begin(async (tx) => {
+      const current = asRows<{ kind: unknown; leased_started_at: unknown }>(
+        await tx.unsafe(
+          `SELECT kind, leased_started_at FROM review_jobs
+           WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+             AND result_markdown IS NULL AND result_reason IS NULL
+             AND ${BACKOFF_ERROR_PREDICATE}
+           FOR UPDATE`,
+          [id, leasedBy]
+        )
+      );
+      if (current.length === 0) return false;
+      const kind = (str(current[0].kind) || REVIEW_KIND) as JobKind;
+      const leasedSeconds = leasedSecondsSince(epoch(current[0].leased_started_at), now.getTime());
+      const released = asRows<{ id: unknown }>(
+        await tx.unsafe(
+          `UPDATE review_jobs
+           SET state = 'queued', leased_by = NULL, leased_until = NULL, leased_started_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+             AND result_markdown IS NULL AND result_reason IS NULL
+             AND ${BACKOFF_ERROR_PREDICATE}
+           RETURNING id`,
+          [id, leasedBy]
+        )
+      );
+      if (released.length === 0) return false;
+      await tx.unsafe(
+        `INSERT INTO jumi_job_reclaims (kind, reason, leased_seconds) VALUES ($1, 'shutdown_released', $2)`,
+        [kind, leasedSeconds]
+      );
+      return true;
+    });
   }
 
   async saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void> {
@@ -5729,7 +5936,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         // instead of requeueing, claiming, or counting an attempt.
         if (row.cancelRequested) {
           await tx.unsafe(
-            `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, cancel_requested = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'leased' RETURNING *`,
+            `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, leased_started_at = NULL, cancel_requested = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'leased' RETURNING *`,
             [row.id]
           );
           if (isFollowUpKind(rowKind(row))) {
@@ -5765,6 +5972,8 @@ export class PgReviewJobStore implements ReviewJobStore {
         }
         if (row.attempt + 1 >= maxAttempts) {
           const reason = maxAttemptsReasonFor(rowKind(row));
+          const lostKind = rowKind(row);
+          const leasedSeconds = leasedSecondsSince(row.leasedStartedAt, now.getTime());
           const updated = asRows<ReviewJobRow>(
             await tx.unsafe(
               `UPDATE review_jobs
@@ -5779,9 +5988,17 @@ export class PgReviewJobStore implements ReviewJobStore {
               [row.id, reason, makeReclaimOwner(), claimedUntil]
             )
           );
-          if (updated[0]) publish.push(mapRow(updated[0]));
+          if (updated[0]) {
+            await tx.unsafe(
+              `INSERT INTO jumi_job_reclaims (kind, reason, leased_seconds) VALUES ($1, 'lease_expired_exhausted', $2)`,
+              [lostKind, leasedSeconds]
+            );
+            publish.push(mapRow(updated[0]));
+          }
           continue;
         }
+        const lostKind = rowKind(row);
+        const leasedSeconds = leasedSecondsSince(row.leasedStartedAt, now.getTime());
         const updated = asRows<ReviewJobRow>(
           await tx.unsafe(
             `UPDATE review_jobs
@@ -5789,6 +6006,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                  state = 'queued',
                  leased_by = NULL,
                  leased_until = NULL,
+                 leased_started_at = NULL,
                  error = CASE WHEN error LIKE 'infra-retry:%' THEN NULL ELSE error END,
                  updated_at = NOW()
              WHERE id = $1 AND state = 'leased' AND cancel_requested = FALSE
@@ -5796,7 +6014,13 @@ export class PgReviewJobStore implements ReviewJobStore {
             [row.id]
           )
         );
-        if (updated[0]) requeued.push(mapRow(updated[0]));
+        if (updated[0]) {
+          await tx.unsafe(
+            `INSERT INTO jumi_job_reclaims (kind, reason, leased_seconds) VALUES ($1, 'lease_expired_requeued', $2)`,
+            [lostKind, leasedSeconds]
+          );
+          requeued.push(mapRow(updated[0]));
+        }
       }
 
       return { requeued, publish };
@@ -5939,7 +6163,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(
           `UPDATE review_jobs
             SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END,
-              leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
+              leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, leased_started_at = CASE WHEN state = 'queued' THEN NULL ELSE leased_started_at END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
               updated_at = NOW()
             WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
             RETURNING id, state, job_key, kind, payload`,
@@ -5985,7 +6209,7 @@ export class PgReviewJobStore implements ReviewJobStore {
   async cancelQueuedForPull(owner: string, repo: string, prNumber: number): Promise<number> {
     const cancelled = asRows<{ id: unknown; state: unknown }>(
       await this.sql.unsafe(
-        `UPDATE review_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END, leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END, updated_at = NOW() WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = 'review' AND state IN ('queued', 'leased') RETURNING id, state`,
+        `UPDATE review_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END, leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, leased_started_at = CASE WHEN state = 'queued' THEN NULL ELSE leased_started_at END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END, updated_at = NOW() WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = 'review' AND state IN ('queued', 'leased') RETURNING id, state`,
         [owner, repo, prNumber]
       )
     );
@@ -6020,7 +6244,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         payload: unknown;
       }>(
         await tx.unsafe(
-          `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
+          `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, leased_started_at = NULL,
              cancel_requested = FALSE, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id, job_key, kind, owner, repo, issue_number, payload`,
@@ -6214,6 +6438,41 @@ export class PgReviewJobStore implements ReviewJobStore {
       kind: str(row.kind),
       exitClass: str(row.exit_class),
       durationSeconds: Number(row.duration_seconds) || 0,
+    }));
+  }
+
+  async recordJobReclaim(rows: NewJobReclaimRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    try {
+      for (const row of rows) {
+        if (!isJobReclaimReason(row.reason)) continue;
+        const leasedSeconds =
+          typeof row.leasedSeconds === "number" && Number.isFinite(row.leasedSeconds)
+            ? Math.max(0, row.leasedSeconds)
+            : 0;
+        await this.sql.unsafe(`INSERT INTO jumi_job_reclaims (kind, reason, leased_seconds) VALUES ($1, $2, $3)`, [
+          row.kind || REVIEW_KIND,
+          row.reason,
+          leasedSeconds,
+        ]);
+      }
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async getJobReclaimTotals(): Promise<JobReclaimTotalRow[]> {
+    const rows = asRows<{ kind: unknown; reason: unknown; count: unknown; leased_seconds: unknown }>(
+      await this.sql.unsafe(
+        `SELECT kind, reason, COUNT(*)::bigint AS count, COALESCE(SUM(leased_seconds), 0) AS leased_seconds
+         FROM jumi_job_reclaims GROUP BY kind, reason`
+      )
+    );
+    return rows.map((row) => ({
+      kind: str(row.kind),
+      reason: str(row.reason),
+      count: num(row.count),
+      leasedSeconds: Number(row.leased_seconds) || 0,
     }));
   }
 

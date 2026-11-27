@@ -598,7 +598,7 @@ describe("one-shot abort posts no failure and exits per the settled-row rules", 
         // token and the unchanged settled-row rules require exit 1.
         const store = new Proxy(backing, {
           get(target, prop, receiver) {
-            if (prop === "releaseLease" || prop === "expireLease") {
+            if (prop === "releaseLease" || prop === "expireLease" || prop === "shutdownRelease") {
               return async () => {
                 throw new Error("ledger release down");
               };

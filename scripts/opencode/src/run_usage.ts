@@ -2,6 +2,7 @@
  * Durable per-run usage ledger.
  *
  * In-process Prometheus counters (`ai_tokens_total`, `jumi_jobs_completed_total`,
+ * `jumi_jobs_reclaimed_total`, `jumi_jobs_reclaimed_leased_seconds_total`,
  * `jumi_job_duration_seconds_*`, `jumi_opencode_exits_total`,
  * `jumi_opencode_runner_exits_total`, `jumi_opencode_runner_quota_reset_seconds`)
  * die with the pod that recorded them, so a one-Job-per-ledger-row world cannot rely on them.
@@ -413,7 +414,11 @@ export interface RunUsageLedger {
   getReviewFindingTotals(): Promise<
     Array<{ runner: string; forge: string; severity: string; outcome: string; count: number }>
   >;
+  getJobReclaimTotals(): Promise<Array<{ kind: string; reason: string; count: number; leasedSeconds: number }>>;
 }
+
+/** Bounded reclaim reasons for the durable `jumi_jobs_reclaimed_*` series. */
+const JOB_RECLAIM_REASONS = ["lease_expired_requeued", "lease_expired_exhausted", "shutdown_released"] as const;
 
 function tokenSeriesLabels(agent: string, source: string, model: string, tokenType?: TokenType): string {
   const parts = [
@@ -444,6 +449,7 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
     durations,
     suggestionTotals,
     findingTotals,
+    reclaimTotals,
   ] = await Promise.all([
     store.countByKindState(),
     store.getRunUsageTokenTotals(),
@@ -454,6 +460,7 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
     store.getRunDurations(),
     store.getReviewSuggestionTotals(),
     store.getReviewFindingTotals(),
+    store.getJobReclaimTotals(),
   ]);
   const lines: string[] = [
     "# HELP ai_tokens_total Cumulative AI tokens recorded in the ledger",
@@ -607,6 +614,27 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
     lines.push(
       `jumi_review_findings_unmatched_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}",severity="${escapeLabel(row.severity)}"} ${row.count}`
     );
+  }
+  const reclaimByKey = new Map(
+    reclaimTotals.map((row) => [`${row.kind}\0${row.reason}`, { count: row.count, leasedSeconds: row.leasedSeconds }])
+  );
+  lines.push("# HELP jumi_jobs_reclaimed_total Lost lease attempts that did not finish normally (ledger)");
+  lines.push("# TYPE jumi_jobs_reclaimed_total counter");
+  for (const kind of RUN_KINDS) {
+    for (const reason of JOB_RECLAIM_REASONS) {
+      const value = reclaimByKey.get(`${kind}\0${reason}`)?.count ?? 0;
+      lines.push(`jumi_jobs_reclaimed_total{kind="${kind}",reason="${reason}"} ${value}`);
+    }
+  }
+  lines.push(
+    "# HELP jumi_jobs_reclaimed_leased_seconds_total Running time thrown away by lost lease attempts (ledger)"
+  );
+  lines.push("# TYPE jumi_jobs_reclaimed_leased_seconds_total counter");
+  for (const kind of RUN_KINDS) {
+    for (const reason of JOB_RECLAIM_REASONS) {
+      const value = reclaimByKey.get(`${kind}\0${reason}`)?.leasedSeconds ?? 0;
+      lines.push(`jumi_jobs_reclaimed_leased_seconds_total{kind="${kind}",reason="${reason}"} ${value}`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }
