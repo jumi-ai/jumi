@@ -69,6 +69,7 @@ export const PI_REVIEW_TOOL_NAMES = [
   "jumi_set_verdict",
   "jumi_list_findings",
   "jumi_previous_findings",
+  "jumi_set_disposition",
 ] as const;
 
 export type PiReviewToolName = (typeof PI_REVIEW_TOOL_NAMES)[number];
@@ -485,10 +486,34 @@ export function createPiReviewCustomTools(
     {
       name: "jumi_previous_findings",
       label: "Previous findings",
-      description: "Previous review finding lines.",
+      description:
+        "Previous review findings. Keyed entries are {key, text, severity, location?, status}; unkeyed entries are plain strings.",
       parameters: Type.Object({}),
       execute: async () =>
         wrap("jumi_previous_findings", JSON.stringify({ findings: store.listPreviousFindings() }), true),
+    },
+    {
+      name: "jumi_set_disposition",
+      label: "Set disposition",
+      description:
+        "State a disposition for one eligible keyed prior: still_present materialises it under its key, fixed/withdrawn record a note and add no finding.",
+      parameters: Type.Object({
+        key: Type.String(),
+        disposition: Type.String(),
+        note: Type.Optional(Type.String()),
+        location: Type.Optional(Type.Object({ path: Type.String(), line: Type.Number() })),
+        body_only: Type.Optional(Type.Boolean()),
+      }),
+      execute: async (_id: string, params: Record<string, unknown>) => {
+        const result = store.setDisposition(params as unknown);
+        const text = result.ok
+          ? JSON.stringify("id" in result && result.id ? { id: result.id } : { recorded: true })
+          : result.error;
+        onCall?.({ name: "jumi_set_disposition", args: params, ok: result.ok, text });
+        return result.ok
+          ? { content: [{ type: "text", text }], details: {} }
+          : { content: [{ type: "text", text }], details: {}, isError: true };
+      },
     },
   ];
 }

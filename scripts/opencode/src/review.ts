@@ -111,6 +111,7 @@ import {
   resolvePublishMeta,
   withMetaBase,
 } from "./review_meta.ts";
+import { buildKeyedPriors } from "./review_prior.ts";
 import {
   countAddressedSuggestions,
   forgeLabelForKind,
@@ -3053,12 +3054,39 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
       log,
     });
+    let keyedPriors: import("./review_prior.ts").KeyedPriorsResult | undefined;
+    try {
+      keyedPriors = await buildKeyedPriors({
+        comments: prCommentResult.comments,
+        reviews: prReviews ?? [],
+        inlines: prInlines,
+        botUsername: opts.botUsername,
+        marker: markerFor(opts.owner, opts.repo, pr.number),
+        trust: {
+          ...(opts.meta?.webhookSecret ? { webhookSecret: opts.meta.webhookSecret } : {}),
+          forgeIdentity: opts.meta?.forgeIdentity ?? defaultForgeIdentity(opts.giteaUrl, opts.botUsername),
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: pr.number,
+        },
+        currentHeadSha: reviewedHeadSha,
+        prFilenames: new Set(prFiles.map((file) => file.filename)),
+        excludedFilenames: new Set(excludedFiles),
+        git,
+        cwd: opts.workspace,
+        env: gitCmdEnv,
+        log,
+      });
+    } catch (err) {
+      log(`keyed priors unavailable, falling back to text: ${errorMessage(err)}`);
+    }
+    const fallbackPrevious = (delta?.findings ?? previousReview?.findings) as string[] | undefined;
+    const storePrevious = keyedPriors?.verified ? keyedPriors.unkeyed : fallbackPrevious;
     const verdictStore = new ReviewVerdictStore({
       changedFiles: verdictChangedFiles,
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
-      ...((delta?.findings ?? previousReview?.findings)?.length
-        ? { previousFindings: (delta?.findings ?? previousReview?.findings) as string[] }
-        : {}),
+      ...(storePrevious?.length ? { previousFindings: storePrevious } : {}),
+      ...(keyedPriors?.verified && keyedPriors.keyed.length > 0 ? { keyedPriors: keyedPriors.keyed } : {}),
     });
     const reviewMcpToken = randomReviewMcpToken();
     // Structured-verdict adapter setup. A failure is observable and never

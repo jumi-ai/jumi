@@ -385,6 +385,7 @@ async function main(): Promise<number> {
         "jumi_set_verdict",
         "jumi_list_findings",
         "jumi_previous_findings",
+        "jumi_set_disposition",
       ],
       customTools: [
         ...createPiReviewCustomTools(store),

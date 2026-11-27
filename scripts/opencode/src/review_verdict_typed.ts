@@ -394,6 +394,82 @@ function findingsContainSentinel(text: string): boolean {
   return parseReviewFindings(text).some((f) => f.path === SENTINEL_PATH && f.line === SENTINEL_LINE);
 }
 
+export type PriorDisposition = "still_present" | "fixed" | "withdrawn";
+
+export type DispositionBy = "reviewer" | "parent";
+
+export interface SetDispositionParsed {
+  key: string;
+  disposition: PriorDisposition;
+  note?: string;
+  location?: { path: string; line: number };
+  bodyOnly?: boolean;
+}
+
+/** Shared validator for `set_disposition` (MCP `set_disposition`, Pi `jumi_set_disposition`). */
+export function parseSetDispositionInput(
+  raw: unknown
+): { ok: true; value: SetDispositionParsed } | { ok: false; error: string } {
+  if (typeof raw !== "object" || raw === null)
+    return { ok: false, error: "set_disposition needs a key and disposition" };
+  const obj = raw as Record<string, unknown>;
+  const keyRaw = obj.key;
+  const dispRaw = obj.disposition;
+  if (typeof keyRaw !== "string" || !keyRaw.trim()) return { ok: false, error: "set_disposition needs a key" };
+  const key = keyRaw.trim();
+  if (dispRaw !== "still_present" && dispRaw !== "fixed" && dispRaw !== "withdrawn") {
+    return { ok: false, error: `bad disposition: ${String(dispRaw)} (want still_present|fixed|withdrawn)` };
+  }
+  let note: string | undefined;
+  if (obj.note !== undefined && obj.note !== null) {
+    if (typeof obj.note !== "string") return { ok: false, error: "note must be a string" };
+    const trimmed = obj.note.trim();
+    if (trimmed) note = trimmed.slice(0, 2000);
+  }
+  let location: { path: string; line: number } | undefined;
+  const locRaw = (obj as { location?: unknown }).location;
+  if (locRaw !== undefined && locRaw !== null) {
+    if (typeof locRaw !== "object" || Array.isArray(locRaw)) {
+      return { ok: false, error: "location must be {path, line}" };
+    }
+    const loc = locRaw as Record<string, unknown>;
+    if (typeof loc.path !== "string" || !String(loc.path).trim()) {
+      return { ok: false, error: "location.path must be a string" };
+    }
+    const numeric = typeof loc.line === "number" ? loc.line : Number.parseInt(String(loc.line), 10);
+    if (!Number.isSafeInteger(numeric) || numeric < 1) {
+      return { ok: false, error: `unusable line: ${String(loc.line)}` };
+    }
+    location = { path: String(loc.path), line: numeric };
+  }
+  let bodyOnly = false;
+  const bodyRaw =
+    (obj as { body_only?: unknown; bodyOnly?: unknown }).body_only ?? (obj as { bodyOnly?: unknown }).bodyOnly;
+  if (bodyRaw !== undefined && bodyRaw !== null) {
+    if (typeof bodyRaw !== "boolean") return { ok: false, error: "body_only must be a boolean" };
+    bodyOnly = bodyRaw;
+  }
+  if (location && bodyOnly) return { ok: false, error: "location and body_only are mutually exclusive" };
+  return {
+    ok: true,
+    value: {
+      key,
+      disposition: dispRaw as PriorDisposition,
+      ...(note ? { note } : {}),
+      ...(location ? { location } : {}),
+      ...(bodyOnly ? { bodyOnly: true } : {}),
+    },
+  };
+}
+
+/** Control-syntax guard for materialised prior text: no `<!-- jumi- ...` may ride along. */
+export function priorTextControlError(text: string): string | undefined {
+  if (/<!--\s*jumi-/i.test(text)) {
+    return "prior text carries Jumi control syntax (<!-- jumi- ...); kept byte for byte, so still_present is rejected";
+  }
+  return undefined;
+}
+
 /**
  * Validate every proof in a store rendering: pairwise isolation plus the
  * sentinel check in store order and in body-then-inline (predecessor) order.
