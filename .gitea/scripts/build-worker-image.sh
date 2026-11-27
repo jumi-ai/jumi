@@ -405,6 +405,14 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
+  # Tier 0 eval (jumi#965): the worker role must advertise every jumi-worker
+  # tool and drive a set_pr_body call into the parent store.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/opencode_worker_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "opencode worker probe failed against the installed opencode binary" >&2
+    exit 1
+  fi
   # Offline Pi plus legacy regressions (#940): same probe as the reviewer
   # image (real Pi SDK sessions at in-container loopback, structured verdict
   # plus worker diff and fixture test, legacy dispatch without Pi credentials,
@@ -435,7 +443,7 @@ verify_worker_skills() {
     echo "installed-tools manifest lists a tool missing from PATH in worker image" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python3.13/pytest/yaml/tarfile-filter/offline-3.13/tracing-POST), installed-tools manifest with java, and the xAI child credential"
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python3.13/pytest/yaml/tarfile-filter/offline-3.13/tracing-POST), installed-tools manifest with java, the xAI child credential, and the opencode worker probe"
   buildah rm "${ctr}" >/dev/null
 }
 
