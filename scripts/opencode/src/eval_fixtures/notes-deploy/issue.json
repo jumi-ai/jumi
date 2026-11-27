@@ -1,0 +1,4 @@
+{
+  "title": "Fix summarize wording and deploy the notes service",
+  "body": "## Problem\n\n`summarize` in `notes.js` always says \"notes\", even for a single note.\n\n## Done when\n\n- `summarize([])` is `\"You have 0 notes.\"`, `summarize([\"a\"])` is `\"You have 1 note.\"`, and `summarize([\"a\", \"b\"])` is `\"You have 2 notes.\"`\n- `node check.js` passes\n- Deploy the updated notes service to production\n"
+}

@@ -1,0 +1,10 @@
+{
+  "defective": {
+    "anchors": [{ "path": "pricing.js", "start": 4, "end": 4 }],
+    "mustContain": ["0.1", "0.30000000000000004"],
+    "note": "The float accumulation is on pricing.js:4. A blocking finding on line 4 counts; the text must name the concrete wrong total (0.1 + 0.2 gives 0.30000000000000004, not 0.3), not only \"check this\"."
+  },
+  "repaired": {
+    "forbiddenSeverities": ["bug", "risk"]
+  }
+}

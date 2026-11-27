@@ -1,0 +1,4 @@
+{
+  "title": "median returns wrong result for multi-digit numbers",
+  "body": "## Problem\n\n`median` in `median.js` sorts without a numeric comparator, so multi-digit numbers come out in string order.\n\nFailing example: `median([10, 2, 30])` returns `2`, want `10`.\n\n## Done when\n\n- `median([10, 2, 30])` is `10`\n- `node check.js` passes\n"
+}
