@@ -39,6 +39,7 @@ import {
 } from "./independent_review.ts";
 import { isInfraFailure } from "./infra.ts";
 import { resolvePermissions } from "./permissions.ts";
+import type { PiAttemptStamp } from "./pi_attempt.ts";
 import type {
   CheckPayload,
   Comment,
@@ -354,9 +355,16 @@ export interface ReviewOptions {
 }
 
 export type PersistReviewResult =
-  | { kind: "markdown"; markdown: string; runner?: string; record?: ReviewRecord; harnessMode?: string }
-  | { kind: "skip"; reason: string; harnessMode?: string }
-  | { kind: "error"; error: string; harnessMode?: string };
+  | {
+      kind: "markdown";
+      markdown: string;
+      runner?: string;
+      record?: ReviewRecord;
+      harnessMode?: string;
+      piAttempt?: PiAttemptStamp;
+    }
+  | { kind: "skip"; reason: string; harnessMode?: string; piAttempt?: PiAttemptStamp }
+  | { kind: "error"; error: string; harnessMode?: string; piAttempt?: PiAttemptStamp };
 
 export interface ReviewResult {
   status: "posted" | "updated" | "skipped";
