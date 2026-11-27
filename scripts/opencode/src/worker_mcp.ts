@@ -781,9 +781,15 @@ export async function makeWorkerHarnessTempRoot(): Promise<string> {
 
 // ── Runner MCP configs (shared shapes from `review_mcp.ts`) ────────────────
 
-/** OpenCode MCP entry for the worker server. */
+/**
+ * OpenCode MCP entry for the worker server. `codemode: false` exposes the
+ * worker tools directly (`jumi-worker_<tool>`) instead of behind the partial
+ * Code Mode catalog, so the parent prompt and the permission name one tool
+ * (same shape as the searxng server). Proved by `opencode_worker_probe.ts`
+ * against the installed binary.
+ */
 export function openCodeWorkerMcpEntry(url: string, token: string): Record<string, unknown> {
-  return openCodeMcpEntry(url, token);
+  return { ...openCodeMcpEntry(url, token), codemode: false };
 }
 
 /** Claude `--mcp-config` file content for the worker server. */

@@ -473,12 +473,16 @@ describe("worker MCP per-runner configs", () => {
     const entry = openCodeWorkerMcpEntry(URL, TRICKY_TOKEN) as {
       url: string;
       headers: Record<string, string>;
+      codemode: unknown;
     };
     const parsed = JSON.parse(JSON.stringify(entry)) as typeof entry;
     expect(parsed.url).toBe(URL);
     expect(parsed.headers.Authorization).toBe(`Bearer ${TRICKY_TOKEN}`);
-    // Shared shape with the review entry: no per-runner copy.
-    expect(entry as unknown).toEqual(openCodeMcpEntry(URL, TRICKY_TOKEN));
+    // Shared URL/headers shape with the review entry, plus codemode:false so
+    // the worker tools list directly instead of behind the Code Mode catalog.
+    const { codemode: _ignored, ...rest } = entry as Record<string, unknown>;
+    expect(rest).toEqual(openCodeMcpEntry(URL, TRICKY_TOKEN));
+    expect(entry.codemode).toBe(false);
   });
 
   test("claude config round-trips through JSON with a tricky token", () => {
