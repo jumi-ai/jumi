@@ -58,6 +58,8 @@ type GithubRepo = {
   clone_url: string;
   default_branch: string;
   owner?: GithubUser;
+  private?: boolean;
+  visibility?: string;
   allow_auto_merge?: boolean;
   allow_merge_commit?: boolean;
   allow_squash_merge?: boolean;
@@ -276,6 +278,8 @@ function toRepo(repo: GithubRepo): Repo {
     clone_url: repo.clone_url,
     default_branch: repo.default_branch,
     owner: actor(repo.owner),
+    ...(typeof repo.private === "boolean" ? { private: repo.private } : {}),
+    ...(typeof repo.visibility === "string" && repo.visibility ? { visibility: repo.visibility } : {}),
     ...(repo.allow_auto_merge !== undefined ? { allowAutoMerge: repo.allow_auto_merge } : {}),
     ...(repo.allow_merge_commit !== undefined ? { allowMergeCommit: repo.allow_merge_commit } : {}),
     ...(repo.allow_squash_merge !== undefined ? { allowSquashMerge: repo.allow_squash_merge } : {}),

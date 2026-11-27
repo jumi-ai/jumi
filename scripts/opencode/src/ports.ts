@@ -11,6 +11,10 @@ export interface Repo {
   clone_url: string;
   default_branch: string;
   owner: Actor;
+  /** Forge-reported visibility. Absent on older payloads; read fail-closed. */
+  private?: boolean;
+  /** Forge-reported visibility label (for example GitHub `public`/`private`/`internal`). */
+  visibility?: string;
   /** Gitea: repository default merge style (`merge`, `rebase`, `rebase-merge`, `squash`, `fast-forward-only`). */
   defaultMergeStyle?: string;
   /** GitHub: repository allows auto-merge. */
