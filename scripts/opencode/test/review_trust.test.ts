@@ -5,7 +5,12 @@ import { resolveSettledHoldThreads } from "../src/hold_resolve.ts";
 import { settleFollowUpHold } from "../src/hold_settlement.ts";
 import type { InlineComment } from "../src/ports.ts";
 import { tryCarryReview } from "../src/review_carry.ts";
-import { type ReviewFallbackReason, type ReviewTrustCtx, resolveReviewFacts } from "../src/review_facts.ts";
+import {
+  type ResolvedReviewFacts,
+  type ReviewFallbackReason,
+  type ReviewTrustCtx,
+  resolveReviewFacts,
+} from "../src/review_facts.ts";
 import {
   attachPostPullReviewMeta,
   buildReviewMetaBlock,
@@ -24,7 +29,7 @@ import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { findingFingerprint, parseReviewFindings } from "../src/verdict.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
-import { makeBranch, makeComment, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { makeComment, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 // ---------------------------------------------------------------------------
 // Typed review facts: verified signed block drives consumers, text is the
@@ -264,7 +269,7 @@ describe("review facts switch: verification matrix", () => {
 
   test("secret rotation falls back to text and never throws", () => {
     const { trust } = testTrust(HEAD, { webhookSecret: ROTATED });
-    let resolved;
+    let resolved: ResolvedReviewFacts | undefined;
     expect(() => {
       resolved = resolveReviewFacts({ body: signBody(body, findings), trust });
     }).not.toThrow();
