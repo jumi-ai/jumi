@@ -161,7 +161,7 @@ describe("worker eval new fixtures", () => {
 
   test("notes-deploy: reference run passes with Refs and the deploy item remaining", async () => {
     const fixture = await loadWorkerEvalFixture("notes-deploy");
-    expect(fixture.expected).toEqual({ closingKeyword: "refs", minRemaining: 1 });
+    expect(fixture.expected).toEqual({ closingKeyword: "refs", minRemaining: 1, remainingMustContain: ["deploy"] });
     expect(
       workerEvalClosingFailures("refs", ["Deploy the updated notes service to production"], fixture.expected)
     ).toEqual([]);

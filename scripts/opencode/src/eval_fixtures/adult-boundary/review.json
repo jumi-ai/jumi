@@ -2,6 +2,16 @@
   "defective": {
     "anchors": [{ "path": "eligibility.js", "start": 2, "end": 2 }],
     "mustContain": ["isAdult(18)", "false"],
+    "paraphrases": [
+      {
+        "title": "Boundary uses > instead of >=, so isAdult(18) is false",
+        "body": "Eligibility for exactly 18 fails: isAdult(18) returns false when it should return true. The comparison excludes the boundary age. Proof: isAdult(18) is false on this head."
+      },
+      {
+        "title": "18-year-olds rejected: isAdult(18) evaluates to false",
+        "body": "An 18-year-old is not counted as an adult because isAdult(18) is false. Change > to >=. Proof: isAdult(18) is false here."
+      }
+    ],
     "note": "The off-by-one is on eligibility.js:2. A blocking finding on line 2 counts; the text must name the concrete failure (isAdult(18) is false), not only \"check this\"."
   },
   "repaired": {

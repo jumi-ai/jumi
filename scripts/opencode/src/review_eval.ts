@@ -58,6 +58,25 @@ import { runGit } from "./workspace.ts";
 
 export const REVIEW_EVAL_REVIEW_MCP_NAME = "jumi-review";
 export const REVIEW_EVAL_CONTRACT = "required" as const;
+/** Neutral commit messages: identical for both halves so `git log` never leaks the half. */
+export const REVIEW_EVAL_BASE_COMMIT_MESSAGE = "fixture base";
+export const REVIEW_EVAL_HEAD_COMMIT_MESSAGE = "fixture change";
+/** Neutral branch for the base ref: no half name anywhere the model can read. */
+export const REVIEW_EVAL_TARGET_BRANCH = "jumi/target";
+
+/** Minimal env for grading git: allowlist only, so no parent credential leaks in. */
+export function minimalReviewEvalGitEnv(homeDir?: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (process.env.PATH) env.PATH = process.env.PATH;
+  env.HOME = homeDir ?? process.env.HOME ?? "/tmp";
+  if (process.env.LANG) env.LANG = process.env.LANG;
+  if (process.env.LC_ALL) env.LC_ALL = process.env.LC_ALL;
+  if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  return env;
+}
 
 export type ReviewEvalHalf = "defective" | "repaired";
 export type ReviewEvalVerdict = "pass" | "fail" | "inconclusive";
@@ -102,6 +121,7 @@ export interface LoadedReviewEvalFixture {
   author: string;
   anchors: ReviewEvalAnchor[];
   mustContain: string[];
+  paraphrases: ReviewEvalParaphrase[];
   note?: string;
   dir: string;
   repoDir: string;
@@ -121,17 +141,36 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+export interface ReviewEvalParaphrase {
+  title: string;
+  body: string;
+}
+
+function asParaphrases(value: unknown): ReviewEvalParaphrase[] {
+  if (!Array.isArray(value)) return [];
+  const out: ReviewEvalParaphrase[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as { title?: unknown; body?: unknown };
+    if (typeof record.title !== "string" || typeof record.body !== "string") continue;
+    if (!record.title.trim() && !record.body.trim()) continue;
+    out.push({ title: record.title, body: record.body });
+  }
+  return out;
+}
+
 export async function loadReviewEvalFixture(name: string, baseDir?: string): Promise<LoadedReviewEvalFixture> {
   const root = baseDir ?? fixtureBaseDir();
   const dir = join(root, name);
   const fixture = await readJson(join(dir, "fixture.json"));
   const pr = await readJson(join(dir, "pr.json"));
   const review = (await readJson(join(dir, "review.json"))) as {
-    defective?: { anchors?: ReviewEvalAnchor[]; mustContain?: string[]; note?: string };
+    defective?: { anchors?: ReviewEvalAnchor[]; mustContain?: string[]; note?: string; paraphrases?: unknown };
   };
   const defective = review.defective ?? {};
   const anchors = Array.isArray(defective.anchors) ? (defective.anchors as ReviewEvalAnchor[]) : [];
   const mustContain = Array.isArray(defective.mustContain) ? (defective.mustContain as string[]) : [];
+  const paraphrases = asParaphrases(defective.paraphrases);
   return {
     name: asString(fixture.name) || name,
     owner: asString(fixture.owner) || "eval",
@@ -143,6 +182,7 @@ export async function loadReviewEvalFixture(name: string, baseDir?: string): Pro
     author: asString(pr.author) || "alice",
     anchors,
     mustContain,
+    paraphrases,
     ...(typeof defective.note === "string" && defective.note ? { note: defective.note } : {}),
     dir,
     repoDir: join(dir, "repo"),
@@ -168,12 +208,12 @@ export async function listReviewEvalFixtures(baseDir?: string): Promise<string[]
   return out.sort();
 }
 
-async function runPlainGit(args: string[], cwd: string): Promise<string> {
+async function runPlainGit(args: string[], cwd: string, homeDir?: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: process.env as Record<string, string>,
+    env: minimalReviewEvalGitEnv(homeDir) as Record<string, string>,
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -186,13 +226,15 @@ async function runPlainGit(args: string[], cwd: string): Promise<string> {
   return stdout.trim();
 }
 
-function gitEnv(): Record<string, string | undefined> {
+function gitEnv(homeDir?: string): Record<string, string | undefined> {
   return {
     PATH: process.env.PATH,
-    HOME: process.env.HOME,
+    HOME: homeDir ?? process.env.HOME,
     LANG: process.env.LANG,
     LC_ALL: process.env.LC_ALL,
     GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
   };
 }
 
@@ -212,11 +254,17 @@ function patchStatus(patch: string): EvalPullFile["status"] {
   return "modified";
 }
 
-async function buildPullFiles(workdir: string, baseSha: string, headSha: string): Promise<EvalPullFile[]> {
-  const env = gitEnv();
+async function buildPullFiles(
+  workdir: string,
+  baseSha: string,
+  headSha: string,
+  homeDir?: string
+): Promise<EvalPullFile[]> {
+  const env = gitEnv(homeDir);
   const numstat = await runPlainGit(
     ["diff", "--no-color", "--no-ext-diff", "--no-renames", "--numstat", "-z", baseSha, headSha],
-    workdir
+    workdir,
+    homeDir
   );
   const entries: Array<{ path: string; additions: number; deletions: number }> = [];
   for (const record of numstat.split("\0")) {
@@ -358,25 +406,27 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
 
     // Checkout: base from `repo/`, head by overlaying the half dir. Both are
     // real commits so base reads (`git show <base>:REVIEW.md`) see the base.
-    await runPlainGit(["init"], workdir);
-    await runPlainGit(["config", "user.name", "jumi"], workdir);
-    await runPlainGit(["config", "user.email", "jumi@localhost"], workdir);
+    // Commit messages and branch names are neutral and identical for both
+    // halves: nothing the model can read (git log, branches) leaks the half.
+    await runPlainGit(["init"], workdir, homeDir);
+    await runPlainGit(["config", "user.name", "jumi"], workdir, homeDir);
+    await runPlainGit(["config", "user.email", "jumi@localhost"], workdir, homeDir);
     await cp(opts.fixture.repoDir, workdir, { recursive: true });
-    await runPlainGit(["add", "-A"], workdir);
-    await runPlainGit(["commit", "-m", "fixture base"], workdir);
-    const baseSha = await runPlainGit(["rev-parse", "HEAD"], workdir);
+    await runPlainGit(["add", "-A"], workdir, homeDir);
+    await runPlainGit(["commit", "-m", REVIEW_EVAL_BASE_COMMIT_MESSAGE], workdir, homeDir);
+    const baseSha = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
     const halfDir = opts.half === "defective" ? opts.fixture.defectiveDir : opts.fixture.repairedDir;
     await cp(halfDir, workdir, { recursive: true });
-    await runPlainGit(["add", "-A"], workdir);
-    const headStatus = await runPlainGit(["status", "--porcelain"], workdir);
+    await runPlainGit(["add", "-A"], workdir, homeDir);
+    const headStatus = await runPlainGit(["status", "--porcelain"], workdir, homeDir);
     if (headStatus.trim()) {
-      await runPlainGit(["commit", "-m", `fixture ${opts.half}`], workdir);
+      await runPlainGit(["commit", "-m", REVIEW_EVAL_HEAD_COMMIT_MESSAGE], workdir, homeDir);
     }
-    const headSha = await runPlainGit(["rev-parse", "HEAD"], workdir);
-    await runPlainGit(["branch", "--force", "jumi/target", baseSha], workdir);
+    const headSha = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
+    await runPlainGit(["branch", "--force", REVIEW_EVAL_TARGET_BRANCH, baseSha], workdir, homeDir);
 
-    const prFiles = await buildPullFiles(workdir, baseSha, headSha);
-    const env = gitEnv();
+    const prFiles = await buildPullFiles(workdir, baseSha, headSha, homeDir);
+    const env = gitEnv(homeDir);
 
     // Same REVIEW.md selection as production: sections from the base commit.
     const reviewMd = await loadReviewMdSectionsFromBase({
@@ -504,7 +554,10 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
           home: homeDir,
           sanitizeEnv: true,
           timeoutMs: opts.timeoutMs,
-          reviewLabel: `review-eval:${opts.fixture.name}:${opts.half}:${opts.runner.name}`,
+          // Neutral label: the half name appears nowhere the model can read
+          // (the fixture name is identical for both halves, so it leaks nothing
+          // about defective vs repaired).
+          reviewLabel: `review-eval:${opts.fixture.name}:${opts.runner.name}`,
           logger: log,
           trace: { kind: "review", owner: opts.fixture.owner, repo: opts.fixture.repo, sha: headSha },
           baseInstructionsDir,
@@ -523,10 +576,54 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
 
       await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
 
-      const headAfter = await runPlainGit(["rev-parse", "HEAD"], workdir).catch(() => headSha);
-      const headUnchanged = headAfter.trim().toLowerCase() === headSha.toLowerCase();
-      const porcelain = await runPlainGit(["status", "--porcelain"], workdir).catch(() => "");
-      const treeClean = headUnchanged && porcelainTreeClean(porcelain);
+      // Post-run inspection is fail-closed: a HEAD read or a status read that
+      // fails grades `inconclusive` with its own reason instead of
+      // substituting the expected SHA or an empty status (which would read a
+      // broken worktree as "reviewer did not touch the tree").
+      let headAfter: string | null = null;
+      try {
+        headAfter = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
+      } catch (err) {
+        const reason = `post-run HEAD read failed: ${errorMessage(err)}`.slice(0, 500);
+        return finish({
+          ...baseRecord,
+          baseSha,
+          headSha,
+          verdict: "inconclusive",
+          failedAssertions: [],
+          reviewState: "skip",
+          findingsCount: 0,
+          blockingCount: 0,
+          rawMarkdown: "",
+          treeClean: false,
+          maintainerHolds: true,
+          inconclusiveReason: reason,
+          jobReason: reason,
+        });
+      }
+      let porcelain: string | null = null;
+      try {
+        porcelain = await runPlainGit(["status", "--porcelain"], workdir, homeDir);
+      } catch (err) {
+        const reason = `post-run status failed: ${errorMessage(err)}`.slice(0, 500);
+        return finish({
+          ...baseRecord,
+          baseSha,
+          headSha,
+          verdict: "inconclusive",
+          failedAssertions: [],
+          reviewState: "skip",
+          findingsCount: 0,
+          blockingCount: 0,
+          rawMarkdown: "",
+          treeClean: false,
+          maintainerHolds: true,
+          inconclusiveReason: reason,
+          jobReason: reason,
+        });
+      }
+      const headUnchanged = (headAfter ?? "").trim().toLowerCase() === headSha.toLowerCase();
+      const treeClean = headUnchanged && porcelainTreeClean(porcelain ?? "");
 
       const storedVerdict = verdictStore.getVerdict();
       const findings = verdictStore.listFindings();
