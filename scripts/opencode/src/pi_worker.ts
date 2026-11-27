@@ -965,8 +965,22 @@ export function createPiWorkerCustomTools(
   push({
     name: "jumi_set_pr_body",
     label: "Set PR body",
-    description: "Record the pull-request description markdown.",
-    parameters: Type.Object({ markdown: Type.String(), remaining: Type.Optional(Type.Array(Type.String())) }),
+    description:
+      "Record the pull-request description markdown with an optional remaining list. Each item is a string or {text, kind} with kind work (real leftover work), ci_check (forge CI check, never leftover work), or post_merge_check (verified after merge, own heading).",
+    parameters: Type.Object({
+      markdown: Type.String(),
+      remaining: Type.Optional(
+        Type.Array(
+          Type.Union([
+            Type.String(),
+            Type.Object({
+              text: Type.String(),
+              kind: Type.Union([Type.Literal("work"), Type.Literal("ci_check"), Type.Literal("post_merge_check")]),
+            }),
+          ])
+        )
+      ),
+    }),
     execute: async (_id: string, params: Record<string, unknown>) => {
       const result = store.setPrBody({ markdown: params.markdown, remaining: params.remaining });
       const text = result.ok ? JSON.stringify({ recorded: true }) : result.error;

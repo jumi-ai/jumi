@@ -1030,6 +1030,25 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 3,
+              "regionSha256": "c8dcec8f20b5ceaf512b0e3d8bb9d756bb70f183ac0e489dc89a402560a8f046"
+            }
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -1038,12 +1057,12 @@
         ],
         "method": "updateIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "method": "markPublished",
         "seam": "ledger",
-        "seq": 3,
+        "seq": 4,
         "state": "succeeded"
       },
       {
@@ -1054,7 +1073,7 @@
         ],
         "op": "clear",
         "seam": "sits",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -1271,6 +1290,25 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 3,
+              "regionSha256": "d4cce80876c586736c427ff539853ab14b05ce26a4d3f45b8e8ba69660f53e0b"
+            }
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -1279,12 +1317,12 @@
         ],
         "method": "updateIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "method": "markPublished",
         "seam": "ledger",
-        "seq": 3,
+        "seq": 4,
         "state": "succeeded"
       },
       {
@@ -1295,7 +1333,7 @@
         ],
         "op": "clear",
         "seam": "sits",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {
@@ -1361,6 +1399,25 @@
         "seq": 1
       },
       {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "prClosing": {
+              "decision": "fixes",
+              "prNumber": 3,
+              "regionSha256": "d4cce80876c586736c427ff539853ab14b05ce26a4d3f45b8e8ba69660f53e0b"
+            }
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
         "args": [
           "kirmanak",
           "demo",
@@ -1369,12 +1426,12 @@
         ],
         "method": "updateIssueComment",
         "seam": "forge",
-        "seq": 2
+        "seq": 3
       },
       {
         "method": "markPublished",
         "seam": "ledger",
-        "seq": 3,
+        "seq": 4,
         "state": "succeeded"
       },
       {
@@ -1385,7 +1442,7 @@
         ],
         "op": "clear",
         "seam": "sits",
-        "seq": 4
+        "seq": 5
       }
     ],
     "input": {

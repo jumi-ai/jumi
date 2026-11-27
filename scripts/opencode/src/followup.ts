@@ -99,6 +99,13 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { senderCanSteer, trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
+  isNonClosingLiveBody,
+  type PersistedPrClosing,
+  parsePersistedPrClosing,
+  type RemainingItem,
+  sha256Hex,
+} from "./pr_closing.ts";
+import {
   applyEffects,
   decide,
   holdReasonForSkippedResult,
@@ -259,6 +266,7 @@ export interface FollowUpState {
   handledReviewFindings: HandledReviewFinding[];
   updatedAt: string;
   suggestionHold?: SuggestionHoldLatch;
+  prClosing?: import("./pr_closing.ts").PersistedPrClosing;
 }
 
 function logDefault(message: string) {
@@ -293,6 +301,7 @@ export function parseFollowUpState(parsed: unknown): FollowUpState {
     handledReviewFindings: parseHandledReviewFindings(state.handledReviewFindings),
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
     ...parseSuggestionHoldLatch(state.suggestionHold),
+    ...parsePrClosingLatch((state as { prClosing?: unknown }).prClosing),
   };
 }
 
@@ -305,6 +314,11 @@ function parseSuggestionHoldLatch(value: unknown): Pick<FollowUpState, "suggesti
   if (typeof rec.count === "number" && Number.isSafeInteger(rec.count) && rec.count > 0) hold.count = rec.count;
   if (hold.consumed === undefined && hold.headSha === undefined && hold.count === undefined) return {};
   return { suggestionHold: hold };
+}
+
+function parsePrClosingLatch(value: unknown): Pick<FollowUpState, "prClosing"> {
+  const parsed = parsePersistedPrClosing(value);
+  return parsed ? { prClosing: parsed } : {};
 }
 
 export async function readFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<FollowUpState> {
@@ -2228,6 +2242,7 @@ export async function implementFollowUp(
     return mergeOnlyResult;
   }
   const state = await readFollowUpLatch(latches, latchKey);
+  let latestPrClosing = state.prClosing;
   // Terminal no-push outcomes settle through the shared hold-settlement gate,
   // which re-reads the head, policy, review and status fresh. Never throws.
   const resolveHeld = async (kind: "completed" | "skipped", reason?: string): Promise<void> => {
@@ -2414,6 +2429,7 @@ export async function implementFollowUp(
           handledReviewFindings: current.handledReviewFindings,
           updatedAt: now().toISOString(),
           ...(current.suggestionHold ? { suggestionHold: current.suggestionHold } : {}),
+          ...(current.prClosing ? { prClosing: current.prClosing } : {}),
         });
       } catch (err) {
         log(`post-cap handled latch update failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
@@ -2750,6 +2766,7 @@ export async function implementFollowUp(
       handledReviewFindings: uniqueReviewFindings(handledReviewFindings),
       updatedAt: now().toISOString(),
       ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
+      ...(latestPrClosing ? { prClosing: latestPrClosing } : {}),
     });
     if (currentFingerprint) {
       await appendStuckLatchFingerprint(latches, latchKey, currentFingerprint, now);
@@ -2771,9 +2788,27 @@ export async function implementFollowUp(
   // The original-title marker (`<!-- jumi-original-title: … -->`) is preserved
   // across refreshes: a fresh `set_pr_body` rewrite keeps the first original.
   const initialTitle = pr.title;
+  const persistPrClosingRecord = async (record: PersistedPrClosing): Promise<void> => {
+    try {
+      const current = await readFollowUpLatch(latches, latchKey);
+      await writeFollowUpLatch(latches, latchKey, {
+        prNumber: pr.number,
+        round: current.round,
+        lastHeadSha: current.lastHeadSha,
+        handledCommentIds: current.handledCommentIds,
+        handledReviewIds: current.handledReviewIds,
+        handledReviewFindings: current.handledReviewFindings,
+        updatedAt: now().toISOString(),
+        ...(current.suggestionHold ? { suggestionHold: current.suggestionHold } : {}),
+        prClosing: record,
+      });
+    } catch {
+      // Best-effort: the body update already landed.
+    }
+  };
   const refreshPullRequestBody = async (
     description: string | null,
-    remaining?: readonly string[] | null | undefined,
+    remaining?: readonly RemainingItem[] | null | undefined,
     fallbackHeadSha?: string
   ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
     const fallback = fallbackHeadSha || pr.head.sha;
@@ -2793,16 +2828,29 @@ export async function implementFollowUp(
         runner,
         workerPublishSecrets(loop.auth.token, jobChain),
         followupConventions.closingKeyword,
-        remaining
+        remaining,
+        remaining == null && followupConventions.closingKeyword !== "refs" && latestPrClosing
+          ? { persistedClosing: latestPrClosing, prNumber: pr.number }
+          : undefined
       );
       const existingMarker = extractOriginalTitle(live.body);
       const inner = existingMarker !== undefined ? withOriginalTitleMarker(built, existingMarker) : built;
       const body = replaceJumiPrBodyRegion(live.body, inner);
+      const publishedRegion = jumiPrBodyRegion(body) ?? body;
+      const publishedDecision = isNonClosingLiveBody(publishedRegion, issueNumber) ? "refs" : "fixes";
+      const publishedRecord: PersistedPrClosing = {
+        prNumber: pr.number,
+        decision: publishedDecision,
+        regionSha256: sha256Hex(publishedRegion),
+      };
+      latestPrClosing = publishedRecord;
       if (body === live.body) {
         log("PR body not refreshed: identical text");
+        await persistPrClosingRecord(publishedRecord);
         return { changed: false, ...seen };
       }
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
+      await persistPrClosingRecord(publishedRecord);
       return { changed: true, ...seen };
     } catch (err) {
       log(`PR body not refreshed: forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
@@ -3872,6 +3920,7 @@ export async function implementFollowUp(
           handledReviewFindings: state.handledReviewFindings,
           updatedAt: now().toISOString(),
           ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
+          ...((latestPrClosing ?? state.prClosing) ? { prClosing: (latestPrClosing ?? state.prClosing)! } : {}),
         }).catch(() => undefined);
         // Intentionally no persistCi(): an unsuccessful attempt must not
         // consume the outstanding CI-fix work. Only recordAttempt() on a
