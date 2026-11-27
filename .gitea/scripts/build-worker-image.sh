@@ -423,6 +423,14 @@ verify_worker_skills() {
     echo "offline Pi/legacy probe failed against the installed components" >&2
     exit 1
   fi
+  # Pi Go wire probe (#986): same wire probe as the reviewer image, proving
+  # each worker intent's jumi_* set reaches the model over the Go wire format.
+  if ! buildah run --user 10001:10001 --env HOME=/tmp/probe-home --env TMPDIR=/tmp "${ctr}" -- \
+    sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_go_wire_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Pi Go wire probe failed against the installed components" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "installed-tools manifest missing in worker image" >&2
