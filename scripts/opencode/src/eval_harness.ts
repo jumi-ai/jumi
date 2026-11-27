@@ -26,7 +26,6 @@ import {
   orderedRunners,
   parseRunnersFile,
   refuseAntigravityUnlessGithub,
-  synthesizeRunners,
 } from "./runners.ts";
 
 export type EvalHarness = "legacy" | "pi";
@@ -119,46 +118,57 @@ export function resolveEvalPiRoute(deployment: {
   try {
     return selectPiGoRoute(deployment.allowlist[0]!, deployment.catalog, deployment.allowlist, { scope: "public" });
   } catch (err) {
-    // Hermetic loopback for the operator gate: a catalog endpoint on
-    // 127.0.0.1/localhost/::1 with the exact Go provider/model/SKU still
-    // selects the Go route, with allowedFetchHosts just that host. Production
-    // keeps the known-endpoint deny; only the eval allows loopback.
-    const message = err instanceof Error ? err.message : String(err);
-    if (!/unknown endpoint/i.test(message)) throw err;
-    const name = deployment.allowlist[0]!;
-    const def = (deployment.catalog as unknown as Record<string, Record<string, unknown>>)[name] as
-      | Record<string, unknown>
-      | undefined;
-    const endpoint = typeof def?.endpoint === "string" ? (def.endpoint as string).trim() : "";
-    let host = "";
-    try {
-      host = new URL(endpoint).hostname.toLowerCase();
-    } catch {
-      throw err;
-    }
-    const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
-    if (!loopback) throw err;
-    const provider = typeof def?.provider === "string" ? (def.provider as string).trim() : "";
-    const model = typeof def?.model === "string" ? (def.model as string).trim() : "";
-    const sku = typeof def?.sku === "string" ? (def.sku as string).trim().toLowerCase() : "";
-    if (provider !== "opencode-go" || model !== "muse-spark-1.3-contributor" || sku !== "contributor") {
-      throw err;
-    }
-    const scopes = Array.isArray(def?.scopes) ? (def.scopes as unknown[]) : [];
-    if (!scopes.includes("public")) throw err;
-    return {
-      name,
-      provider,
-      model,
-      endpoint,
-      fundingPool: typeof def?.fundingPool === "string" ? (def.fundingPool as string).trim() : "",
-      payer: typeof def?.payer === "string" ? (def.payer as string).trim() : "",
-      credentialRef: typeof def?.credentialRef === "string" ? (def.credentialRef as string).trim() : "",
-      scopes: ["public"] as never,
-      sku: "contributor",
-      family: `${provider.toLowerCase()}|${model}`,
-    } as ReturnType<typeof selectPiGoRoute>;
+    return tryLoopbackGoRoute(deployment.allowlist[0]!, deployment.catalog, deployment.allowlist, err);
   }
+}
+
+/**
+ * Hermetic loopback allowance shared by both route resolvers: a catalog
+ * endpoint on 127.0.0.1/localhost/::1 with the exact Go provider/model/SKU
+ * still selects the Go route, with allowedFetchHosts just that host.
+ * Production keeps the known-endpoint deny; only the eval allows loopback.
+ */
+function tryLoopbackGoRoute(
+  name: string,
+  catalog: Parameters<typeof selectPiGoRoute>[1],
+  allowlist: readonly string[],
+  err: unknown
+): ReturnType<typeof selectPiGoRoute> {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!/unknown endpoint/i.test(message)) throw err;
+  const def = (catalog as unknown as Record<string, Record<string, unknown>>)[name] as
+    | Record<string, unknown>
+    | undefined;
+  const endpoint = typeof def?.endpoint === "string" ? (def.endpoint as string).trim() : "";
+  let host = "";
+  try {
+    host = new URL(endpoint).hostname.toLowerCase();
+  } catch {
+    throw err;
+  }
+  const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
+  if (!loopback) throw err;
+  const provider = typeof def?.provider === "string" ? (def.provider as string).trim() : "";
+  const model = typeof def?.model === "string" ? (def.model as string).trim() : "";
+  const sku = typeof def?.sku === "string" ? (def.sku as string).trim().toLowerCase() : "";
+  if (provider !== "opencode-go" || model !== "muse-spark-1.3-contributor" || sku !== "contributor") {
+    throw err;
+  }
+  const scopes = Array.isArray(def?.scopes) ? (def.scopes as unknown[]) : [];
+  if (!scopes.includes("public")) throw err;
+  if (!allowlist.includes(name)) throw err;
+  return {
+    name,
+    provider,
+    model,
+    endpoint,
+    fundingPool: typeof def?.fundingPool === "string" ? (def.fundingPool as string).trim() : "",
+    payer: typeof def?.payer === "string" ? (def.payer as string).trim() : "",
+    credentialRef: typeof def?.credentialRef === "string" ? (def.credentialRef as string).trim() : "",
+    scopes: ["public"] as never,
+    sku: "contributor",
+    family: `${provider.toLowerCase()}|${model}`,
+  } as ReturnType<typeof selectPiGoRoute>;
 }
 
 /** Named Go route for scope `public`, with the same loopback allowance as the first-route helper. */
@@ -170,41 +180,7 @@ export function resolveEvalPiRouteNamed(
   try {
     return selectPiGoRoute(name, deployment.catalog, deployment.allowlist, { scope: "public" });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!/unknown endpoint/i.test(message)) throw err;
-    const def = (deployment.catalog as unknown as Record<string, Record<string, unknown>>)[name] as
-      | Record<string, unknown>
-      | undefined;
-    const endpoint = typeof def?.endpoint === "string" ? (def.endpoint as string).trim() : "";
-    let host = "";
-    try {
-      host = new URL(endpoint).hostname.toLowerCase();
-    } catch {
-      throw err;
-    }
-    const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
-    if (!loopback) throw err;
-    const provider = typeof def?.provider === "string" ? (def.provider as string).trim() : "";
-    const model = typeof def?.model === "string" ? (def.model as string).trim() : "";
-    const sku = typeof def?.sku === "string" ? (def.sku as string).trim().toLowerCase() : "";
-    if (provider !== "opencode-go" || model !== "muse-spark-1.3-contributor" || sku !== "contributor") {
-      throw err;
-    }
-    const scopes = Array.isArray(def?.scopes) ? (def.scopes as unknown[]) : [];
-    if (!scopes.includes("public")) throw err;
-    if (!deployment.allowlist.includes(name)) throw err;
-    return {
-      name,
-      provider,
-      model,
-      endpoint,
-      fundingPool: typeof def?.fundingPool === "string" ? (def.fundingPool as string).trim() : "",
-      payer: typeof def?.payer === "string" ? (def.payer as string).trim() : "",
-      credentialRef: typeof def?.credentialRef === "string" ? (def.credentialRef as string).trim() : "",
-      scopes: ["public"] as never,
-      sku: "contributor",
-      family: `${provider.toLowerCase()}|${model}`,
-    } as ReturnType<typeof selectPiGoRoute>;
+    return tryLoopbackGoRoute(name, deployment.catalog, deployment.allowlist, err);
   }
 }
 
@@ -290,5 +266,3 @@ export function loadEvalLegacyRunners(
   refuseAntigravityUnlessGithub({ runners, chain: selected.map((r) => r.name) } as never, forge);
   return selected;
 }
-
-void synthesizeRunners;

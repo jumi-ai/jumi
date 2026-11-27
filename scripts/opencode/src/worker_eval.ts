@@ -483,11 +483,6 @@ export interface RunWorkerEvalCaseOptions {
   }) => Promise<{ usage?: unknown }>;
 }
 
-export interface WorkerEvalPiContext {
-  deployment: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] };
-  routeName?: string;
-}
-
 function workerEvalBaseRecord(
   opts: Pick<RunWorkerEvalCaseOptions, "fixture" | "runner" | "trial" | "harness">,
   stamp: string
@@ -1135,8 +1130,7 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       return inconclusive("eval git infrastructure: PR head SHA unavailable", "provider-failure", piUsage);
     }
     if (opts.afterPr) {
-      const tmp2 = clonePath;
-      void tmp2;
+      await opts.afterPr({ barePath, tmpDir: tmp });
     }
 
     const closingKeyword = parseEvalClosingKeyword(prBody, opts.fixture.issueNumber);
