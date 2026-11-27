@@ -56,7 +56,7 @@ export function createTrustedPiLoaderWithCodemode(systemPrompt: string): Resourc
     packages: [],
     extensions: [],
   } as Parameters<typeof SettingsManager.inMemory>[0]);
-  const loader = new DefaultResourceLoader({
+  const inner = new DefaultResourceLoader({
     cwd: process.cwd(),
     agentDir: process.cwd(),
     settingsManager: settings as never,
@@ -73,7 +73,27 @@ export function createTrustedPiLoaderWithCodemode(systemPrompt: string): Resourc
     themesOverride: () => ({ themes: [], diagnostics: [] }) as never,
     agentsFilesOverride: () => ({ agentsFiles: [] }) as never,
   } as never);
-  return loader as unknown as ResourceLoader;
+  // `DefaultResourceLoader.getSystemPrompt()` is only populated after
+  // `reload()`, but callers (and the pre-existing Go round-trip test) read it
+  // synchronously. The prompt is fixed at construction, so expose it
+  // immediately while delegating everything else to the inner loader.
+  const loader = inner as unknown as ResourceLoader & {
+    getSystemPrompt: () => string | undefined;
+  };
+  const getSystemPrompt = loader.getSystemPrompt.bind(loader);
+  return {
+    getExtensions: loader.getExtensions.bind(loader),
+    getSkills: loader.getSkills.bind(loader),
+    getPrompts: loader.getPrompts.bind(loader),
+    getThemes: loader.getThemes.bind(loader),
+    getAgentsFiles: loader.getAgentsFiles.bind(loader),
+    getSystemPrompt: () => getSystemPrompt() ?? systemPrompt,
+    getSystemPromptSource: loader.getSystemPromptSource.bind(loader),
+    getAppendSystemPrompt: loader.getAppendSystemPrompt.bind(loader),
+    getAppendSystemPromptSources: loader.getAppendSystemPromptSources.bind(loader),
+    extendResources: loader.extendResources.bind(loader),
+    reload: loader.reload.bind(loader),
+  } as unknown as ResourceLoader;
 }
 
 /**
