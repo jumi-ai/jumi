@@ -1,6 +1,6 @@
 import { lastCheckTrailer, parseReviewedCommitSha } from "./followup.ts";
 import type { Comment, InlineComment, PullReview } from "./ports.ts";
-import { reviewFindingLines } from "./verdict.ts";
+import { buildReviewFacts } from "./review_facts.ts";
 import type { GitRunner } from "./workspace.ts";
 
 const REVIEW_CARRY_MARKER = "Carried forward from";
@@ -73,7 +73,7 @@ function findPreviousReviewWithVerdict(opts: {
   if (!latest) return undefined;
   const trailer = lastCheckTrailer(latest.body);
   if (!trailer) return undefined;
-  const findings = reviewFindingLines(latest.body);
+  const inlineSubset: InlineComment[] = [];
   if (latest.pull) {
     const slug = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
     const botSlug = slug(opts.botUsername);
@@ -83,13 +83,11 @@ function findPreviousReviewWithVerdict(opts: {
       const resolver = inline.resolver?.login;
       const resolvedByBot = resolver ? slug(resolver) === botSlug : inline.resolved === true;
       if (resolvedByBot) continue;
-      const body = inline.body ?? "";
-      if (!inline.path || !body.includes(opts.marker)) continue;
-      const text = body.split(opts.marker).join("").replace(/\s+/g, " ").trim();
-      if (!text) continue;
-      findings.push(inline.new_position ? `${inline.path}:${inline.new_position}: ${text}` : `${inline.path}: ${text}`);
+      inlineSubset.push(inline);
     }
   }
+  const facts = buildReviewFacts({ body: latest.body, inlines: inlineSubset, carryMarker: opts.marker });
+  const findings = [...facts.carryLines];
   const deduped = [...new Set(findings)];
   const carriedFrom = parseCarrySourceSha(latest.body);
   return {

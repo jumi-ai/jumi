@@ -1,16 +1,8 @@
 import { isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import type { InlineComment } from "./ports.ts";
+import { classifyInlineText } from "./review_facts.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
-import {
-  countBugFindings,
-  countRiskFindings,
-  countSuggestionFindings,
-  isBugFindingFirstLine,
-  isMaintainerQuestionInline,
-  isRiskFindingFirstLine,
-  isSuggestionFindingFirstLine,
-} from "./verdict.ts";
 
 const REVIEW_MARKER = "<!-- jumi-review:";
 
@@ -33,21 +25,15 @@ function isJumiOwnedOpenInline(inline: InlineComment, botUsername?: string): boo
 }
 
 function isBugLikeInline(inline: InlineComment): boolean {
-  if (typeof inline.path === "string" && inline.path.trim() && isBugFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countBugFindings(body) > 0;
+  return classifyInlineText(inline.path, inline.body).bugLike;
 }
 
 function isRiskLikeInline(inline: InlineComment): boolean {
-  if (typeof inline.path === "string" && inline.path.trim() && isRiskFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countRiskFindings(body) > 0;
+  return classifyInlineText(inline.path, inline.body).riskLike;
 }
 
 function isSuggestionLikeInline(inline: InlineComment): boolean {
-  if (typeof inline.path === "string" && inline.path.trim() && isSuggestionFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countSuggestionFindings(body) > 0;
+  return classifyInlineText(inline.path, inline.body).suggestionLike;
 }
 
 /**
@@ -60,7 +46,7 @@ export function isResolvableHoldInline(inline: InlineComment, botUsername?: stri
   if (!isJumiOwnedOpenInline(inline, botUsername)) return false;
   if (isBugLikeInline(inline)) return false;
   if (isRiskLikeInline(inline)) return false;
-  if (isMaintainerQuestionInline(inline.path, inline.body ?? "")) return true;
+  if (classifyInlineText(inline.path, inline.body).maintainerQuestion) return true;
   if (isSuggestionLikeInline(inline)) return true;
   return false;
 }

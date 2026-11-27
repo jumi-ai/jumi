@@ -1,7 +1,7 @@
 import { isJumiPullReviewWriteup, isJumiReviewSticky, lastCheckTrailer, parseReviewedCommitSha } from "./followup.ts";
 import type { Comment, InlineComment, PullFile, PullReview } from "./ports.ts";
+import { buildReviewFacts } from "./review_facts.ts";
 import { loginEquals } from "./util/login.ts";
-import { reviewFindingLines } from "./verdict.ts";
 import type { GitRunner } from "./workspace.ts";
 
 const REVIEW_MARKER = "<!-- jumi-review:";
@@ -41,10 +41,6 @@ function isResolvedByBot(inline: InlineComment, botUsername: string): boolean {
 function timeOf(at: string): number {
   const time = Date.parse(at);
   return Number.isNaN(time) ? 0 : time;
-}
-
-function stripMarker(body: string, marker: string): string {
-  return body.split(marker).join("").replace(/\s+/g, " ").trim();
 }
 
 function dedupe(lines: string[]): string[] {
@@ -88,18 +84,17 @@ export function findPreviousReview(opts: {
   const latest = candidates.sort((a, b) => timeOf(a.at) - timeOf(b.at)).at(-1);
   if (!latest) return undefined;
 
-  const findings = reviewFindingLines(latest.body);
+  const inlineSubset: InlineComment[] = [];
   if (latest.pull) {
     for (const inline of opts.inlines) {
       if (!loginEquals(inline.user?.login, opts.botUsername)) continue;
       if (isResolvedByBot(inline, opts.botUsername)) continue;
-      const body = inline.body ?? "";
-      if (!inline.path || !body.includes(opts.marker)) continue;
-      const text = stripMarker(body, opts.marker);
-      if (!text) continue;
-      findings.push(inline.new_position ? `${inline.path}:${inline.new_position}: ${text}` : `${inline.path}: ${text}`);
+      inlineSubset.push(inline);
     }
   }
+  const findings = [
+    ...buildReviewFacts({ body: latest.body, inlines: inlineSubset, carryMarker: opts.marker }).carryLines,
+  ];
   // A failed review with no finding lines (unfinished) has nothing to carry
   // forward, so the next run is a first review.
   if (findings.length === 0 && lastCheckTrailer(latest.body)?.state === "failure") return undefined;
