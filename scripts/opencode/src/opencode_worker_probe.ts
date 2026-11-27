@@ -24,11 +24,13 @@
  *      input schema production registers. Compared against the server's own
  *      list, not a hand-copied list. `set_pr_title` must be absent on a
  *      non-adopted job.
- *   2. Accepted: a valid `set_pr_body` (markdown plus a non-empty `remaining`
- *      list) reaches the parent `WorkerResultStore` through the real
- *      OpenCode-to-MCP path, and `preferWorkerTool` takes the tool path.
- *   3. Rejected: an invalid call (`remaining` that is not an array of strings)
- *      comes back to the model as a tool error and stores nothing.
+ *   2. Accepted: a valid `set_pr_body` (markdown plus a `remaining` list with
+ *      a plain string and a typed {text, kind} item) reaches the parent
+ *      `WorkerResultStore` through the real OpenCode-to-MCP path, and
+ *      `preferWorkerTool` takes the tool path.
+ *   3. Rejected: an invalid call (`remaining` with an unknown kind or a
+ *      non-string/non-object item) comes back to the model as a tool error
+ *      and stores nothing.
  *
  * Worker role only. No network beyond loopback, no credentials, no model cost.
  *
@@ -60,7 +62,7 @@ const PROBE_DENY_DOMAIN = "kirmanak.stream";
 const RUN_TIMEOUT_MS = 60_000;
 
 const PROBE_MARKDOWN = "Jumi worker probe body.\n\nRefs #965";
-const PROBE_REMAINING = ["probe-remaining-item"];
+const PROBE_REMAINING = ["probe-remaining-item", { text: "probe typed work", kind: "work" }];
 
 function sse(chunks: readonly unknown[]): string {
   return `${chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("")}data: [DONE]\n\n`;
@@ -344,7 +346,7 @@ async function main(): Promise<number> {
       probeServerState.bodies = [];
       probeServerState.toolResult = undefined;
       probeServerState.toolName = directToolName("set_pr_body");
-      probeServerState.args = { markdown: PROBE_MARKDOWN, remaining: [42] };
+      probeServerState.args = { markdown: PROBE_MARKDOWN, remaining: [{ text: "x", kind: "nope" }] };
       const invalid = await runOpenCode(workdir, configPath, xdgConfigHome, inlineContent);
       const rejectedResult = probeServerState.toolResult ?? "";
       const rejectedOk =
