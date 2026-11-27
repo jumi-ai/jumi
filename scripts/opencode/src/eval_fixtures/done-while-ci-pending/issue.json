@@ -1,0 +1,4 @@
+{
+  "title": "Add sum helper",
+  "body": "## Problem\n\nWe need a small helper to add two numbers for upcoming work.\n\n## Done when\n\n- `sum(a, b)` in `sum.js` returns the sum of its arguments\n- `node check.js` passes\n- CI is green\n"
+}
