@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { auditChildEnv, CHILD_FORBIDDEN_KEYS } from "../src/child_env.ts";
 import type { Comment, InlineComment } from "../src/ports.ts";
-import { findPreviousReview } from "../src/review_delta.ts";
 import { publishReviewResult } from "../src/review.ts";
+import { findPreviousReview } from "../src/review_delta.ts";
+import { parseLastCheckTrailer } from "../src/review_facts.ts";
 import {
   assembleReviewMeta,
   attachReviewMeta,
@@ -16,6 +17,15 @@ import {
   expectedStoreFindingText,
   hasCompetingSyntax,
   insertReviewMetaBeforeTrailer,
+  type MetaAssembleFinding,
+  type MetaBlockInput,
+  type MetaFindingEntry,
+  type MetaLiveInline,
+  type MetaPayload,
+  type MetaPlacement,
+  type MetaQuestionSubtype,
+  type MetaSeverity,
+  type MetaStoreFinding,
   metaBlocksForContent,
   parseReviewMetaBlock,
   questionSubtypeOf,
@@ -30,18 +40,9 @@ import {
   stripReviewMeta,
   textSeverityOfFinding,
   verifyReviewMeta,
-  type MetaAssembleFinding,
-  type MetaBlockInput,
-  type MetaFindingEntry,
-  type MetaLiveInline,
-  type MetaPayload,
-  type MetaPlacement,
-  type MetaQuestionSubtype,
-  type MetaSeverity,
-  type MetaStoreFinding,
 } from "../src/review_meta.ts";
-import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
 import { findReviewEnvViolations } from "../src/review_sandbox.ts";
+import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
 import { fingerprintFindingIdentityFromParts } from "../src/stuck.ts";
 import {
   countBugFindings,
@@ -55,7 +56,6 @@ import {
   parseReviewFindings,
   reviewFindingLines,
 } from "../src/verdict.ts";
-import { parseLastCheckTrailer } from "../src/review_facts.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 
 const SECRET = "test-webhook-secret-977";
@@ -85,9 +85,21 @@ const PATCH = [
 
 function twoBugStore(): ReviewVerdictStore {
   const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/a.ts", patch: PATCH }] });
-  const first = store.addFinding({ path: "src/a.ts", line: 12, severity: "bug", title: "null deref", body: "Guard it." });
+  const first = store.addFinding({
+    path: "src/a.ts",
+    line: 12,
+    severity: "bug",
+    title: "null deref",
+    body: "Guard it.",
+  });
   if (!first.ok) throw new Error(`addFinding failed: ${first.error}`);
-  const second = store.addFinding({ path: "src/a.ts", line: 21, severity: "risk", title: "slow path", body: "Cache it." });
+  const second = store.addFinding({
+    path: "src/a.ts",
+    line: 21,
+    severity: "risk",
+    title: "slow path",
+    body: "Cache it.",
+  });
   if (!second.ok) throw new Error(`addFinding failed: ${second.error}`);
   const verdict = store.setVerdict({ state: "failure", reason: "2 blocking" });
   if (!verdict.ok) throw new Error(`setVerdict failed: ${verdict.error}`);
@@ -165,8 +177,24 @@ describe("review meta signing", () => {
     expect(verified.ok).toBe(true);
     if (!verified.ok) return;
     expect(verified.payload.findings).toHaveLength(2);
-    expect(verified.payload.findings[0]).toMatchObject({ k: "k_job-1_1", s: "bug", p: "body", path: "src/a.ts", line: 12, proof: 0, o: 1 });
-    expect(verified.payload.findings[1]).toMatchObject({ k: "k_job-1_2", s: "risk", p: "body", path: "src/a.ts", line: 21, proof: 0, o: 2 });
+    expect(verified.payload.findings[0]).toMatchObject({
+      k: "k_job-1_1",
+      s: "bug",
+      p: "body",
+      path: "src/a.ts",
+      line: 12,
+      proof: 0,
+      o: 1,
+    });
+    expect(verified.payload.findings[1]).toMatchObject({
+      k: "k_job-1_2",
+      s: "risk",
+      p: "body",
+      path: "src/a.ts",
+      line: 21,
+      proof: 0,
+      o: 2,
+    });
   });
 
   test("flipping payload, repo, pr, head, or identity fails verification", () => {
@@ -201,7 +229,10 @@ describe("review meta signing", () => {
     const tampered = withMeta.replace("Guard it.", "Guard it!!!");
     expect(verifyReviewMeta(tampered, SECRET).ok).toBe(false);
     // The trailer stays the last non-empty line so old readers classify identically.
-    const nonEmpty = withMeta.split("\n").map((line) => line.trim()).filter(Boolean);
+    const nonEmpty = withMeta
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
     expect(nonEmpty[nonEmpty.length - 1]).toMatch(/jumi-check:/);
   });
 
@@ -316,9 +347,7 @@ describe("review meta one-to-one keys", () => {
       blockingGate: false,
       marker: MARKER,
       postedFingerprints: good.posted,
-      liveInlines: [
-        { id: 101, path: "src/a.ts", line: 12, body: alteredBody },
-      ],
+      liveInlines: [{ id: 101, path: "src/a.ts", line: 12, body: alteredBody }],
       expectedBodies: good.expected,
     });
     expect(altered.ok).toBe(true);
@@ -347,9 +376,7 @@ describe("review meta one-to-one keys", () => {
       blockingGate: false,
       marker: MARKER,
       postedFingerprints: good.posted,
-      liveInlines: [
-        { id: 101, path: "src/a.ts", line: 13, body: good.expected.get(good.firstFingerprint) ?? "" },
-      ],
+      liveInlines: [{ id: 101, path: "src/a.ts", line: 13, body: good.expected.get(good.firstFingerprint) ?? "" }],
       expectedBodies: good.expected,
     });
     expect(moved.ok).toBe(true);
@@ -570,7 +597,13 @@ describe("review meta suppression", () => {
 
   test("redaction altering a finding suppresses the block", () => {
     const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/a.ts", patch: PATCH }] });
-    const added = store.addFinding({ path: "src/a.ts", line: 12, severity: "bug", title: "leak", body: "token hunter2" });
+    const added = store.addFinding({
+      path: "src/a.ts",
+      line: 12,
+      severity: "bug",
+      title: "leak",
+      body: "token hunter2",
+    });
     if (!added.ok) throw new Error(`addFinding failed: ${added.error}`);
     const verdict = store.setVerdict({ state: "failure" });
     if (!verdict.ok) throw new Error(`setVerdict failed: ${verdict.error}`);
@@ -1001,13 +1034,18 @@ describe("review meta encoding primitives", () => {
   });
 });
 
-describe("review meta compatibility", () => {  const corpus = [
+describe("review meta compatibility", () => {
+  const corpus = [
     [
       "src/a.ts:12: 🔴 bug: null deref. Guard it.",
       "src/b.ts:3: 🟡 risk: slow path. Cache it.",
       "<!-- jumi-check: failure; 2 blocking -->",
     ].join("\n"),
-    ["src/a.ts:12: ❓ q: is this intentional?", "src/c.ts:7: 💡 simpler: drop it.", "<!-- jumi-check: success -->"].join("\n"),
+    [
+      "src/a.ts:12: ❓ q: is this intentional?",
+      "src/c.ts:7: 💡 simpler: drop it.",
+      "<!-- jumi-check: success -->",
+    ].join("\n"),
     [
       "src/a.ts:12: 🔴 bug: quoting jumi-findings-list:start in prose.",
       "  Proof: src/a.ts:12 shows it",
@@ -1035,7 +1073,12 @@ describe("review meta compatibility", () => {  const corpus = [
       expect(countNonMaintainerQuestionFindings(meta)).toBe(countNonMaintainerQuestionFindings(plain));
       expect(reviewFindingLines(meta)).toEqual(reviewFindingLines(plain));
       expect(parseLastCheckTrailer(meta)).toEqual(parseLastCheckTrailer(plain));
-      const lastLine = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
+      const lastLine = (text: string) =>
+        text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .at(-1) ?? "";
       expect(parseCheckLine(lastLine(meta))).toEqual(parseCheckLine(lastLine(plain)));
       expect(fingerprintFindingIdentityFromParts(meta, [])).toBe(fingerprintFindingIdentityFromParts(plain, []));
       const comment = (body: string): Comment => ({
@@ -1046,7 +1089,13 @@ describe("review meta compatibility", () => {  const corpus = [
         updated_at: "2026-01-01T00:00:00Z",
       });
       const previous = (body: string) =>
-        findPreviousReview({ comments: [comment(body)], reviews: [], inlines: [], botUsername: "jumi", marker: MARKER });
+        findPreviousReview({
+          comments: [comment(body)],
+          reviews: [],
+          inlines: [],
+          botUsername: "jumi",
+          marker: MARKER,
+        });
       expect(previous(meta)).toEqual(previous(plain));
     }
   });

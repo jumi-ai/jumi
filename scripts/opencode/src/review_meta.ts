@@ -23,8 +23,8 @@
 
 import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { CI_ABSENT_NOTE } from "./ci.ts";
-import { canonicalFindingLine, renderProofLines, type ReviewProof } from "./review_verdict_typed.ts";
 import type { ReviewMcpFindingRecord, ReviewRecord } from "./review_verdict_store.ts";
+import { canonicalFindingLine, type ReviewProof, renderProofLines } from "./review_verdict_typed.ts";
 import {
   findingFingerprint,
   hasFindingProof,
@@ -34,8 +34,8 @@ import {
   isQuestionFindingFirstLine,
   isRiskFindingFirstLine,
   isSuggestionFindingFirstLine,
-  publishedFindingBlocks,
   type PublishedFindingBlock,
+  publishedFindingBlocks,
 } from "./verdict.ts";
 
 /** Format version of the signed block. */
@@ -143,9 +143,7 @@ export interface MetaAssembleOpts {
   log?: (message: string) => void;
 }
 
-export type MetaAssembleResult =
-  | { ok: true; block: string; payload: MetaPayload }
-  | { ok: false; suppressed: string };
+export type MetaAssembleResult = { ok: true; block: string; payload: MetaPayload } | { ok: false; suppressed: string };
 
 /**
  * Default forge identity: the forge base URL host plus the bot username,
@@ -163,7 +161,9 @@ export function defaultForgeIdentity(giteaUrl: string, botUsername: string): str
 
 /** Dedicated signing key: HKDF-SHA-256 over the webhook secret. */
 export function deriveReviewMetaKey(webhookSecret: string): Buffer {
-  return Buffer.from(hkdfSync("sha256", Buffer.from(webhookSecret, "utf8"), Buffer.alloc(0), REVIEW_META_HKDF_INFO, 32));
+  return Buffer.from(
+    hkdfSync("sha256", Buffer.from(webhookSecret, "utf8"), Buffer.alloc(0), REVIEW_META_HKDF_INFO, 32)
+  );
 }
 
 export function sha256Hex(data: string | Buffer): string {
@@ -171,7 +171,10 @@ export function sha256Hex(data: string | Buffer): string {
 }
 
 function sanitizeJobId(jobId: string): string {
-  const clean = jobId.trim().replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80);
+  const clean = jobId
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .slice(0, 80);
   return clean || "job";
 }
 
@@ -266,9 +269,7 @@ export interface VerifyReviewMetaExpected {
   state?: "success" | "failure";
 }
 
-export type VerifyReviewMetaResult =
-  | { ok: true; payload: MetaPayload }
-  | { ok: false; reason: string };
+export type VerifyReviewMetaResult = { ok: true; payload: MetaPayload } | { ok: false; reason: string };
 
 function payloadEquals(a: string, b: string): boolean {
   const ab = Buffer.from(a, "utf8");
@@ -336,7 +337,9 @@ export function insertReviewMetaBeforeTrailer(bodyWithoutMeta: string, block: st
   }
   const isTrailer =
     trailerIndex >= 0 &&
-    /<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/i.test((lines[trailerIndex] ?? "").trim());
+    /<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/i.test(
+      (lines[trailerIndex] ?? "").trim()
+    );
   if (!isTrailer) {
     return bodyWithoutMeta.trimEnd() ? `${bodyWithoutMeta.trimEnd()}\n\n${block}` : block;
   }
@@ -485,7 +488,10 @@ export interface MetaStoreFinding {
 
 /** Adapt a store record finding (proof/subtype come from the store, never text). */
 export function storeFindingForMeta(
-  finding: Pick<ReviewMcpFindingRecord, "path" | "line" | "severity" | "title" | "body" | "maintainerDecision" | "proof">
+  finding: Pick<
+    ReviewMcpFindingRecord,
+    "path" | "line" | "severity" | "title" | "body" | "maintainerDecision" | "proof"
+  >
 ): MetaStoreFinding {
   return {
     ...(finding.path !== undefined ? { path: finding.path } : {}),
@@ -654,9 +660,9 @@ interface ResolvedTyped {
   body: string;
 }
 
-function resolveMetaTyped(opts: MetaBuildOpts):
-  | { ok: true; typed: ResolvedTyped[]; dropped: ResolvedTyped[] }
-  | { ok: false; suppressed: string } {
+function resolveMetaTyped(
+  opts: MetaBuildOpts
+): { ok: true; typed: ResolvedTyped[]; dropped: ResolvedTyped[] } | { ok: false; suppressed: string } {
   if (!opts.store) {
     return {
       ok: true,
@@ -866,9 +872,7 @@ export function withMetaBase(
     ...meta,
     verdictState,
     blockingGate:
-      verdictComplete &&
-      verdictState === "success" &&
-      isBlockingQuestionAuthor(prAuthorLogin, blockingQuestionAuthors),
+      verdictComplete && verdictState === "success" && isBlockingQuestionAuthor(prAuthorLogin, blockingQuestionAuthors),
     droppedSuggestions,
   };
 }

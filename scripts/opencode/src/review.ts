@@ -102,8 +102,13 @@ import { parseBlockingFindings, partitionRisksForAdvisoryRule } from "./review_f
 import { recordBlockingFindingOutcomes, resolveFindingWriterRunner } from "./review_findings_publish.ts";
 import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
-import { attachPostPullReviewMeta, attachStickyReviewMeta, withMetaBase, type ReviewMetaPublishOpts } from "./review_meta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
+import {
+  attachPostPullReviewMeta,
+  attachStickyReviewMeta,
+  type ReviewMetaPublishOpts,
+  withMetaBase,
+} from "./review_meta.ts";
 import {
   countAddressedSuggestions,
   forgeLabelForKind,
