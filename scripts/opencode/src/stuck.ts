@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
 import { buildReviewFacts, type ReviewTrustCtx, resolveReviewFacts } from "./review_facts.ts";
+import { type MetaFindingEntry, type MetaPayload, sha256Hex } from "./review_meta.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./skip_why_texts.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
@@ -137,13 +138,228 @@ export function blockingFindingIdentities(markdown: string | null | undefined, t
   return resolveReviewFacts({ body: markdown, ...(trust ? { trust } : {}) }).facts.findingIdentities;
 }
 
+/**
+ * Format tag for the latch's finding component. Keyed components hash
+ * `k1:\n` plus the sorted key/text set; text components hash the sorted text
+ * identities with no prefix. The prefix guarantees a keyed fingerprint can
+ * never equal a text-era one, so history restarts at the format transition:
+ * old code (text only) simply never matches a keyed entry and vice versa.
+ * Rollback is safe: an old image computes text identities and compares only
+ * entries it understands, restarting history instead of crashing.
+ */
+const KEYED_FINDING_FORMAT_PREFIX = "k1:";
+
+const INLINE_REVIEW_MARKER = "<!-- jumi-review:";
+
+function isKeyedBlockingEntry(entry: Pick<MetaFindingEntry, "s" | "t">): boolean {
+  if (entry.s === "bug" || entry.s === "risk") return true;
+  return entry.s === "question" && entry.t === "blocking";
+}
+
+function liveInlineLine(inline: FindingInlineInput): number {
+  const line = (inline as { new_position?: unknown }).new_position;
+  return typeof line === "number" && Number.isSafeInteger(line) && line > 0 ? line : 0;
+}
+
+function liveInlineId(inline: FindingInlineInput): number | undefined {
+  const id = (inline as { id?: unknown }).id;
+  return typeof id === "number" && Number.isSafeInteger(id) ? id : undefined;
+}
+
+function isLiveInlineResolved(inline: FindingInlineInput): boolean {
+  const rec = inline as { resolved?: unknown; resolver?: unknown };
+  return rec.resolved === true || rec.resolver != null;
+}
+
+function inlineEntryMatchesLive(entry: MetaFindingEntry, inline: FindingInlineInput): boolean {
+  const body = inline.body ?? "";
+  if (!body.includes(INLINE_REVIEW_MARKER)) return false;
+  if (entry.cs === undefined) return false;
+  let digest: string;
+  try {
+    digest = sha256Hex(body);
+  } catch {
+    return false;
+  }
+  if (digest !== entry.cs) return false;
+  if (entry.path !== undefined && (inline.path ?? "").trim() !== entry.path.trim()) return false;
+  const liveLine = liveInlineLine(inline);
+  const entryLine =
+    typeof entry.line === "number" && Number.isSafeInteger(entry.line) && entry.line > 0 ? entry.line : 0;
+  // The writer mints an inline key only when the posted and live locations
+  // are identical, so the latch counts a key only on an exact path/line
+  // match. A reused comment at a different line falls back to text.
+  if (entry.line !== undefined && liveLine !== entryLine) return false;
+  return true;
+}
+
+function textIdentityForSingleInline(inline: FindingInlineInput): string | undefined {
+  const identities = buildReviewFacts({ body: undefined, inlines: [inline] }).findingIdentities;
+  return identities[0];
+}
+
+function logFindingIdentity(trust: ReviewTrustCtx | undefined, mode: "keyed" | "text", reason?: string): void {
+  const log = trust?.log;
+  if (!log) return;
+  if (mode === "keyed") log("finding-identity: keyed");
+  else log(`finding-identity: text reason=${reason ?? "no-block"}`);
+}
+
+function shouldStaySilentFindingIdentity(
+  trust: ReviewTrustCtx | undefined,
+  body: string | null | undefined,
+  hasBlock: boolean
+): boolean {
+  // Mirror the `resolveReviewFacts` silent legacy path: with no verification
+  // coordinates and no candidate block there is nothing to verify, so stay
+  // completely silent exactly as today.
+  return !trust && !hasBlock && !(body ?? "").includes("jumi-review:meta");
+}
+
+function hasMetaCandidate(body: string | null | undefined): boolean {
+  return (body ?? "").includes("jumi-review:meta");
+}
+
+function keyedComponentsFromCurrent(
+  payload: MetaPayload,
+  reviewBody: string | null | undefined,
+  inlines: readonly FindingInlineInput[]
+): { keys: string[]; fallbackTexts: string[]; unmatched: FindingInlineInput[] } {
+  const keys: string[] = [];
+  const fallbackTexts: string[] = [];
+  const live = inlines.filter((inline) => inline && !isLiveInlineResolved(inline));
+  const bodyEntries = payload.findings.filter((entry) => entry.p === "body");
+  const textBodyFacts = buildReviewFacts({ body: reviewBody }).findings.filter(
+    (finding) => finding.placement === "body"
+  );
+  const orderedBody = [...bodyEntries].sort(
+    (a, b) => (a.o ?? Number.MAX_SAFE_INTEGER) - (b.o ?? Number.MAX_SAFE_INTEGER)
+  );
+  for (let index = 0; index < orderedBody.length; index++) {
+    const entry = orderedBody[index]!;
+    if (entry.s !== "bug" && entry.s !== "risk" && entry.s !== "question") continue;
+    if (!isKeyedBlockingEntry(entry)) continue;
+    if (entry.k) {
+      keys.push(entry.k);
+      continue;
+    }
+    const textIdentity = textBodyFacts[index]?.identity;
+    if (textIdentity) fallbackTexts.push(textIdentity);
+  }
+  const inlineEntries = payload.findings.filter((entry) => entry.p === "inline");
+  const byCid = new Map<number, MetaFindingEntry>();
+  for (const entry of inlineEntries) {
+    if (typeof entry.cid === "number") byCid.set(entry.cid, entry);
+  }
+  const unmatched: FindingInlineInput[] = [];
+  for (const inline of live) {
+    const cid = liveInlineId(inline);
+    const entry = cid !== undefined ? byCid.get(cid) : undefined;
+    if (entry && inlineEntryMatchesLive(entry, inline) && isKeyedBlockingEntry(entry)) {
+      if (entry.k) {
+        keys.push(entry.k);
+        continue;
+      }
+      const textIdentity = textIdentityForSingleInline(inline);
+      if (textIdentity) fallbackTexts.push(textIdentity);
+      continue;
+    }
+    unmatched.push(inline);
+  }
+  return { keys, fallbackTexts, unmatched };
+}
+
+function keyForInlineInExtraBodies(
+  inline: FindingInlineInput,
+  extraBodies: readonly (string | null | undefined)[],
+  trust: ReviewTrustCtx
+): { key?: string; fallbackText?: string } {
+  const cid = liveInlineId(inline);
+  if (cid === undefined) return {};
+  const quietTrust: ReviewTrustCtx = { ...trust, log: () => undefined };
+  for (const extraBody of extraBodies) {
+    if (!extraBody?.includes("jumi-review:meta")) continue;
+    let resolved: ReturnType<typeof resolveReviewFacts>;
+    try {
+      resolved = resolveReviewFacts({ body: extraBody, inlines: [inline], trust: quietTrust });
+    } catch {
+      continue;
+    }
+    if (resolved.source !== "typed" || !resolved.payload) continue;
+    const entry = resolved.payload.findings.find((candidate) => candidate.p === "inline" && candidate.cid === cid);
+    if (!entry || !isKeyedBlockingEntry(entry)) continue;
+    if (!inlineEntryMatchesLive(entry, inline)) continue;
+    if (entry.k) return { key: entry.k };
+    const textIdentity = textIdentityForSingleInline(inline);
+    if (textIdentity) return { fallbackText: textIdentity };
+    return {};
+  }
+  return {};
+}
+
+function fingerprintFindingIdentityKeyed(
+  reviewBody: string | null | undefined,
+  inlines: readonly FindingInlineInput[],
+  trust: ReviewTrustCtx,
+  resolved: ReturnType<typeof resolveReviewFacts>,
+  extraBodies: readonly (string | null | undefined)[]
+): string | undefined {
+  const payload = resolved.payload;
+  if (!payload) {
+    logFindingIdentity(trust, "text", resolved.reason ?? "no-block");
+    const identities = resolved.facts.findingIdentities;
+    if (identities.length === 0) return undefined;
+    return hashText(identities.join("\n"));
+  }
+  const { keys, fallbackTexts, unmatched } = keyedComponentsFromCurrent(payload, reviewBody, inlines);
+  const texts = [...fallbackTexts];
+  for (const inline of unmatched) {
+    const found = keyForInlineInExtraBodies(inline, extraBodies, trust);
+    if (found.key) keys.push(found.key);
+    else if (found.fallbackText) texts.push(found.fallbackText);
+    else {
+      const textIdentity = textIdentityForSingleInline(inline);
+      if (textIdentity) texts.push(textIdentity);
+    }
+  }
+  logFindingIdentity(trust, "keyed");
+  const components = [...new Set([...keys, ...texts])].sort();
+  if (components.length === 0) return undefined;
+  return hashText(`${KEYED_FINDING_FORMAT_PREFIX}\n${components.join("\n")}`);
+}
+
+function fingerprintKeyedOrText(
+  reviewBody: string | null | undefined,
+  inlines: readonly FindingInlineInput[],
+  trust: ReviewTrustCtx | undefined,
+  extraBodies: readonly (string | null | undefined)[]
+): string | undefined {
+  const resolved = resolveReviewFacts({ body: reviewBody, inlines, ...(trust ? { trust } : {}) });
+  if (resolved.source !== "typed" || !resolved.payload) {
+    if (shouldStaySilentFindingIdentity(trust, reviewBody, hasMetaCandidate(reviewBody))) {
+      const identities = resolved.facts.findingIdentities;
+      if (identities.length === 0) return undefined;
+      return hashText(identities.join("\n"));
+    }
+    logFindingIdentity(trust, "text", resolved.reason ?? "no-block");
+    const identities = resolved.facts.findingIdentities;
+    if (identities.length === 0) return undefined;
+    return hashText(identities.join("\n"));
+  }
+  if (!trust) {
+    const identities = resolved.facts.findingIdentities;
+    if (identities.length === 0) return undefined;
+    return hashText(identities.join("\n"));
+  }
+  return fingerprintFindingIdentityKeyed(reviewBody, inlines, trust, resolved, extraBodies);
+}
+
 export function fingerprintFindingIdentity(
   markdown: string | null | undefined,
   trust?: ReviewTrustCtx
 ): string | undefined {
-  const identities = blockingFindingIdentities(markdown, trust);
-  if (identities.length === 0) return undefined;
-  return hashText(identities.join("\n"));
+  if (!markdown?.trim()) return undefined;
+  return fingerprintKeyedOrText(markdown, [], trust, []);
 }
 
 export interface PrDiffFileInput {
@@ -190,29 +406,22 @@ export function fingerprintSameFinding(findingHash: string, diffHash: string): s
 }
 
 export type FindingInlineInput = {
+  id?: number | null | undefined;
   path?: string | null | undefined;
   new_position?: number | null | undefined;
   body?: string | null | undefined;
 };
 
-/** Blocking identities from a top-level review body plus unresolved Jumi inlines. */
-function blockingFindingIdentitiesFromParts(
-  reviewBody: string | null | undefined,
-  inlines?: readonly FindingInlineInput[] | null | undefined,
-  trust?: ReviewTrustCtx
-): string[] {
-  return resolveReviewFacts({ body: reviewBody, inlines: inlines ?? [], ...(trust ? { trust } : {}) }).facts
-    .findingIdentities;
-}
+/** Extra review bodies to search for earlier-review inline keys (verified blocks only). */
+export type FindingExtraReviews = readonly (string | null | undefined)[];
 
 export function fingerprintFindingIdentityFromParts(
   reviewBody: string | null | undefined,
   inlines?: readonly FindingInlineInput[] | null | undefined,
-  trust?: ReviewTrustCtx
+  trust?: ReviewTrustCtx,
+  extraReviewBodies?: FindingExtraReviews
 ): string | undefined {
-  const identities = blockingFindingIdentitiesFromParts(reviewBody, inlines, trust);
-  if (identities.length === 0) return undefined;
-  return hashText(identities.join("\n"));
+  return fingerprintKeyedOrText(reviewBody, inlines ?? [], trust, extraReviewBodies ?? []);
 }
 
 export function sameFindingDisplayFromParts(
