@@ -524,6 +524,15 @@ jobs:
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
 
+      - name: Verify the opencode worker tools against the installed binary
+        # Tier 0 eval (jumi#965): the worker is the only runner the GitHub
+        # factory uses, so the installed binary must advertise every
+        # jumi-worker tool and drive a set_pr_body call into the parent store.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/opencode_worker_probe.ts'
+
       - name: Verify offline Pi and legacy regressions (worker)
         # Same offline probe as the reviewer job, under the worker image: the
         # real Pi SDK sessions at in-container loopback (--network none),
