@@ -366,6 +366,7 @@ describe("deploy/contract.md", () => {
       "OPENCODE_WELLKNOWN_TOKEN",
       "CODEX_AUTH_FILE",
       "JUMI_SEARXNG_URL",
+      "JUMI_FORGE_IDENTITY",
       "HOME",
       "WORKDIR",
       "QUEUE_CONCURRENCY",
