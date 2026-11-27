@@ -1215,7 +1215,13 @@ describe("image labels and no double-build", () => {
     expect(shouldSkipImageBuild("tag")).toBe(true);
     expect(shouldSkipImageBuild("branch")).toBe(false);
     expect(reviewer).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(worker).toContain("$" + "{{ env.IMAGE }}:$" + "{{ env.VERSION }}");
+    // Both images publish VERSION/latest by promoting the probed candidate
+    // digest (imagetools create), never by pushing release tags from a second
+    // build: the only pushed tag before promotion is the sha candidate.
+    expect(worker).toContain("$" + "{{ env.IMAGE }}:$" + "{{ env.CANDIDATE_TAG }}");
+    expect(worker).toContain("$" + "{IMAGE}:$" + "{VERSION}");
+    expect(worker).toContain("$" + "{IMAGE}:latest");
+    expect(worker).toContain("imagetools create");
     expect(reviewer).toContain("bun src/release.ts next-version");
     expect(worker).toContain("bun src/release.ts next-version");
     expect(reviewer).toContain("if: $" + "{{ env.VERSION != '' }}");

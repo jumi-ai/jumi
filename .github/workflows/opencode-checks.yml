@@ -324,6 +324,15 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the pi-claude subscription route against the installed components
+        # Pi owns tools while the helper is inference only (#937). Loopback
+        # probe over the real binary and the real Pi SDK; a version check is
+        # not the probe.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
       - name: Verify the xAI child credential against the opencode binary
         # Jumi hands the child an xAI credential with no refresh token so a
         # killed review cannot rotate the grant and take the new token with it.
@@ -334,6 +343,25 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
+
+      - name: Verify offline Pi and legacy regressions (reviewer)
+        # Offline Pi review/worker harnesses plus legacy startup/dispatch for
+        # both roles, all through the production entry path with no Pi
+        # credentials and no subscription secrets. The probe drives the real
+        # Pi SDK sessions at in-container loopback (this job adds
+        # --network none), requires the structured reviewer verdict and the
+        # worker's asserted diff plus a passing fixture test, proves legacy
+        # dispatch runs without Pi credentials, and proves pi fails without
+        # rescuing to legacy. A source import or --version check cannot pass.
+        # Runs as the image UID on a read-only root with a fresh HOME and
+        # writable /tmp mounts, mirroring the job-pod shape.
+        run: |
+          set -euo pipefail
+          docker run --rm --user 10001:10001 --read-only --network none \
+            --tmpfs /tmp:rw,exec --tmpfs /data:rw --tmpfs /work:rw \
+            -e HOME=/tmp/probe-home -e TMPDIR=/tmp \
+            jumi-reviewer:ci \
+            sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'
 
   worker-image-build:
     runs-on: ubuntu-latest
@@ -482,9 +510,30 @@ jobs:
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the pi-claude subscription route against the installed components
+        # Same loopback probe as the reviewer job, under the worker image.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
       - name: Verify the xAI child credential against the opencode binary
         # The worker holds the same grant and runs the 4h jobs. Same probe.
         run: |
           set -euo pipefail
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
+
+      - name: Verify offline Pi and legacy regressions (worker)
+        # Same offline probe as the reviewer job, under the worker image: the
+        # real Pi SDK sessions at in-container loopback (--network none),
+        # structured reviewer verdict plus worker diff and fixture test, legacy
+        # startup/dispatch without Pi credentials, pi failure without rescue.
+        # Runs as the image UID on a read-only root with a fresh HOME.
+        run: |
+          set -euo pipefail
+          docker run --rm --user 10001:10001 --read-only --network none \
+            --tmpfs /tmp:rw,exec --tmpfs /data:rw --tmpfs /work:rw \
+            -e HOME=/tmp/probe-home -e TMPDIR=/tmp \
+            jumi-worker:ci \
+            sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'

@@ -389,12 +389,30 @@ verify_worker_skills() {
     echo "claude production flags rejected by the installed claude binary" >&2
     exit 1
   fi
+  # Pi Claude subscription route (#937): inference only through the helper
+  # while Pi owns tools. Same loopback probe as the reviewer image.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "pi-claude subscription probe failed against the installed components" >&2
+    exit 1
+  fi
   # The worker holds the same xAI grant and runs the 4h jobs, so it needs the
   # same proof: the child credential is sent as a bearer and never refreshed.
   if ! buildah run "${ctr}" -- \
     sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "xAI child credential is not usable by the installed opencode binary" >&2
+    exit 1
+  fi
+  # Offline Pi plus legacy regressions (#940): same probe as the reviewer
+  # image (real Pi SDK sessions at in-container loopback, structured verdict
+  # plus worker diff and fixture test, legacy dispatch without Pi credentials,
+  # pi failure without rescue), as the image UID with a fresh HOME.
+  if ! buildah run --user 10001:10001 --env HOME=/tmp/probe-home --env TMPDIR=/tmp "${ctr}" -- \
+    sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "offline Pi/legacy probe failed against the installed components" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then

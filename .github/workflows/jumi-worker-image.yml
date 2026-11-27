@@ -53,6 +53,14 @@ jobs:
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
         working-directory: scripts/opencode
 
+      - name: Compute candidate tag
+        # Non-release tag derived from the commit SHA. Only this tag is
+        # pushed before the probes run; `VERSION`/`latest` move to the
+        # verified digest in the promote step below.
+        if: ${{ env.VERSION != '' }}
+        run: |
+          echo "CANDIDATE_TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
         if: ${{ env.VERSION != '' }}
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -65,18 +73,20 @@ jobs:
         if: ${{ env.VERSION != '' }}
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Build and export to Docker
+      - name: Build and push candidate worker image
         if: ${{ env.VERSION != '' }}
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
           target: worker
           platforms: linux/amd64
-          load: true
+          push: true
           provenance: false
           sbom: false
-          tags: jumi-worker:test
+          tags: |
+            ${{ env.IMAGE }}:${{ env.CANDIDATE_TAG }}
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
@@ -117,11 +127,17 @@ jobs:
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Pull candidate image for verification
+        if: ${{ env.VERSION != '' }}
+        # Pull the exact pushed digest the probes run against below.
+        run: docker pull "${IMAGE}@${{ steps.build.outputs.digest }}"
+
       - name: Verify worker image
         if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
-          TEST_TAG="jumi-worker:test"
+          TEST_TAG="${IMAGE}@${{ steps.build.outputs.digest }}"
+          echo "Testing candidate digest ${{ steps.build.outputs.digest }}"
 
           actual_user="$(docker inspect --format '{{.Config.User}}' "${TEST_TAG}")"
           if [ "${actual_user}" != "10001:10001" ]; then
@@ -248,6 +264,11 @@ jobs:
           docker run --rm "${TEST_TAG}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+          # Pi Claude subscription route (#937): same loopback probe as the
+          # reviewer image (real binary plus real Pi SDK, nothing billed).
+          docker run --rm "${TEST_TAG}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/pi_claude_probe.ts'
+
           # The child gets an xAI credential with no refresh token, so a killed
           # job cannot rotate the grant. Prove the installed binary sends that
           # shape as a bearer instead of refreshing it.
@@ -296,67 +317,50 @@ jobs:
           fi
           echo "Verified OCI labels"
 
-      - name: Build and push worker image
+      - name: Verify offline Pi and legacy regressions
         if: ${{ env.VERSION != '' }}
-        id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: ./Dockerfile
-          target: worker
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ env.VERSION }}
-          build-args: |
-            BUN_VERSION=${{ env.BUN_VERSION }}
-            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
-            CLAUDE_VERSION=${{ env.CLAUDE_VERSION }}
-            HELM_VERSION=${{ env.HELM_VERSION }}
-            CODEX_VERSION=${{ env.CODEX_VERSION }}
-            CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}
-            CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}
-            YQ_VERSION=${{ env.YQ_VERSION }}
-            YQ_SHA256_AMD64=${{ env.YQ_SHA256_AMD64 }}
-            YQ_SHA256_ARM64=${{ env.YQ_SHA256_ARM64 }}
-            UV_VERSION=${{ env.UV_VERSION }}
-            UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
-            UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
-            ANDROID_CMDLINE_TOOLS_VERSION=${{ env.ANDROID_CMDLINE_TOOLS_VERSION }}
-            ANDROID_CMDLINE_TOOLS_SHA256=${{ env.ANDROID_CMDLINE_TOOLS_SHA256 }}
-            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
-            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
-            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
-            TOFU_VERSION=${{ env.TOFU_VERSION }}
-            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
-            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
-            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
-            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
-            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
-            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
-            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
-            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
-            NODE_VERSION=${{ env.NODE_VERSION }}
-            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
-            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
-            TEMURIN_TAG=${{ env.TEMURIN_TAG }}
-            TEMURIN_25_TAG=${{ env.TEMURIN_25_TAG }}
-            VERSION=${{ env.VERSION }}
-            REVISION=${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/jumi-ai/jumi
-            org.opencontainers.image.version=${{ env.VERSION }}
-            org.opencontainers.image.revision=${{ github.sha }}
+        # Same offline probe as the PR image job, run against the exact
+        # candidate digest before promotion: real Pi SDK sessions at
+        # in-container loopback (--network none), structured reviewer verdict
+        # plus worker diff and fixture test, legacy startup/dispatch without
+        # Pi credentials, pi failure without rescue. Runs as the image UID on
+        # a read-only root with a fresh HOME. A failed probe stops the job
+        # before the promote step, so the previous public tags stay untouched.
+        run: |
+          set -euo pipefail
+          echo "Testing candidate digest ${{ steps.build.outputs.digest }}"
+          docker run --rm --user 10001:10001 --read-only --network none \
+            --tmpfs /tmp:rw,exec --tmpfs /data:rw --tmpfs /work:rw \
+            -e HOME=/tmp/probe-home -e TMPDIR=/tmp \
+            "${IMAGE}@${{ steps.build.outputs.digest }}" \
+            sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_offline_legacy_probe.ts'
+
+      - name: Promote candidate to release tags
+        if: ${{ env.VERSION != '' }}
+        # Runs only after every probe above passed: a failed probe stops the
+        # job before this step, so the previous public tags stay untouched.
+        # The promoted tags point at the exact verified candidate digest, so
+        # the version/revision baked at build time carries over unchanged.
+        run: |
+          set -euo pipefail
+          CANDIDATE_DIGEST="${{ steps.build.outputs.digest }}"
+          if [ -z "${CANDIDATE_DIGEST}" ]; then
+            echo "missing candidate digest from the build step" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${CANDIDATE_DIGEST}"
+          echo "Promoted ${IMAGE}@${CANDIDATE_DIGEST} to :${VERSION} and :latest"
 
       - name: Record registry manifest digest
         if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
-          echo "Pushed ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
+          echo "Promoted ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          docker buildx imagetools inspect "${IMAGE}:latest"
           # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
 
       - name: Verify anonymous pull
