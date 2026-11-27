@@ -1,0 +1,7 @@
+{
+  "name": "eval-demo",
+  "type": "module",
+  "scripts": {
+    "check": "node check.js"
+  }
+}
