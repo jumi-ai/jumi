@@ -78,15 +78,21 @@ describePg("durable reclaim counters against real postgres", () => {
       leasedSeconds: 10,
     });
 
+    // Isolate the cancel path so the lease below is guaranteed to be the
+    // cancel-requested row (otherwise the requeued row above wins the lease).
+    await sql.unsafe(`DELETE FROM jumi_job_reclaims`);
+    await sql.unsafe(`DELETE FROM review_jobs`);
     await store.enqueueIssue(makeIssueJob({ delivery: "pg-cancel", issueNumber: 13 }));
     const flagged = await store.lease("worker-1", 1, new Date(20_000), WORKER_JOB_KINDS);
-    // Cancel the issue the leased row belongs to (issue 12 is still leased by the requeued row's successor? use 13).
+    expect(flagged?.issueNumber).toBe(13);
     await store.cancelQueuedForIssue("kirmanak", "demo", 13);
+    expect(await store.isCancelRequested(flagged!.id)).toBe(true);
     const again = await store.reclaimExpired(5, new Date(30_000), 1_000, WORKER_JOB_KINDS);
     // The cancel-requested row settles to cancelled and records nothing new.
-    expect(again.requeued.filter((r) => r.id === flagged!.id)).toHaveLength(0);
-    const totals = await store.getJobReclaimTotals();
-    expect(totals.filter((t) => t.reason === "lease_expired_requeued")).toHaveLength(1);
+    expect(again.requeued).toHaveLength(0);
+    expect(again.publish).toHaveLength(0);
+    expect((await store.get(flagged!.id))?.state).toBe("cancelled");
+    expect(await store.getJobReclaimTotals()).toEqual([]);
   });
 
   test("shutdown release records and survives a new store on the same database", async () => {
