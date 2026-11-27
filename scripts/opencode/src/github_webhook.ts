@@ -1400,6 +1400,17 @@ export async function handleGithubWebhookEvent(
                 followupIgnoreLogins: effectiveFollowupPolicy.followupIgnoreLogins,
                 defaultBranch,
                 logger,
+                ...(deps.worker?.reviewTrust
+                  ? {
+                      trust: {
+                        ...deps.worker.reviewTrust,
+                        owner,
+                        repo,
+                        prNumber,
+                        log: logger,
+                      },
+                    }
+                  : {}),
               });
               if (release.outcome === "released") {
                 const cleared = await clearGithubSit(deps.worker.sits, owner, repo, prNumber, logger);

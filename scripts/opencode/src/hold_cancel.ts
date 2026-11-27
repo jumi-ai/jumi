@@ -20,6 +20,8 @@ export interface SettleHeldCancelOpts {
   deploymentBlocking?: readonly string[];
   log?: (message: string) => void;
   reason?: string;
+  /** Signed-block verification coordinates for the settlement decision. */
+  trust?: import("./review_facts.ts").ReviewTrustCtx;
 }
 
 /**
@@ -96,6 +98,7 @@ export async function settleHeldCancelThroughGate(opts: SettleHeldCancelOpts): P
       deploymentIgnore: opts.deploymentIgnore,
       deploymentBlocking: opts.deploymentBlocking,
       log,
+      ...(opts.trust ? { trust: opts.trust } : {}),
     });
   } catch (err) {
     log(`hold settlement kept for ${opts.owner}/${opts.repo}#${opts.issueNumber}: unknown (${errorMessage(err)})`);

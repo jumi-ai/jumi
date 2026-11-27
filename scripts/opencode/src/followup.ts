@@ -146,14 +146,17 @@ import {
 } from "./repo_verify.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import {
-  buildReviewFacts,
   classifyInlineText,
   describeSuggestionsReason,
   isIgnoredSuccessFromFacts,
   parseLastCheckTrailer,
+  type ReviewFacts,
+  type ReviewTrustCtx,
+  resolveReviewFacts,
 } from "./review_facts.ts";
 import { persistFindingResponses } from "./review_findings.ts";
 import { inlinesForReviewGroup } from "./review_groups.ts";
+import { defaultForgeIdentity } from "./review_meta.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -338,6 +341,7 @@ async function resolveHeldEarlyThroughGate(
     deploymentBlocking?: readonly string[];
     trigger?: IssueJob["trigger"];
     log: (message: string) => void;
+    reviewTrust?: ImplementOptions["reviewTrust"];
   },
   kind: "completed" | "skipped",
   reason?: string
@@ -395,6 +399,17 @@ async function resolveHeldEarlyThroughGate(
       deploymentIgnore: opts.deploymentIgnore,
       deploymentBlocking: opts.deploymentBlocking,
       log: opts.log,
+      ...(opts.reviewTrust
+        ? {
+            trust: {
+              ...opts.reviewTrust,
+              owner: opts.owner,
+              repo: opts.repo,
+              prNumber,
+              log: opts.log,
+            },
+          }
+        : {}),
     });
   } catch {
     // Best-effort.
@@ -565,13 +580,7 @@ export function isJumiPullReviewFinding(
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   const body = pullReviewBody(review);
-  const facts = buildReviewFacts({
-    body,
-    inlines,
-    botUsername,
-    prAuthorLogin: opts.prAuthor,
-    blockingAuthors: opts.blockingQuestionAuthors,
-  });
+  const facts = factsForReviewMatch(body, inlines, botUsername, opts, headSha);
   const findingCheck =
     facts.trailerState === "failure" ||
     (facts.trailerState === "success" && (facts.trailerSuggestionCount > 0 || facts.trailerNonBlockingRiskCount > 0));
@@ -619,6 +628,37 @@ export interface ReviewFindingMatchOpts {
    * blocking questions still count. Unset preserves today's behavior (wake).
    */
   followupOnRisks?: boolean;
+  /**
+   * Signed-block verification coordinates for this consumer decision.
+   * Absent (or unverifiable block) runs the legacy text classifier exactly
+   * as before. The evaluated head defaults to the `headSha` argument of the
+   * predicate when the context carries none.
+   */
+  trust?: ReviewTrustCtx;
+}
+
+/**
+ * One review artifact as facts for a follow-up predicate: the verified
+ * signed block when it verifies for this decision, else the legacy text
+ * classifier. Logs one `source=typed|text` line when verification was opted
+ * into (or the artifact carries a block); the legacy path stays silent.
+ */
+function factsForReviewMatch(
+  body: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername: string | undefined,
+  opts: ReviewFindingMatchOpts = {},
+  headSha?: string
+): ReviewFacts {
+  const trust = opts.trust;
+  return resolveReviewFacts({
+    body,
+    inlines,
+    botUsername,
+    prAuthorLogin: opts.prAuthor,
+    blockingAuthors: opts.blockingQuestionAuthors,
+    ...(trust ? { trust: headSha && !trust.headSha ? { ...trust, headSha } : trust } : {}),
+  }).facts;
 }
 
 /**
@@ -674,9 +714,11 @@ function isMaintainerInline(inline: InlineComment, botUsername?: string): boolea
 export function openQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openQuestions;
+  return resolveReviewFacts({ body: reviewBody, inlines, botUsername, ...(trust ? { trust } : {}) }).facts
+    .openQuestions;
 }
 
 /**
@@ -692,9 +734,11 @@ export function openQuestionsForReview(
 export function openMaintainerQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openMaintainers;
+  return resolveReviewFacts({ body: reviewBody, inlines, botUsername, ...(trust ? { trust } : {}) }).facts
+    .openMaintainers;
 }
 
 /**
@@ -710,9 +754,11 @@ export function openMaintainerQuestionsForReview(
 export function openMaintainerQuestionsAnyTrailer(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openMaintainersAnyTrailer;
+  return resolveReviewFacts({ body: reviewBody, inlines, botUsername, ...(trust ? { trust } : {}) }).facts
+    .openMaintainersAnyTrailer;
 }
 
 export interface AnswerRoundReviewAssessment {
@@ -738,7 +784,8 @@ export interface AnswerRoundReviewAssessment {
 export function assessAnswerRoundReview(
   items: FollowUpItems,
   headSha: string,
-  botUsername: string
+  botUsername: string,
+  trust?: ReviewTrustCtx
 ): AnswerRoundReviewAssessment {
   const hasAnyReview = items.jumiReviews.length > 0 || items.jumiStickies.length > 0;
   const candidates: Array<{ at: string; body: string; id: number; sha: string; summary?: PullReview }> = [];
@@ -768,7 +815,12 @@ export function assessAnswerRoundReview(
     latest.summary != null
       ? inlinesForReviewGroup(latest.summary, items.allReviews ?? items.jumiReviews, items.jumiInlines, botUsername)
       : [];
-  const facts = buildReviewFacts({ body: latest.body, inlines: groupInlines, botUsername });
+  const facts = resolveReviewFacts({
+    body: latest.body,
+    inlines: groupInlines,
+    botUsername,
+    ...(trust ? { trust: trust.headSha ? trust : { ...trust, headSha } } : {}),
+  }).facts;
   const incomplete = facts.incomplete;
   const openCount = facts.openMaintainersAnyTrailer;
   return {
@@ -788,9 +840,10 @@ export function assessAnswerRoundReview(
 export function openBugsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openBugs;
+  return resolveReviewFacts({ body: reviewBody, inlines, botUsername, ...(trust ? { trust } : {}) }).facts.openBugs;
 }
 
 /**
@@ -801,9 +854,10 @@ export function openBugsForReview(
 export function openRisksForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openRisks;
+  return resolveReviewFacts({ body: reviewBody, inlines, botUsername, ...(trust ? { trust } : {}) }).facts.openRisks;
 }
 
 /**
@@ -819,10 +873,17 @@ export function blockingOpenQuestionCountWithInlines(
   inlines: readonly InlineComment[],
   prAuthorLogin: string | undefined | null,
   blockingAuthors: readonly string[] | undefined | null,
-  botUsername?: string
+  botUsername?: string,
+  trust?: ReviewTrustCtx
 ): number {
-  return buildReviewFacts({ body: reviewBody, inlines, botUsername, prAuthorLogin, blockingAuthors })
-    .openBlockingQuestions;
+  return resolveReviewFacts({
+    body: reviewBody,
+    inlines,
+    botUsername,
+    prAuthorLogin,
+    blockingAuthors,
+    ...(trust ? { trust } : {}),
+  }).facts.openBlockingQuestions;
 }
 
 /**
@@ -850,15 +911,18 @@ export function assessMaintainerHoldRelease(opts: {
   blockingAuthors?: readonly string[] | null;
   botUsername?: string;
   holdEnabled: boolean;
+  /** Signed-block verification coordinates for this release decision. */
+  trust?: ReviewTrustCtx;
 }): MaintainerHoldReleaseAssessment {
   const reviewBody = opts.reviewBody ?? "";
-  const facts = buildReviewFacts({
+  const facts = resolveReviewFacts({
     body: reviewBody,
     inlines: opts.inlines,
     botUsername: opts.botUsername,
     prAuthorLogin: opts.prAuthorLogin,
     blockingAuthors: opts.blockingAuthors,
-  });
+    ...(opts.trust ? { trust: opts.trust } : {}),
+  }).facts;
   const completeSuccess = !facts.incomplete && facts.state === "success";
   const openBugs = facts.openBugs;
   const openRisks = facts.openRisks;
@@ -902,15 +966,7 @@ function isBlockingQuestionFinding(
   inlines: readonly InlineComment[] = [],
   botUsername?: string
 ): boolean {
-  return (
-    buildReviewFacts({
-      body,
-      inlines,
-      botUsername,
-      prAuthorLogin: opts.prAuthor,
-      blockingAuthors: opts.blockingQuestionAuthors,
-    }).openBlockingQuestions > 0
-  );
+  return factsForReviewMatch(body, inlines, botUsername, opts).openBlockingQuestions > 0;
 }
 
 /**
@@ -927,13 +983,7 @@ function isIgnoredSuccessBody(
   inlines: readonly InlineComment[] = [],
   botUsername?: string
 ): boolean {
-  const facts = buildReviewFacts({
-    body,
-    inlines,
-    botUsername,
-    prAuthorLogin: opts.prAuthor,
-    blockingAuthors: opts.blockingQuestionAuthors,
-  });
+  const facts = factsForReviewMatch(body, inlines, botUsername, opts);
   return isIgnoredSuccessFromFacts(facts, opts);
 }
 
@@ -955,13 +1005,7 @@ export function isJumiReviewFinding(
 ): boolean {
   if (!isJumiReviewSticky(comment, botUsername)) return false;
   const body = comment.body ?? "";
-  const facts = buildReviewFacts({
-    body,
-    inlines,
-    botUsername,
-    prAuthorLogin: opts.prAuthor,
-    blockingAuthors: opts.blockingQuestionAuthors,
-  });
+  const facts = factsForReviewMatch(body, inlines, botUsername, opts, headSha);
   const findingCheck =
     facts.trailerState === "failure" ||
     (facts.trailerState === "success" && (facts.trailerSuggestionCount > 0 || facts.trailerNonBlockingRiskCount > 0));
@@ -1182,13 +1226,14 @@ function isMaintainerOnlyPullReview(
   review: PullReview,
   allJumiInlines: readonly InlineComment[],
   botUsername?: string,
-  allReviews?: readonly PullReview[]
+  allReviews?: readonly PullReview[],
+  trust?: ReviewTrustCtx
 ): boolean {
   const body = review.body ?? review.content ?? "";
   const inlines = allReviews
     ? inlinesForReviewGroup(review, allReviews, allJumiInlines, botUsername)
     : inlinesForPullReview(review.id, allJumiInlines);
-  const facts = buildReviewFacts({ body, inlines, botUsername });
+  const facts = resolveReviewFacts({ body, inlines, botUsername, ...(trust ? { trust } : {}) }).facts;
   if (facts.trailerState !== "success") return false;
   if (facts.trailerSuggestionCount !== 0) return false;
   const total = facts.openQuestions;
@@ -1205,7 +1250,8 @@ function isMaintainerOnlyPullReview(
 export function onlyMaintainerQuestionsPending(
   items: FollowUpItems,
   state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">,
-  botUsername: string
+  botUsername: string,
+  trust?: ReviewTrustCtx
 ): boolean {
   const handledComments = new Set(state.handledCommentIds);
   const handledReviews = new Set(state.handledReviewIds);
@@ -1223,7 +1269,8 @@ export function onlyMaintainerQuestionsPending(
       continue;
     }
     if (handledFindings.has(reviewFindingKey(finding.id, finding.sha))) continue;
-    if (!buildReviewFacts({ body: comment.body }).viewIsMaintainerOnly) return false;
+    if (!resolveReviewFacts({ body: comment.body, ...(trust ? { trust } : {}) }).facts.viewIsMaintainerOnly)
+      return false;
     foundMaintainer = true;
   }
   for (const review of items.jumiFindingReviews ?? []) {
@@ -1232,7 +1279,7 @@ export function onlyMaintainerQuestionsPending(
       ? !handledFindings.has(reviewFindingKey(finding.id, finding.sha))
       : !handledReviews.has(review.id);
     if (!unhandled) continue;
-    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername, items.allReviews)) return false;
+    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername, items.allReviews, trust)) return false;
     foundMaintainer = true;
   }
   return foundMaintainer;
@@ -1305,6 +1352,8 @@ export async function needsFollowUp(opts: {
    * with no extra forge calls.
    */
   defaultBranch?: string;
+  /** Signed-block verification coordinates for this wake decision. */
+  trust?: ReviewTrustCtx;
 }): Promise<boolean> {
   const state = await readFollowUpLatch(skipLatchesFor(opts), {
     owner: opts.owner,
@@ -1348,6 +1397,7 @@ export async function needsFollowUp(opts: {
       ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
       ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
       ...(followupOnRisks ? {} : { followupOnRisks: false as const }),
+      ...(opts.trust ? { trust: opts.trust.headSha ? opts.trust : { ...opts.trust, headSha: opts.pr.head.sha } } : {}),
     },
     effectiveTrusted
   );
@@ -1356,7 +1406,7 @@ export async function needsFollowUp(opts: {
   // Maintainer-only ❓ needs a human (forge action or scope decision), not
   // a worker round: filing/closing another issue, labels/assignment, or
   // "ship part 1 now or keep going" cannot be answered from the branch.
-  if (onlyMaintainerQuestionsPending(items, state, opts.botUsername)) return false;
+  if (onlyMaintainerQuestionsPending(items, state, opts.botUsername, opts.trust)) return false;
   const { classify } = await import("./pr_decision.ts");
   return classify({
     followupRound: state.round,
@@ -1656,13 +1706,42 @@ export function triggerBodyFromItems(
   return "";
 }
 
+/**
+ * Per-PR verification coordinates from the worker's review-trust material:
+ * the webhook secret the review publisher signs with plus the expected
+ * identity, bound to this PR and head. Absent material verifies nothing and
+ * every consumer falls back to the legacy text classifier.
+ */
+function reviewTrustForPr(
+  opts: Pick<ImplementOptions, "reviewTrust" | "botUsername" | "giteaUrl">,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  log: (message: string) => void
+): ReviewTrustCtx | undefined {
+  const base = opts.reviewTrust;
+  if (!base) return undefined;
+  return {
+    ...(base.webhookSecret ? { webhookSecret: base.webhookSecret } : {}),
+    forgeIdentity:
+      base.forgeIdentity ?? defaultForgeIdentity(base.giteaUrl ?? opts.giteaUrl ?? "gitea", opts.botUsername),
+    owner,
+    repo,
+    prNumber,
+    headSha,
+    log,
+  };
+}
+
 export function reviewFindingMatchOptsForJob(
   job: IssueJob,
   headSha: string,
   prAuthor?: string | undefined | null,
   blockingQuestionAuthors?: readonly string[] | undefined | null,
   followupOnSuggestions?: boolean,
-  followupOnRisks?: boolean
+  followupOnRisks?: boolean,
+  trust?: ReviewTrustCtx
 ): ReviewFindingMatchOpts {
   const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
   return {
@@ -1672,6 +1751,7 @@ export function reviewFindingMatchOptsForJob(
     ...(blockingQuestionAuthors ? { blockingQuestionAuthors } : {}),
     ...(followupOnSuggestions === false ? { followupOnSuggestions: false as const } : {}),
     ...(followupOnRisks === false ? { followupOnRisks: false as const } : {}),
+    ...(trust ? { trust: trust.headSha ? trust : { ...trust, headSha } } : {}),
   };
 }
 
@@ -2097,6 +2177,7 @@ export async function implementFollowUp(
         deploymentBlocking: opts.blockingQuestionAuthors,
         trigger: opts.job.trigger,
         log,
+        ...(opts.reviewTrust ? { reviewTrust: opts.reviewTrust } : {}),
       },
       "skipped",
       assigned.status === "cancelled" ? (isStrictRefreshGate ? strictGateReason : "job cancelled") : assigned.reason
@@ -2134,6 +2215,7 @@ export async function implementFollowUp(
         deploymentBlocking: opts.blockingQuestionAuthors,
         trigger: opts.job.trigger,
         log,
+        ...(opts.reviewTrust ? { reviewTrust: opts.reviewTrust } : {}),
       },
       "skipped",
       "no open jumi closing PR"
@@ -2173,6 +2255,10 @@ export async function implementFollowUp(
   }
   const state = await readFollowUpLatch(latches, latchKey);
   let latestPrClosing = state.prClosing;
+  // Per-PR verification coordinates for every consumer decision below (wake
+  // finding predicates, hold settlement, latch inputs). Undefined unless the
+  // worker was given review-trust material; unwired paths stay silent.
+  const wakeTrust = reviewTrustForPr(opts, owner, repo, pr.number, pr.head.sha, log);
   // Terminal no-push outcomes settle through the shared hold-settlement gate,
   // which re-reads the head, policy, review and status fresh. Never throws.
   const resolveHeld = async (kind: "completed" | "skipped", reason?: string): Promise<void> => {
@@ -2192,6 +2278,7 @@ export async function implementFollowUp(
       deploymentBlocking: opts.blockingQuestionAuthors,
       log,
       targetUrl: pr.html_url,
+      ...(wakeTrust ? { trust: wakeTrust } : {}),
     });
   };
 
@@ -2266,6 +2353,7 @@ export async function implementFollowUp(
       },
       settings: settingsSnapshot,
       skipLatches: latches,
+      ...(opts.reviewTrust ? { trust: reviewTrustForPr(opts, owner, repo, pr.number, pr.head.sha, log) } : {}),
     },
     { api: opts.api, log, sleep: opts.sleep ?? sleep, now }
   );
@@ -2280,12 +2368,14 @@ export async function implementFollowUp(
     pr.user?.login,
     snapshot.lists.blockingAuthors,
     snapshot.policy.followupOnSuggestions,
-    snapshot.policy.followupOnRisks
+    snapshot.policy.followupOnRisks,
+    wakeTrust
   );
   const ciHashForDecision = fingerprintCiChecks(ci.unhandled);
   const displayForDecision = sameFindingDisplayFromParts(
     snapshot.reviewBodyForIdentity,
-    unresolvedJumiInlines(pendingItems)
+    unresolvedJumiInlines(pendingItems),
+    wakeTrust
   );
   // Wait instead of fixing again: on a CI wake, elect exactly one first PR
   // per (repo, fingerprint). A waiter posts the sticky and returns

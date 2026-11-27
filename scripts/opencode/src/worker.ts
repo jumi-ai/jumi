@@ -50,6 +50,7 @@ import {
   WORKER_JOB_KINDS,
   workerJobKey,
 } from "./review_jobs.ts";
+import { defaultForgeIdentity } from "./review_meta.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
 import { runnerAuthFingerprints } from "./runner_cooldown.ts";
@@ -308,6 +309,13 @@ export function createIssueQueue(
           home: config.home,
           skipLatches,
           handoffs: handoffs ?? handoffsFor({ home: config.home }),
+          reviewTrust: {
+            ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+            ...(config.forgeIdentity
+              ? { forgeIdentity: config.forgeIdentity }
+              : { forgeIdentity: defaultForgeIdentity(config.giteaUrl, config.botUsername) }),
+            giteaUrl: config.giteaUrl,
+          },
           workdir: config.workdir,
           maxOutputBytes: config.maxOutputBytes,
           setupTimeoutMaxMs: config.setupTimeoutMaxMs,
@@ -433,6 +441,13 @@ export async function handleIssueCancel(
     deploymentBlocking: config.blockingQuestionAuthors,
     log: (message) => log(message),
     reason: "unassigned",
+    trust: {
+      ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+      forgeIdentity: config.forgeIdentity ?? defaultForgeIdentity(config.giteaUrl, config.botUsername),
+      owner,
+      repo,
+      log: (message) => log(message),
+    },
   });
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {

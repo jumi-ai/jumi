@@ -392,6 +392,18 @@ export interface ImplementOptions extends PickupPolicy {
   job: IssueJob;
   giteaUrl: string;
   giteaToken: string;
+  /**
+   * Signed review-block verification material for follow-up decisions
+   * (hold, wake, latch inputs): the webhook secret the review publisher
+   * signs with, the expected forge identity, and the forge base URL it
+   * derives from. Absent verifies nothing and every consumer falls back
+   * to the legacy text classifier.
+   */
+  reviewTrust?: {
+    webhookSecret?: string;
+    forgeIdentity?: string;
+    giteaUrl?: string;
+  };
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   /** Opt-in logins whose open `❓` questions count as follow-up feedback. */

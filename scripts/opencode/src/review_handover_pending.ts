@@ -3,6 +3,7 @@ import { pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import type { ReviewApi, ReviewResult } from "./review.ts";
 import type { ReviewJobStore } from "./review_jobs.ts";
+import { defaultForgeIdentity } from "./review_meta.ts";
 import type { SqlClient } from "./sql_client.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -159,6 +160,10 @@ export async function resumePendingHandoffs(
         maxFollowupRounds: config.maxFollowupRounds,
         blockingQuestionAuthors: config.blockingQuestionAuthors,
         logger,
+        trust: {
+          ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+          forgeIdentity: config.forgeIdentity ?? defaultForgeIdentity(config.giteaUrl, config.botUsername),
+        },
       });
       await clearPendingHandover(store, pending.reviewJobId);
       completed += 1;
