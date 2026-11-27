@@ -65,6 +65,22 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("set_pr_body");
     expect(prompt).not.toContain("JUMI_PR.md");
     expect(prompt).toContain("❓ maintainer:");
+    expect(prompt).toContain("needs_maintainer");
+    expect(prompt).toContain("instead of typing");
+  });
+
+  test("reviewers use typed proof and incomplete instead of typing markers", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain("proof: {location, command, excerpt}");
+    expect(prompt).toContain("instead of typing `Proof:` by hand");
+    expect(prompt).toContain("incomplete");
+    expect(prompt).toContain("could_not_finish | head_moved | dirty_tree | no_artifact");
+    expect(prompt).toContain("failure only");
   });
 
   test("a PR description finding stays worker-fixable through the fenced addendum", () => {
