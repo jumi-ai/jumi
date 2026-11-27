@@ -339,3 +339,324 @@ describe("same finding repeated", () => {
     expect(item?.message).toContain(display!.slice(0, 20));
   });
 });
+
+describe("same finding keyed identity", () => {
+  const SECRET = "test-keyed-latch-secret-980";
+  const IDENTITY = "gitea.example.com/jumi";
+  const OWNER = "o";
+  const REPO = "r";
+  const PR = 7;
+  const HEAD = "abc1234def5678abc1234def5678abc1234def56";
+  const OTHER_HEAD = "feedfacefeedfacefeedfacefeedfacefeedface";
+  const MARKER = "<!-- jumi-review:o/r#7 -->";
+  const BOT = "jumi";
+  const FAIL_TRAILER = "<!-- jumi-check: failure; 1 blocking -->";
+
+  function stickyBody(findingsText: string, head: string = HEAD): string {
+    const inner = findingsText.trim() ? `${findingsText}\n\n` : "";
+    return `${MARKER}\n### Jumi review\n\nReviewed commit: \`${head}\`\n\n${inner}${FAIL_TRAILER}`;
+  }
+
+  function testTrust(
+    head: string = HEAD,
+    logs: string[] = []
+  ): {
+    trust: import("../src/review_facts.ts").ReviewTrustCtx;
+    logs: string[];
+  } {
+    return {
+      logs,
+      trust: {
+        webhookSecret: SECRET,
+        forgeIdentity: IDENTITY,
+        owner: OWNER,
+        repo: REPO,
+        prNumber: PR,
+        headSha: head,
+        log: (message: string) => logs.push(message),
+      },
+    };
+  }
+
+  async function signSticky(bodyWithoutMeta: string, findings: import("../src/review_meta.ts").MetaFindingEntry[]) {
+    const { encodeMetaPayload, signMetaPayload, deriveReviewMetaKey, sha256Hex, insertReviewMetaBeforeTrailer } =
+      await import("../src/review_meta.ts");
+    const payload = {
+      v: 1 as const,
+      forge: IDENTITY,
+      repo: `${OWNER}/${REPO}`,
+      pr: PR,
+      head: HEAD,
+      state: "failure" as const,
+      md: sha256Hex(bodyWithoutMeta),
+      findings,
+    };
+    const hex = encodeMetaPayload(payload);
+    return insertReviewMetaBeforeTrailer(
+      bodyWithoutMeta,
+      (await import("../src/review_meta.ts")).buildReviewMetaBlock(
+        hex,
+        signMetaPayload(hex, deriveReviewMetaKey(SECRET))
+      )
+    );
+  }
+
+  function bodyEntry(severity: "bug" | "risk", path: string, line: number, ordinal: number, key: string | null) {
+    return { k: key, s: severity, p: "body" as const, path, line, proof: 0 as const, o: ordinal };
+  }
+
+  test("same key reworded latches; different key does not", async () => {
+    const first = stickyBody("src/a.ts:12: 🔴 Null deref on empty input.");
+    const signedFirst = await signSticky(first, [bodyEntry("bug", "src/a.ts", 12, 1, "k_job-1_1")]);
+    const second = stickyBody("src/a.ts:14: 🔴 Completely reworded null pointer crash with different words.");
+    const signedSecond = await signSticky(second, [bodyEntry("bug", "src/a.ts", 12, 1, "k_job-1_1")]);
+    const third = stickyBody("src/a.ts:12: 🔴 Null deref on empty input.");
+    const signedThird = await signSticky(third, [bodyEntry("bug", "src/a.ts", 12, 1, "k_job-1_2")]);
+    const logs: string[] = [];
+    const { trust } = testTrust(HEAD, logs);
+    const one = fingerprintFindingIdentityFromParts(signedFirst, [], trust);
+    const two = fingerprintFindingIdentityFromParts(signedSecond, [], trust);
+    const other = fingerprintFindingIdentityFromParts(signedThird, [], trust);
+    expect(one).toBeTruthy();
+    expect(two).toBe(one);
+    expect(other).not.toBe(one);
+    expect(logs.some((line) => line.includes("finding-identity: keyed"))).toBe(true);
+  });
+
+  test("verified keyed component never equals the text component (history restarts)", async () => {
+    const body = stickyBody("src/a.ts:12: 🔴 Null deref on empty input.");
+    const signed = await signSticky(body, [bodyEntry("bug", "src/a.ts", 12, 1, "k_job-1_1")]);
+    const textOnly = fingerprintFindingIdentityFromParts(body, []);
+    const { trust } = testTrust();
+    const keyed = fingerprintFindingIdentityFromParts(signed, [], trust);
+    expect(textOnly).toBeTruthy();
+    expect(keyed).toBeTruthy();
+    expect(keyed).not.toBe(textOnly);
+    const diffHash = fingerprintPrDiffFromFiles([{ filename: "src/a.ts", patch: "@@ -1 +1 @@\n-old\n+new" }])!;
+    const textFp = { kind: "finding" as const, hash: fingerprintSameFinding(textOnly!, diffHash) };
+    const keyedFp = { kind: "finding" as const, hash: fingerprintSameFinding(keyed!, diffHash) };
+    expect(evaluateStuck([textFp, textFp], keyedFp)).toBeUndefined();
+    expect(detectStuck([keyedFp, keyedFp, keyedFp])).toBe("same-finding");
+  });
+
+  test("unverified artifact equals today's text identity exactly", async () => {
+    const body = stickyBody("src/a.ts:12: 🔴 Null deref on empty input.");
+    const signed = await signSticky(body, [bodyEntry("bug", "src/a.ts", 12, 1, "k_job-1_1")]);
+    const tampered = signed.replace("Null deref", "Null dereff");
+    const logs: string[] = [];
+    const { trust } = testTrust(HEAD, logs);
+    expect(fingerprintFindingIdentityFromParts(tampered, [], trust)).toBe(
+      fingerprintFindingIdentityFromParts(tampered, [])
+    );
+    expect(logs.some((line) => line.includes("finding-identity: text reason=digest-mismatch"))).toBe(true);
+    const otherHeadLogs: string[] = [];
+    expect(fingerprintFindingIdentityFromParts(signed, [], testTrust(OTHER_HEAD, otherHeadLogs).trust)).toBe(
+      fingerprintFindingIdentityFromParts(signed, [])
+    );
+    expect(otherHeadLogs.some((line) => line.includes("reason=head-rule"))).toBe(true);
+  });
+
+  test("inline location mismatch falls back to text; mixed sets hash deterministically", async () => {
+    const { sha256Hex } = await import("../src/review_meta.ts");
+    const liveBody = "🔴 Null deref on empty input.\n\n<!-- jumi-review:o/r#7 -->";
+    const inline = { id: 501, path: "src/a.ts", new_position: 12, body: liveBody };
+    const entry = {
+      k: "k_job-1_1",
+      s: "bug" as const,
+      p: "inline" as const,
+      path: "src/a.ts",
+      line: 12,
+      proof: 0 as const,
+      cid: 501,
+      cs: sha256Hex(liveBody),
+    };
+    const top = stickyBody("");
+    const { encodeMetaPayload, signMetaPayload, deriveReviewMetaKey, buildReviewMetaBlock } = await import(
+      "../src/review_meta.ts"
+    );
+    const payload = {
+      v: 1 as const,
+      forge: IDENTITY,
+      repo: `${OWNER}/${REPO}`,
+      pr: PR,
+      head: HEAD,
+      state: "failure" as const,
+      md: (await import("../src/review_meta.ts")).sha256Hex(top),
+      findings: [entry],
+    };
+    const hex = encodeMetaPayload(payload);
+    const signedTop = (await import("../src/review_meta.ts")).insertReviewMetaBeforeTrailer(
+      top,
+      buildReviewMetaBlock(hex, signMetaPayload(hex, deriveReviewMetaKey(SECRET)))
+    );
+    const logs: string[] = [];
+    const ok = fingerprintFindingIdentityFromParts(signedTop, [inline], testTrust(HEAD, logs).trust);
+    const moved = fingerprintFindingIdentityFromParts(signedTop, [{ ...inline, new_position: 30 }], testTrust().trust);
+    expect(ok).toBeTruthy();
+    expect(moved).toBeTruthy();
+    expect(moved).not.toBe(ok);
+    const again = fingerprintFindingIdentityFromParts(signedTop, [{ ...inline, new_position: 30 }], testTrust().trust);
+    expect(again).toBe(moved);
+    expect(fingerprintFindingIdentityFromParts(signedTop, [{ ...inline, new_position: 30 }])).not.toBe(moved);
+  });
+
+  test("postPullReview shape verifies and inline entries map for the latch", async () => {
+    const { attachPostPullReviewMeta } = await import("../src/review_meta.ts");
+    const { parseReviewFindings, findingFingerprint } = await import("../src/verdict.ts");
+    const comment = "src/a.ts:12: 🔴 Null deref on empty input.";
+    const findings = parseReviewFindings(comment);
+    expect(findings).toHaveLength(1);
+    const posted = new Set([findingFingerprint(findings[0]!.path, findings[0]!.body)]);
+    const livePostedBody = `${findings[0]!.body}\n\n${MARKER}`;
+    const published = [{ id: 501, path: findings[0]!.path, body: livePostedBody, new_position: 12 }];
+    const { buildFindingsList, stripFindingLines } = await import("../src/verdict.ts");
+    const list = buildFindingsList(findings);
+    const failed = stripFindingLines(comment, { posted });
+    const topBody = [
+      MARKER,
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      [list, failed].filter((part) => part.trim()).join("\n\n"),
+      "",
+      FAIL_TRAILER,
+    ].join("\n");
+    const finalBody = attachPostPullReviewMeta({
+      meta: {
+        webhookSecret: SECRET,
+        giteaUrl: "https://gitea.example.com",
+        forgeIdentity: IDENTITY,
+        jobId: "job-1",
+        verdictState: "failure",
+      },
+      owner: OWNER,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      marker: MARKER,
+      botUsername: BOT,
+      topBody,
+      comment,
+      findings: findings.map((finding) => ({ path: finding.path, line: finding.line, body: finding.body })),
+      posted,
+      published,
+      log: () => undefined,
+    });
+    const live = [
+      {
+        id: 501,
+        body: livePostedBody,
+        user: { login: BOT },
+        created_at: "",
+        updated_at: "",
+        path: "src/a.ts",
+        new_position: 12,
+      },
+    ];
+    const logs: string[] = [];
+    const keyed = fingerprintFindingIdentityFromParts(finalBody, live, testTrust(HEAD, logs).trust);
+    const text = fingerprintFindingIdentityFromParts(finalBody, live);
+    expect(keyed).toBeTruthy();
+    expect(text).toBeTruthy();
+    expect(keyed).not.toBe(text);
+    expect(logs.some((line) => line.includes("finding-identity: keyed"))).toBe(true);
+    expect(sameFindingDisplayFromParts(finalBody, live, testTrust().trust)).toBe(
+      sameFindingDisplayFromParts(finalBody, live)
+    );
+  });
+
+  test("earlier-review inline contributes its key via comment_id, digest and location", async () => {
+    const { sha256Hex } = await import("../src/review_meta.ts");
+    const earlierLiveBody = "🔴 Earlier bug.\n\n<!-- jumi-review:o/r#7 -->";
+    const earlierInline = { id: 701, path: "src/c.ts", new_position: 7, body: earlierLiveBody };
+    const earlierEntry = {
+      k: "k_earlier_1",
+      s: "bug" as const,
+      p: "inline" as const,
+      path: "src/c.ts",
+      line: 7,
+      proof: 0 as const,
+      cid: 701,
+      cs: sha256Hex(earlierLiveBody),
+    };
+    const earlierTop = stickyBody("");
+    const earlierSigned = await signSticky(earlierTop, [earlierEntry]);
+    const currentBody = stickyBody("src/a.ts:12: 🔴 Current bug.");
+    const currentSigned = await signSticky(currentBody, [bodyEntry("bug", "src/a.ts", 12, 1, "k_cur_1")]);
+    const withExtra = fingerprintFindingIdentityFromParts(currentSigned, [earlierInline], testTrust().trust, [
+      earlierSigned,
+    ]);
+    const withoutExtra = fingerprintFindingIdentityFromParts(currentSigned, [earlierInline], testTrust().trust, []);
+    expect(withExtra).toBeTruthy();
+    expect(withoutExtra).toBeTruthy();
+    expect(withExtra).not.toBe(withoutExtra);
+  });
+
+  test("resolved inlines, suggestions and non-blocking questions never enter", async () => {
+    const suggestion = stickyBody("src/a.ts:3: 💡 simpler: Tidy this helper.");
+    const suggestionEntry = {
+      k: "k_sug_1",
+      s: "suggestion" as const,
+      p: "body" as const,
+      path: "src/a.ts",
+      line: 3,
+      proof: 0 as const,
+      o: 1,
+    };
+    expect(
+      fingerprintFindingIdentityFromParts(await signSticky(suggestion, [suggestionEntry]), [], testTrust().trust)
+    ).toBeUndefined();
+    const plain = stickyBody("src/a.ts:3: ❓ Should we retry?");
+    const plainEntry = {
+      k: "k_q_1",
+      s: "question" as const,
+      t: "plain" as const,
+      p: "body" as const,
+      path: "src/a.ts",
+      line: 3,
+      proof: 0 as const,
+      o: 1,
+    };
+    expect(
+      fingerprintFindingIdentityFromParts(await signSticky(plain, [plainEntry]), [], testTrust().trust)
+    ).toBeUndefined();
+    const blockingEntry = {
+      k: "k_qb_1",
+      s: "question" as const,
+      t: "blocking" as const,
+      p: "body" as const,
+      path: "src/a.ts",
+      line: 3,
+      proof: 0 as const,
+      o: 1,
+    };
+    expect(
+      fingerprintFindingIdentityFromParts(await signSticky(plain, [blockingEntry]), [], testTrust().trust)
+    ).toBeTruthy();
+    const liveBody = "🔴 Bug text.\n\n<!-- jumi-review:o/r#7 -->";
+    const { sha256Hex } = await import("../src/review_meta.ts");
+    const resolved = {
+      id: 601,
+      path: "src/a.ts",
+      new_position: 12,
+      body: liveBody,
+      resolved: true as const,
+      resolver: { login: "alice" },
+    };
+    const resolvedEntry = {
+      k: "k_res_1",
+      s: "bug" as const,
+      p: "inline" as const,
+      path: "src/a.ts",
+      line: 12,
+      proof: 0 as const,
+      cid: 601,
+      cs: sha256Hex(liveBody),
+    };
+    const top = stickyBody("");
+    expect(
+      fingerprintFindingIdentityFromParts(await signSticky(top, [resolvedEntry]), [resolved], testTrust().trust)
+    ).toBeUndefined();
+  });
+});
