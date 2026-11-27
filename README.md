@@ -221,6 +221,23 @@ For each case and runner the mode runs the normal review on the pinned base and 
 
 No forge writes: the replay API type exposes only reads and the runtime guard throws on any write call, so a read-only token is enough and nothing posts a review, status, comment, or label. Quota follows normal review handling but records a skip and moves on, never sleeping for hours; pending or red CI also records a skip without starting the model. A case that fails to load (deleted repo/PR, missing SHA, transient list failure) records a `skip` and the batch continues; `results.jsonl` is flushed after each record so completed records are never lost.
 
+### Worker eval (opt-in one-shot)
+
+`bun run src/worker_eval.ts --out <output-dir> [--fixture <name>] [--runners <name1,name2>] [--trials <n>]` runs synthetic implement fixtures through the production implement path without publishing. It runs in the existing reviewer and worker images, so a Kubernetes Job can run it later. No new service, no CI wiring. Fixtures are synthetic and committable; private repos never appear. The first real-model runs are operator-run; Sampo runs them after release.
+
+Each fixture lives under `scripts/opencode/src/eval_fixtures/<name>/`:
+
+- `fixture.json`: fixture name, `owner`/`repo`, `issueNumber`, `defaultBranch`.
+- `issue.json`: issue `title` and `body` the model reads (written the way a real issue reads; the eval case id never enters `JUMI_TASK.md`).
+- `repo/`: initial repo files the model starts from (including the forge CI workflow when the fixture names one).
+- `hidden_check.sh`: grader read from the base checkout before the run and executed against a fresh checkout of the pushed commit the agent never saw. It is never copied into `repo/`, so the agent cannot read or edit it.
+
+For each fixture × runner × trial the harness builds a local bare remote with real refs, an isolated `HOME`, and an inert token (`eval-inert-token` on `https://eval.invalid`); the in-memory fake forge performs no network fetch and the git runner throws on any non-eval host. The run uses the real engine for the named runner, grades outcomes (never tool-call order), and writes one JSONL record per fixture × runner × trial to `<out>/results.jsonl` (flushed after each record). Trials default to 1.
+
+Each record carries `fixture`, `runner`, `runnerStamp`, `trial`, `verdict` (`pass` / `fail` / `inconclusive`), `failedAssertions`, the job result (`jobStatus` `pr` / `no-changes` / `skipped` plus `jobReason`), the published `closingKeyword` (`fixes` / `refs` / `none`) and `remaining` list, the raw `prBody`, `hiddenCheck` (`pass` / `fail` / `skip`) with output, `noSentinels`, the `pushedSha` and `baseSha`, `durationMs`, and token `usage` where the runner reports it. Auth, quota, timeouts, and harness crashes record `inconclusive` with `inconclusiveReason`, never `fail`.
+
+The first fixture is `done-while-ci-pending`: a small repo whose Done is fully achievable in the run, including a Done item that says CI must be green and a `ci` workflow that only the forge runs. A correct run implements the change and publishes the closing keyword with an empty `remaining` list (forge CI checks never count as remaining work); the hidden check proves the change works. Every assertion traces to the fixture issue or the repo: the job result to Done, the closing keyword and empty remaining to Done plus the `set_pr_body` rule, the hidden check to the issue's Done items, and the sentinel check to the implement prompt rule that results publish through the worker tools and `JUMI_*.md` files are never committed.
+
 ### Independent review (opt-in)
 
 Unset/disabled preserves today's behavior: the reviewer runs the configured chain in order, with synthesized `OPENCODE_MODEL` / `OPENCODE_FALLBACK_*` chains working as before. No factory chain is changed by this ticket; activation is a later explicit `JUMI_RUNNERS_FILE` decision.
