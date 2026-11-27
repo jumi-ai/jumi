@@ -45,6 +45,21 @@ import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { type Engine, EngineFailedError, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import {
+  type EvalHarness,
+  ensureEvalRoots,
+  evalImageDigest,
+  evalUsageOrNull,
+  loadEvalLegacyRunners,
+  loadEvalPiDeployment,
+  parseEvalHarness,
+  piAllowedHostsForRoute,
+  resolveEvalPiRoute,
+} from "./eval_harness.ts";
+import { buildPiAttemptStamp, normalizePiAttemptUsage } from "./pi_attempt.ts";
+import { runPiHop } from "./pi_hop.ts";
+import { runPiReviewAttempt } from "./pi_review.ts";
+import { createPiGoSessionDeps } from "./pi_runtime.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
@@ -52,7 +67,7 @@ import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { resolveReviewVerdictContract } from "./review_verdict_contract.ts";
 import { isMaintainerStoreFinding, type ReviewMcpFindingRecord, ReviewVerdictStore } from "./review_verdict_store.ts";
-import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
+import { formatRunnerStamp, type NamedRunner, runnerStamp } from "./runners.ts";
 import { errorMessage } from "./util/error.ts";
 import { runGit } from "./workspace.ts";
 
@@ -89,6 +104,7 @@ export interface ReviewEvalAnchor {
 
 export interface ReviewEvalRecord {
   fixture: string;
+  harness: EvalHarness;
   half: ReviewEvalHalf;
   runner: string;
   runnerStamp: string;
@@ -105,9 +121,15 @@ export interface ReviewEvalRecord {
   baseSha: string;
   headSha: string;
   durationMs: number;
-  usage?: unknown;
+  usage: unknown;
   inconclusiveReason?: string;
   jobReason?: string;
+  imageDigest: string | null;
+  effectiveModel: string;
+  route: string | null;
+  payer: string | null;
+  pool: string | null;
+  outcome: string | null;
 }
 
 export interface LoadedReviewEvalFixture {
@@ -377,9 +399,24 @@ export interface RunReviewEvalCaseOptions {
   engine?: Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
+  harness?: EvalHarness;
+  piDeployment?: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] };
+  piRouteName?: string;
+  piSessionDepsFor?: (
+    route: ReturnType<typeof resolveEvalPiRoute>,
+    sessionId: string
+  ) => Promise<{ modelRuntime: unknown; model: unknown }>;
+  piInvoke?: (ctx: {
+    workdir: string;
+    store: ReviewVerdictStore;
+    route: ReturnType<typeof resolveEvalPiRoute>;
+    allowedFetchHosts: readonly string[];
+    prompt: string;
+  }) => Promise<{ usage?: unknown }>;
 }
 
 export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise<ReviewEvalRecord> {
+  if ((opts.harness ?? "legacy") === "pi") return runReviewEvalCasePi(opts);
   const log = opts.logger ?? (() => undefined);
   const started = Date.now();
   const stamp = formatRunnerStamp(runnerStamp(opts.runner));
@@ -389,6 +426,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
   });
   const baseRecord = {
     fixture: opts.fixture.name,
+    harness: "legacy" as const,
     half: opts.half,
     runner: opts.runner.name,
     runnerStamp: stamp,
@@ -396,11 +434,19 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
     contract: REVIEW_EVAL_CONTRACT,
     baseSha: "unknown",
     headSha: "unknown",
-  } as const;
+    usage: null as unknown,
+    imageDigest: evalImageDigest(),
+    effectiveModel: opts.runner.model,
+    route: opts.runner.name,
+    payer: null as string | null,
+    pool: null as string | null,
+    outcome: null as string | null,
+  };
 
   let homeDir = "";
   let workdir = "";
   try {
+    await ensureEvalRoots([opts.homeRoot, opts.workdirRoot]);
     homeDir = await mkdtemp(join(opts.homeRoot, "review-eval-home-"));
     workdir = await mkdtemp(join(opts.workdirRoot, "review-eval-work-"));
 
@@ -482,6 +528,8 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
       clone_url: `https://eval.invalid/${opts.fixture.owner}/${opts.fixture.repo}.git`,
       default_branch: opts.fixture.defaultBranch,
       owner: { login: opts.fixture.owner },
+      private: false,
+      visibility: "public",
     };
     const pr = {
       number: opts.fixture.prNumber,
@@ -668,7 +716,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         }
       }
 
-      const usage: unknown = capturedUsage;
+      const usage: unknown = evalUsageOrNull(capturedUsage);
       return finish({
         ...baseRecord,
         baseSha,
@@ -681,7 +729,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         rawMarkdown: markdown,
         treeClean,
         maintainerHolds,
-        ...(usage !== undefined ? { usage } : {}),
+        usage,
       });
     } finally {
       verdictStore.close();
@@ -737,6 +785,399 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
   }
 }
 
+export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promise<ReviewEvalRecord> {
+  const log = opts.logger ?? (() => undefined);
+  const started = Date.now();
+  const finish = (partial: Omit<ReviewEvalRecord, "durationMs">): ReviewEvalRecord => ({
+    ...partial,
+    durationMs: Date.now() - started,
+  });
+  const deployment = opts.piDeployment ?? loadEvalPiDeployment();
+  const { resolveEvalPiRouteNamed } = await import("./eval_harness.ts");
+  const resolved = opts.piRouteName
+    ? resolveEvalPiRouteNamed(opts.piRouteName, deployment)
+    : resolveEvalPiRoute(deployment);
+  const stampBase = formatRunnerStamp(runnerStamp(opts.runner));
+  const baseRecord = {
+    fixture: opts.fixture.name,
+    harness: "pi" as const,
+    half: opts.half,
+    runner: `pi:${resolved.name}`,
+    runnerStamp: stampBase,
+    trial: opts.trial,
+    contract: REVIEW_EVAL_CONTRACT,
+    baseSha: "unknown",
+    headSha: "unknown",
+    usage: null as unknown,
+    imageDigest: evalImageDigest(),
+    effectiveModel: resolved.model,
+    route: resolved.name,
+    payer: resolved.payer,
+    pool: resolved.fundingPool,
+    outcome: null as string | null,
+  };
+  const allowedFetchHosts = piAllowedHostsForRoute(resolved);
+
+  const inconclusive = (
+    reason: string,
+    outcome: string,
+    usage: unknown = null,
+    reviewState: ReviewEvalRecord["reviewState"] = "skip"
+  ): ReviewEvalRecord =>
+    finish({
+      ...baseRecord,
+      verdict: "inconclusive",
+      failedAssertions: [],
+      reviewState,
+      findingsCount: 0,
+      blockingCount: 0,
+      rawMarkdown: "",
+      treeClean: true,
+      maintainerHolds: true,
+      usage: evalUsageOrNull(usage),
+      outcome,
+      inconclusiveReason: reason,
+      jobReason: reason,
+    });
+
+  let homeDir = "";
+  let workdir = "";
+  try {
+    await ensureEvalRoots([opts.homeRoot, opts.workdirRoot]);
+    homeDir = await mkdtemp(join(opts.homeRoot, "review-eval-home-"));
+    workdir = await mkdtemp(join(opts.workdirRoot, "review-eval-work-"));
+    await runPlainGit(["init"], workdir, homeDir);
+    await runPlainGit(["config", "user.name", "jumi"], workdir, homeDir);
+    await runPlainGit(["config", "user.email", "jumi@localhost"], workdir, homeDir);
+    await cp(opts.fixture.repoDir, workdir, { recursive: true });
+    await runPlainGit(["add", "-A"], workdir, homeDir);
+    await runPlainGit(["commit", "-m", REVIEW_EVAL_BASE_COMMIT_MESSAGE], workdir, homeDir);
+    const baseSha = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
+    const halfDir = opts.half === "defective" ? opts.fixture.defectiveDir : opts.fixture.repairedDir;
+    await cp(halfDir, workdir, { recursive: true });
+    await runPlainGit(["add", "-A"], workdir, homeDir);
+    const headStatus = await runPlainGit(["status", "--porcelain"], workdir, homeDir);
+    if (headStatus.trim()) {
+      await runPlainGit(["commit", "-m", REVIEW_EVAL_HEAD_COMMIT_MESSAGE], workdir, homeDir);
+    }
+    const headSha = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
+    await runPlainGit(["branch", "--force", REVIEW_EVAL_TARGET_BRANCH, baseSha], workdir, homeDir);
+
+    const prFiles = await buildPullFiles(workdir, baseSha, headSha, homeDir);
+    const env = gitEnv(homeDir);
+    const reviewMd = await loadReviewMdSectionsFromBase({
+      git: (args, runOpts) => runGit(args, { cwd: runOpts.cwd, env: runOpts.env }),
+      cwd: workdir,
+      env,
+      baseRef: baseSha,
+      files: prFiles.map((file) => ({
+        filename: file.filename,
+        status:
+          file.status === "added"
+            ? ("added" as const)
+            : file.status === "deleted"
+              ? ("deleted" as const)
+              : ("modified" as const),
+        additions: file.additions,
+        deletions: file.deletions,
+        changes: file.changes,
+        ...(file.patch ? { patch: file.patch } : {}),
+      })),
+    });
+    const baseInstructionsDir = join(workdir, ".jumi-tmp", "base-instructions");
+    let baseInstructions: { text: string; truncated: boolean } | undefined;
+    try {
+      await stageBaseReviewInstructions(
+        {
+          git: (args, runOpts) => runGit(args, { cwd: runOpts.cwd, env: runOpts.env }),
+          cwd: workdir,
+          env,
+          baseRef: baseSha,
+        },
+        baseInstructionsDir,
+        {}
+      );
+      const parts: string[] = [];
+      for (const name of ["AGENTS.md", "CLAUDE.md"] as const) {
+        const text = await readStagedBaseFile(baseInstructionsDir, name);
+        if (text?.trim()) parts.push(text.trim());
+      }
+      if (parts.length > 0) baseInstructions = { text: parts.join("\n\n"), truncated: false };
+    } catch (err) {
+      log(`base instructions unavailable: ${errorMessage(err)}`);
+    }
+    const prompt = buildPROpenedPrompt({
+      repo: {
+        name: opts.fixture.repo,
+        full_name: `${opts.fixture.owner}/${opts.fixture.repo}`,
+        html_url: `https://eval.invalid/${opts.fixture.owner}/${opts.fixture.repo}`,
+        clone_url: `https://eval.invalid/${opts.fixture.owner}/${opts.fixture.repo}.git`,
+        default_branch: opts.fixture.defaultBranch,
+        owner: { login: opts.fixture.owner },
+      },
+      pr: {
+        number: opts.fixture.prNumber,
+        title: opts.fixture.title,
+        body: opts.fixture.body,
+        state: "open" as const,
+        html_url: `https://eval.invalid/${opts.fixture.owner}/${opts.fixture.repo}/pulls/${opts.fixture.prNumber}`,
+        user: { login: opts.fixture.author },
+        head: {
+          ref: `jumi/pr-${opts.fixture.prNumber}`,
+          sha: headSha,
+          repo: { full_name: `${opts.fixture.owner}/${opts.fixture.repo}` },
+        },
+        base: { ref: opts.fixture.defaultBranch, sha: baseSha },
+        merged: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      prFiles: prFiles.map((file) => ({
+        filename: file.filename,
+        status: file.status === "added" || file.status === "deleted" ? file.status : "modified",
+        additions: file.additions,
+        deletions: file.deletions,
+        changes: file.changes,
+        ...(file.patch ? { patch: file.patch } : {}),
+      })),
+      ...(reviewMd ? { reviewMd: { text: reviewMd.text, truncated: reviewMd.truncated } } : {}),
+      ...(baseInstructions ? { baseInstructions } : {}),
+      runnerType: opts.runner.type,
+    });
+
+    const verdictStore = new ReviewVerdictStore({
+      changedFiles: prFiles.map((file) => ({ filename: file.filename, ...(file.patch ? { patch: file.patch } : {}) })),
+    });
+    try {
+      await ensureEngineScratchIgnored(workdir);
+      await rm(join(workdir, "JUMI_REVIEW.md"), { recursive: true, force: true }).catch(() => undefined);
+      await writeFile(join(workdir, "JUMI_TASK.md"), prompt, "utf8");
+
+      let piUsage: unknown = null;
+      let piOutcome = "ok";
+      try {
+        if (opts.piInvoke) {
+          const invoked = await opts.piInvoke({
+            workdir,
+            store: verdictStore,
+            route: resolved,
+            allowedFetchHosts,
+            prompt,
+          });
+          piUsage = invoked.usage ?? null;
+        } else {
+          const sessionId = `eval-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
+          const deps = opts.piSessionDepsFor
+            ? await opts.piSessionDepsFor(resolved, sessionId)
+            : await createPiGoSessionDeps({ sessionId });
+          const hop = await runPiHop({
+            routes: [resolved.name],
+            catalog: deployment.catalog,
+            deploymentAllowlist: deployment.allowlist,
+            scope: "public",
+            role: "review",
+            lease: { isLeaseHeld: async () => true, isCancelled: async () => false, isWorktreeSafe: async () => true },
+            invoke: async (invokedRoute, ctx) => {
+              const perDeps = opts.piSessionDepsFor
+                ? await opts.piSessionDepsFor(invokedRoute as never, ctx.sessionId)
+                : { modelRuntime: deps.modelRuntime, model: deps.model };
+              const seenStatuses: number[] = [];
+              const outerFetch = globalThis.fetch;
+              globalThis.fetch = (async (input: never, init: never) => {
+                const response = await outerFetch(input, init);
+                try {
+                  seenStatuses.push(response.status);
+                } catch {}
+                return response;
+              }) as typeof fetch;
+              try {
+                const result = await runPiReviewAttempt({
+                  workdir,
+                  ...(baseInstructions ? { baseInstructions: baseInstructions.text } : {}),
+                  prompt,
+                  store: verdictStore,
+                  modelRuntime: perDeps.modelRuntime,
+                  model: perDeps.model,
+                  allowedFetchHosts,
+                  timeoutMs: opts.timeoutMs,
+                  logger: log,
+                });
+                const { piSessionToAdapterResult } = await import("./pi_jobs.ts");
+                return piSessionToAdapterResult(
+                  result.status === "complete" ? "complete" : "incomplete",
+                  result.reason,
+                  "pi review session finished",
+                  seenStatuses
+                );
+              } finally {
+                globalThis.fetch = outerFetch;
+              }
+            },
+          });
+          if (hop.status !== "ok" || !hop.result) {
+            const kind = hop.result?.kind ?? "provider-failure";
+            const reasonText = hop.result?.message ?? hop.reason ?? "provider failure";
+            const normalized = normalizePiAttemptUsage(hop.result?.usage ?? null);
+            if (kind === "quota" || isQuotaText(reasonText)) {
+              const stamp = buildPiAttemptStamp({
+                route: resolved,
+                role: "review",
+                outcome: "quota",
+                ...(normalized ? { usage: normalized } : {}),
+              });
+              return finish({
+                ...baseRecord,
+                baseSha,
+                headSha,
+                verdict: "inconclusive",
+                failedAssertions: [],
+                reviewState: "skip",
+                findingsCount: 0,
+                blockingCount: 0,
+                rawMarkdown: "",
+                treeClean: true,
+                maintainerHolds: true,
+                usage: evalUsageOrNull(stamp.usage ?? null),
+                outcome: "quota",
+                inconclusiveReason: reasonText.slice(0, 500),
+                jobReason: reasonText.slice(0, 500),
+              });
+            }
+            return inconclusive(
+              reasonText.slice(0, 500),
+              kind === "auth-expired" ? "auth-expired" : "provider-failure",
+              normalized ?? null
+            );
+          }
+          const normalized = normalizePiAttemptUsage(hop.result.usage ?? null);
+          piUsage = normalized ?? null;
+          piOutcome = hop.result.kind === "ok" ? "ok" : hop.result.kind;
+        }
+      } catch (err) {
+        const message = errorMessage(err);
+        if (isQuotaText(message)) return inconclusive(message.slice(0, 500), "quota", piUsage);
+        if (/auth|unauthorized|forbidden|token/i.test(message))
+          return inconclusive(message.slice(0, 500), "auth-expired", piUsage);
+        if (/timeout|timed out|deadline/i.test(message))
+          return inconclusive(message.slice(0, 500), "provider-failure", piUsage);
+        return inconclusive(`harness crash: ${message}`.slice(0, 500), "provider-failure", piUsage);
+      }
+
+      await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
+      let headAfter: string | null = null;
+      try {
+        headAfter = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
+      } catch (err) {
+        const reason = `post-run HEAD read failed: ${errorMessage(err)}`.slice(0, 500);
+        return inconclusive(reason, piOutcome, piUsage);
+      }
+      let porcelain: string | null = null;
+      try {
+        porcelain = await runPlainGit(["status", "--porcelain"], workdir, homeDir);
+      } catch (err) {
+        const reason = `post-run status failed: ${errorMessage(err)}`.slice(0, 500);
+        return inconclusive(reason, piOutcome, piUsage);
+      }
+      const headUnchanged = (headAfter ?? "").trim().toLowerCase() === headSha.toLowerCase();
+      const treeClean = headUnchanged && porcelainTreeClean(porcelain ?? "");
+      const storedVerdict = verdictStore.getVerdict();
+      const findings = verdictStore.listFindings();
+      const markdown = verdictStore.toMarkdown();
+      const reviewState = storedVerdict?.state ?? "incomplete";
+      const blockingCount = findings.filter(
+        (finding) => finding.severity === "bug" || finding.severity === "risk"
+      ).length;
+      const maintainerHolds = maintainerHoldsForFindings(findings);
+      const failedAssertions: string[] = [];
+      if (!headUnchanged) failedAssertions.push("head-unchanged");
+      if (!treeClean) failedAssertions.push("tree-clean");
+      if (!maintainerHolds) failedAssertions.push("maintainer-holds");
+      if (opts.half === "defective") {
+        if (reviewState !== "failure") failedAssertions.push("defective-verdict");
+        const blocking = findings.filter((finding) => finding.severity === "bug" || finding.severity === "risk");
+        const anchored = blocking.filter((finding) => findingInAnchors(finding, opts.fixture.anchors));
+        if (anchored.length === 0) failedAssertions.push("defect-anchor");
+        const named = anchored.filter((finding) => {
+          const text = `${finding.title ?? ""}\n${finding.body ?? ""}`.toLowerCase();
+          return opts.fixture.mustContain.every((token) => text.includes(token.toLowerCase()));
+        });
+        if (named.length === 0) failedAssertions.push("defect-text");
+      } else {
+        if (reviewState !== "success") failedAssertions.push("repaired-verdict");
+        if (blockingCount > 0) failedAssertions.push("repaired-blocking");
+      }
+      if (reviewState === "incomplete") {
+        if (!failedAssertions.includes("defective-verdict") && !failedAssertions.includes("repaired-verdict")) {
+          failedAssertions.push(opts.half === "defective" ? "defective-verdict" : "repaired-verdict");
+        }
+      }
+      if (reviewState === "failure" && blockingCount === 0) {
+        if (opts.half === "defective" && !failedAssertions.includes("defect-anchor")) {
+          failedAssertions.push("defect-anchor");
+        }
+      }
+      const normalizedUsage = normalizePiAttemptUsage((piUsage as never) ?? null);
+      const stamp = buildPiAttemptStamp({
+        route: resolved,
+        role: "review",
+        outcome: (piOutcome as never) ?? "ok",
+        ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+      });
+      return finish({
+        ...baseRecord,
+        baseSha,
+        headSha,
+        verdict: failedAssertions.length === 0 ? "pass" : "fail",
+        failedAssertions,
+        reviewState,
+        findingsCount: findings.length,
+        blockingCount,
+        rawMarkdown: markdown,
+        treeClean,
+        maintainerHolds,
+        usage: evalUsageOrNull(stamp.usage ?? piUsage ?? null),
+        outcome: stamp.outcome,
+      });
+    } finally {
+      verdictStore.close();
+    }
+  } catch (err) {
+    const message = errorMessage(err);
+    if (isQuotaText(message) || isInconclusiveText(message)) {
+      return finish({
+        ...baseRecord,
+        verdict: "inconclusive",
+        failedAssertions: [],
+        reviewState: "skip",
+        findingsCount: 0,
+        blockingCount: 0,
+        rawMarkdown: "",
+        treeClean: true,
+        maintainerHolds: true,
+        usage: null,
+        outcome: "provider-failure",
+        inconclusiveReason: message,
+        jobReason: message,
+      });
+    }
+    return finish({
+      ...baseRecord,
+      verdict: "inconclusive",
+      failedAssertions: [],
+      reviewState: "skip",
+      findingsCount: 0,
+      blockingCount: 0,
+      rawMarkdown: "",
+      treeClean: true,
+      maintainerHolds: true,
+      usage: null,
+      outcome: "provider-failure",
+      inconclusiveReason: `harness crash: ${message}`,
+      jobReason: message,
+    });
+  }
+}
+
 export interface RunReviewEvalOptions {
   fixtures: LoadedReviewEvalFixture[];
   halves: ReviewEvalHalf[];
@@ -748,60 +1189,104 @@ export interface RunReviewEvalOptions {
   engineForRunner?: (runner: NamedRunner) => Engine;
   timeoutMs?: number;
   logger?: (message: string) => void;
+  harnesses?: EvalHarness[];
+  piSessionDepsFor?: RunReviewEvalCaseOptions["piSessionDepsFor"];
+  piInvokeForRoute?: (routeName: string) => RunReviewEvalCaseOptions["piInvoke"];
+}
+
+async function writeReviewEvalRecords(
+  outDir: string,
+  preexisting: string[],
+  lines: string[],
+  runId: string
+): Promise<void> {
+  await mkdir(outDir, { recursive: true });
+  await writeFile(join(outDir, `results-${runId}.jsonl`), `${lines.join("\n")}\n`);
+  await writeFile(join(outDir, "results.jsonl"), `${[...preexisting, ...lines].join("\n")}\n`);
 }
 
 export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewEvalRecord[]> {
-  await mkdir(opts.outDir, { recursive: true });
+  await ensureEvalRoots([opts.outDir, opts.workdirRoot, opts.homeRoot]);
   const log = opts.logger ?? (() => undefined);
+  const harnesses = opts.harnesses ?? ["legacy"];
+  let piDeployment: { catalog: Parameters<typeof resolveEvalPiRoute>[0]["catalog"]; allowlist: string[] } | undefined;
+  if (harnesses.includes("pi")) {
+    piDeployment = loadEvalPiDeployment();
+    resolveEvalPiRoute(piDeployment);
+  }
+  let preexisting: string[] = [];
+  try {
+    const current = await readFile(join(opts.outDir, "results.jsonl"), "utf8");
+    preexisting = current.split("\n").filter((line) => line.trim().length > 0);
+  } catch {
+    preexisting = [];
+  }
   const records: ReviewEvalRecord[] = [];
   const lines: string[] = [];
+  const runId = `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
   const flush = async () => {
-    await writeFile(join(opts.outDir, "results.jsonl"), `${lines.join("\n")}\n`);
+    await writeReviewEvalRecords(opts.outDir, preexisting, lines, runId);
   };
-  for (const fixture of opts.fixtures) {
-    for (const half of opts.halves) {
-      for (const runner of opts.runners) {
-        for (let trial = 1; trial <= opts.trials; trial++) {
-          let record: ReviewEvalRecord;
-          try {
-            record = await runReviewEvalCase({
-              fixture,
-              half,
-              runner,
-              trial,
-              workdirRoot: opts.workdirRoot,
-              homeRoot: opts.homeRoot,
-              ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
-              ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
-              logger: log,
-            });
-          } catch (err) {
-            const message = errorMessage(err);
-            record = {
-              fixture: fixture.name,
-              half,
-              runner: runner.name,
-              runnerStamp: formatRunnerStamp(runnerStamp(runner)),
-              trial,
-              verdict: "inconclusive",
-              failedAssertions: [],
-              reviewState: "skip",
-              findingsCount: 0,
-              blockingCount: 0,
-              rawMarkdown: "",
-              contract: REVIEW_EVAL_CONTRACT,
-              treeClean: true,
-              maintainerHolds: true,
-              baseSha: "unknown",
-              headSha: "unknown",
-              durationMs: 0,
-              inconclusiveReason: `harness crash: ${message}`,
-              jobReason: message,
-            };
+  for (const harness of harnesses) {
+    for (const fixture of opts.fixtures) {
+      for (const half of opts.halves) {
+        for (const runner of opts.runners) {
+          for (let trial = 1; trial <= opts.trials; trial++) {
+            let record: ReviewEvalRecord;
+            try {
+              record = await runReviewEvalCase({
+                fixture,
+                half,
+                runner,
+                trial,
+                workdirRoot: opts.workdirRoot,
+                homeRoot: opts.homeRoot,
+                ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
+                ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+                logger: log,
+                harness,
+                ...(piDeployment ? { piDeployment } : {}),
+                ...(opts.piSessionDepsFor ? { piSessionDepsFor: opts.piSessionDepsFor } : {}),
+                ...(opts.piInvokeForRoute && harness === "pi" && piDeployment
+                  ? { piInvoke: opts.piInvokeForRoute(piDeployment.allowlist[0]!) }
+                  : {}),
+              });
+            } catch (err) {
+              const message = errorMessage(err);
+              record = {
+                fixture: fixture.name,
+                harness,
+                half,
+                runner: harness === "pi" && piDeployment ? `pi:${piDeployment.allowlist[0]}` : runner.name,
+                runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+                trial,
+                verdict: "inconclusive",
+                failedAssertions: [],
+                reviewState: "skip",
+                findingsCount: 0,
+                blockingCount: 0,
+                rawMarkdown: "",
+                contract: REVIEW_EVAL_CONTRACT,
+                treeClean: true,
+                maintainerHolds: true,
+                baseSha: "unknown",
+                headSha: "unknown",
+                durationMs: 0,
+                usage: null,
+                imageDigest: evalImageDigest(),
+                effectiveModel: runner.model,
+                route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
+                payer: null,
+                pool: null,
+                outcome: "provider-failure",
+                inconclusiveReason: `harness crash: ${message}`,
+                jobReason: message,
+              };
+            }
+            records.push(record);
+            lines.push(JSON.stringify(record));
+            await flush();
           }
-          records.push(record);
-          lines.push(JSON.stringify(record));
-          await flush();
         }
       }
     }
@@ -814,14 +1299,20 @@ function printReviewEvalHelp(): void {
 without publishing. Operator-run only; nothing is scheduled.
 
 Usage:
-  bun run src/review_eval.ts --out <output-dir> [--fixture <name>] [--half defective|repaired] [--runners <name1,name2>] [--trials <n>]
+  bun run src/review_eval.ts --out <output-dir> [--fixture <name>] [--half defective|repaired] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi]
 
 Fixtures are committed under src/eval_fixtures/<name>/. Each record in
-<out>/results.jsonl carries fixture, half, runner, trial, verdict
+<out>/results.jsonl carries fixture, harness (legacy|pi), half, runner, trial, verdict
 (pass / fail / inconclusive), failed assertion names, the recorded review
 state (success / failure), finding counts, the required-contract marker,
-tree-clean and maintainer-hold checks, and duration. Auth, quota,
+tree-clean and maintainer-hold checks, duration, image digest, effective model,
+payer/route, wall time and usage (null when unknown). Auth, quota,
 timeouts and harness crashes record inconclusive, never fail.
+The legacy baseline runs exactly one explicitly selected runner (via --runners)
+from a minimal catalog holding only that runner, with no fallback.
+A Pi run needs JUMI_PI_PROFILES_FILE plus JUMI_PI_ALLOWED_ROUTES naming the
+wired Go route; the fake forge reports the repo as public and allowedFetchHosts
+is just that endpoint.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
@@ -831,6 +1322,7 @@ function parseReviewEvalArgs(argv: string[]): {
   half?: ReviewEvalHalf;
   runners?: string[];
   trials: number;
+  harness?: string;
   help: boolean;
 } {
   let out: string | undefined;
@@ -838,6 +1330,7 @@ function parseReviewEvalArgs(argv: string[]): {
   let half: ReviewEvalHalf | undefined;
   let runners: string[] | undefined;
   let trials = 1;
+  let harness: string | undefined;
   let help = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -871,28 +1364,15 @@ function parseReviewEvalArgs(argv: string[]): {
     } else if (arg.startsWith("--trials=")) {
       const parsed = Number.parseInt(arg.slice("--trials=".length), 10);
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
-    } else if (arg === "--") break;
+    } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
+    else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
+    else if (arg === "--") break;
   }
-  return { out, fixture, runners, trials, help, ...(half ? { half } : {}) };
+  return { out, fixture, runners, trials, harness, help, ...(half ? { half } : {}) };
 }
 
 function loadReviewEvalCliRunners(runnerNames: string[] | undefined): NamedRunner[] {
-  const env = process.env as Record<string, string | undefined>;
-  const fromEnv = {
-    model: env.OPENCODE_MODEL?.trim() ? env.OPENCODE_MODEL : "openai/gpt-5.5",
-    ...(env.OPENCODE_VARIANT ? { variant: env.OPENCODE_VARIANT } : {}),
-    ...(env.OPENCODE_FALLBACK_MODEL ? { fallbackModel: env.OPENCODE_FALLBACK_MODEL } : {}),
-    ...(env.OPENCODE_FALLBACK_VARIANT ? { fallbackVariant: env.OPENCODE_FALLBACK_VARIANT } : {}),
-  };
-  const catalog = loadRunnersCatalog(env.JUMI_RUNNERS_FILE, fromEnv, "gitea");
-  const ordered = orderedRunners(catalog);
-  if (!runnerNames || runnerNames.length === 0) return ordered;
-  const byName = new Map(ordered.map((runner) => [runner.name, runner]));
-  return runnerNames.map((name) => {
-    const found = byName.get(name);
-    if (!found) throw new Error(`Unknown runner ${name} (chain: ${ordered.map((r) => r.name).join(", ")})`);
-    return found;
-  });
+  return loadEvalLegacyRunners(runnerNames);
 }
 
 async function main(): Promise<void> {
@@ -913,9 +1393,11 @@ async function main(): Promise<void> {
     fixtures.push(await loadReviewEvalFixture(name));
   }
   const runners = loadReviewEvalCliRunners(args.runners);
+  const harnesses = parseEvalHarness(args.harness);
   const halves: ReviewEvalHalf[] = args.half ? [args.half] : ["defective", "repaired"];
   const workdirRoot = join(env.WORKDIR ?? "/work", "jumi-review-eval");
   const homeRoot = env.HOME?.trim() ? env.HOME : "/data";
+  await ensureEvalRoots([workdirRoot, join(homeRoot, "jumi-review-eval-homes")]);
   const records = await runReviewEval({
     fixtures,
     halves,
@@ -924,9 +1406,12 @@ async function main(): Promise<void> {
     outDir: args.out,
     workdirRoot,
     homeRoot: join(homeRoot, "jumi-review-eval-homes"),
+    harnesses,
     logger: (message) => console.log(`[review-eval] ${message}`),
   });
-  const summary = records.map((r) => `${r.fixture}/${r.half}/${r.runner}#${r.trial}:${r.verdict}`).join(" ");
+  const summary = records
+    .map((r) => `${r.fixture}/${r.half}/${r.harness}/${r.runner}#${r.trial}:${r.verdict}`)
+    .join(" ");
   console.log(`[review-eval] done: ${records.length} records -> ${args.out}/results.jsonl ${summary}`);
 }
 
