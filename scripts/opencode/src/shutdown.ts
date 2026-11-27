@@ -12,7 +12,7 @@ export async function releaseLeaseOnShutdown(
   try {
     const current = await store.get(id);
     if (current && current.leasedBy !== leasedBy) return;
-    const released = await store.releaseLease(id, leasedBy);
+    const released = await store.shutdownRelease(id, leasedBy);
     if (released) {
       logger(`released ${jobKey} on shutdown`);
     } else {
