@@ -1,0 +1,5 @@
+{
+  "title": "Add notifyAll helper",
+  "body": "Adds `notifyAll(users, send)` for fan-out notifications.\n\nStated case: `notifyAll` awaits every `send` and surfaces a `send` failure to the caller (a rejection from `send(user)` must not be lost).",
+  "author": "alice"
+}

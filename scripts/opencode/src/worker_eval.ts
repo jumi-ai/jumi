@@ -61,6 +61,11 @@ export interface WorkerEvalRecord {
   inconclusiveReason?: string;
 }
 
+export interface WorkerEvalExpected {
+  closingKeyword: "fixes" | "refs";
+  minRemaining: number;
+}
+
 export interface LoadedWorkerEvalFixture {
   name: string;
   owner: string;
@@ -72,10 +77,41 @@ export interface LoadedWorkerEvalFixture {
   hiddenCheck: string;
   dir: string;
   repoDir: string;
+  expected?: WorkerEvalExpected;
 }
 
 function fixtureBaseDir(): string {
   return join(dirname(new URL(import.meta.url).pathname), "eval_fixtures");
+}
+
+export function parseWorkerEvalExpected(raw: unknown): WorkerEvalExpected | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as { closingKeyword?: unknown; minRemaining?: unknown };
+  if (record.closingKeyword !== "fixes" && record.closingKeyword !== "refs") return undefined;
+  const minRemaining =
+    typeof record.minRemaining === "number" && Number.isFinite(record.minRemaining) && record.minRemaining >= 0
+      ? Math.floor(record.minRemaining)
+      : 0;
+  return { closingKeyword: record.closingKeyword, minRemaining };
+}
+
+export function workerEvalClosingFailures(
+  closingKeyword: "fixes" | "refs" | "none",
+  remaining: string[],
+  expected?: WorkerEvalExpected
+): string[] {
+  if (!expected) {
+    const failed: string[] = [];
+    if (closingKeyword !== "fixes") failed.push("closing-keyword");
+    if (remaining.length !== 0) failed.push("remaining-empty");
+    return failed;
+  }
+  const failed: string[] = [];
+  if (closingKeyword !== expected.closingKeyword) failed.push("closing-keyword");
+  if (expected.minRemaining > 0 ? remaining.length < expected.minRemaining : remaining.length !== 0) {
+    failed.push("remaining-empty");
+  }
+  return failed;
 }
 
 export async function loadWorkerEvalFixture(name: string, baseDir?: string): Promise<LoadedWorkerEvalFixture> {
@@ -88,10 +124,12 @@ export async function loadWorkerEvalFixture(name: string, baseDir?: string): Pro
     repo: string;
     issueNumber: number;
     defaultBranch: string;
+    expected?: unknown;
   };
   const issueRaw = await readFile(join(dir, "issue.json"), "utf8");
   const issue = JSON.parse(issueRaw) as { title: string; body: string };
   const hiddenCheck = await readFile(join(dir, "hidden_check.sh"), "utf8");
+  const expected = parseWorkerEvalExpected(fixture.expected);
   return {
     name: fixture.name,
     owner: fixture.owner,
@@ -103,6 +141,7 @@ export async function loadWorkerEvalFixture(name: string, baseDir?: string): Pro
     hiddenCheck,
     dir,
     repoDir: join(dir, "repo"),
+    ...(expected ? { expected } : {}),
   };
 }
 
@@ -474,9 +513,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         }
       }
 
-      const failedAssertions: string[] = [];
-      if (closingKeyword !== "fixes") failedAssertions.push("closing-keyword");
-      if (remaining.length !== 0) failedAssertions.push("remaining-empty");
+      const failedAssertions: string[] = workerEvalClosingFailures(closingKeyword, remaining, opts.fixture.expected);
       if (hiddenCheckStatus !== "pass") failedAssertions.push("hidden-check");
       if (!noSentinels) failedAssertions.push("no-sentinels");
 

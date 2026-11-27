@@ -1,0 +1,10 @@
+{
+  "defective": {
+    "anchors": [{ "path": "notify.js", "start": 2, "end": 2 }],
+    "mustContain": ["send(user)", "unhandled"],
+    "note": "The missing await is on notify.js:2. A blocking finding on line 2 counts; the text must name the concrete failure (send(user) rejection is unhandled/lost), not only \"check this\"."
+  },
+  "repaired": {
+    "forbiddenSeverities": ["bug", "risk"]
+  }
+}

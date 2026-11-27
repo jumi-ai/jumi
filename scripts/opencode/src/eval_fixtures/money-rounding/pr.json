@@ -1,0 +1,5 @@
+{
+  "title": "Add cartTotal helper",
+  "body": "Adds `cartTotal(items)` for checkout totals.\n\nStated case: `cartTotal([{price: 0.1}, {price: 0.2}])` is `0.3`.",
+  "author": "alice"
+}

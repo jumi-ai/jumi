@@ -1,0 +1,4 @@
+{
+  "title": "Add --shout flag to the greet CLI",
+  "body": "## Problem\n\nThe `greet` CLI always whispers. We need an opt-in loud mode for announcements.\n\n## Done when\n\n- `greet(\"Ada\", { shout: true })` returns `\"HELLO, ADA!\"` and `greet(\"Ada\")` still returns `\"Hello, Ada!\"`\n- `node cli.js Ada --shout` prints `HELLO, ADA!` and `node cli.js Ada` prints `Hello, Ada!`\n- `node check.js` passes\n"
+}

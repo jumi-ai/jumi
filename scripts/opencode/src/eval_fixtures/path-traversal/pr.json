@@ -1,0 +1,5 @@
+{
+  "title": "Add filePath helper",
+  "body": "Adds `filePath(baseDir, name)` for user downloads.\n\nStated case: a name like `../secret` must never resolve outside the base directory (`filePath(\"/srv/files\", \"../secret\")` stays inside `/srv/files`).",
+  "author": "alice"
+}
