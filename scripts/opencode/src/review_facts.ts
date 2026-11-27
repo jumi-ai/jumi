@@ -895,13 +895,7 @@ function typedCarryInlineLine(
   body: string | null | undefined,
   marker: string
 ): string | undefined {
-  const trimmedPath = (path ?? "").trim();
-  if (!trimmedPath) return undefined;
-  const raw = body ?? "";
-  if (!raw.includes(marker)) return undefined;
-  const text = raw.split(marker).join("").replace(/\s+/g, " ").trim();
-  if (!text) return undefined;
-  return line > 0 ? `${trimmedPath}:${line}: ${text}` : `${trimmedPath}: ${text}`;
+  return carryInlineLine({ path, new_position: line > 0 ? line : null, body }, marker);
 }
 
 interface VerifiedInline {
