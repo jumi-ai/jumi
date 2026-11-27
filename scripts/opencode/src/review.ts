@@ -104,6 +104,13 @@ import { collectRecentHistory } from "./review_history.ts";
 import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import {
+  attachPostPullReviewMeta,
+  attachStickyReviewMeta,
+  type ReviewMetaPublishOpts,
+  resolvePublishMeta,
+  withMetaBase,
+} from "./review_meta.ts";
+import {
   countAddressedSuggestions,
   forgeLabelForKind,
   parseSuggestionFindings,
@@ -281,6 +288,8 @@ export interface ReviewOptions {
   timeoutMs?: number;
   /** Deployer maximum for repository `setup` runs. Unset falls back to `SETUP_TIMEOUT_MAX_MS`. */
   setupTimeoutMaxMs?: number;
+  /** Signed summary block inputs (secret, identity). Unset writes no block. */
+  meta?: ReviewMetaPublishOpts;
   /** Injectable setup script runner (tests stub the shell). Defaults to spawning `sh -e`. */
   repoSetupRunScript?: RepoSetupRunScript;
   maxFiles?: number;
@@ -436,6 +445,8 @@ export interface PublishReviewOptions {
   reviewRound?: number;
   /** Writer runner for the recorded rows. Defaults to empty. */
   writerRunner?: string | null;
+  /** Signed summary block inputs (secret, identity, store record). Absent writes no block. */
+  meta?: ReviewMetaPublishOpts;
 }
 
 const encoder = new TextEncoder();
@@ -705,6 +716,8 @@ async function postPullReview(opts: {
   runner?: string | null;
   singleFilePath?: string;
   log: (message: string) => void;
+  /** Signed summary block inputs (secret, identity, store findings). Absent writes no block. */
+  meta?: ReviewMetaPublishOpts;
 }): Promise<boolean> {
   const findings = parseReviewFindings(opts.comment, { singleFilePath: opts.singleFilePath });
 
@@ -805,12 +818,13 @@ async function postPullReview(opts: {
   }
 
   let urls = inlineUrlsByFingerprint(existing, opts.marker);
+  let published: InlineComment[] = existing;
   if (comments.length > 0) {
     try {
       // Re-fetch the review list here instead of reusing the pre-create
       // `reviews`: the review just created above has a new id whose inline
       // `html_url`s would otherwise be missing from the published read.
-      const published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
+      published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
       urls = inlineUrlsByFingerprint(published, opts.marker);
     } catch (err) {
       opts.log(`inline urls unavailable: ${errorMessage(err)}`);
@@ -823,12 +837,10 @@ async function postPullReview(opts: {
   const failed = stripFindingLines(opts.comment, { singleFilePath: opts.singleFilePath, posted });
   const list = buildFindingsList(findings, urls);
   const content = [list, failed].filter((part) => part.trim()).join("\n\n");
+  const topBody = buildCommentBody(opts.marker, opts.headSha, content, opts.checkLine, opts.runner);
+  const finalBody = attachPostPullReviewMeta({ ...opts, topBody, findings, posted, published });
   try {
-    await createWithFallback(
-      opts.event,
-      [],
-      buildCommentBody(opts.marker, opts.headSha, content, opts.checkLine, opts.runner)
-    );
+    await createWithFallback(opts.event, [], finalBody);
     return true;
   } catch (err) {
     opts.log(`review event skipped: ${errorMessage(err)}`);
@@ -1998,6 +2010,17 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     });
   }
   const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, publishedCheckLine, opts.resultRunner);
+  // Writer-only signed summary block (slice 977): typed facts plus a
+  // parent-minted key per finding, HMAC-signed. Suppression keeps publication
+  // otherwise unchanged.
+  const metaBase = withMetaBase(
+    opts.meta,
+    effectiveVerdict.state,
+    pr.user?.login,
+    blockingQuestionAuthors,
+    !parsed.verdict.incomplete,
+    capped.dropped
+  );
 
   let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
@@ -2017,6 +2040,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         runner: opts.resultRunner,
         singleFilePath,
         log,
+        meta: metaBase,
       });
       if (landed) result = { status: "posted" };
     } catch (err) {
@@ -2025,6 +2049,20 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
 
   if (!result) {
+    const stickyWithMeta = attachStickyReviewMeta({
+      meta: metaBase,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: pr.number,
+      headSha: opts.expectedHeadSha,
+      marker,
+      botUsername: opts.botUsername,
+      state: effectiveVerdict.state,
+      stickyBody,
+      comment,
+      ...(singleFilePath ? { singleFilePath } : {}),
+      log,
+    });
     await logParentDiag(log, "post_find_sticky", {
       review: reviewLabel,
       body_bytes: byteLength(stickyBody),
@@ -2038,11 +2076,11 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     });
     if (existing) {
       await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
-      const updated = await forgeApi.updateIssueComment(opts.owner, opts.repo, existing.id, stickyBody);
+      const updated = await forgeApi.updateIssueComment(opts.owner, opts.repo, existing.id, stickyWithMeta);
       result = { status: "updated", commentId: updated.id };
     } else {
       await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-      const created = await forgeApi.createIssueComment(opts.owner, opts.repo, pr.number, stickyBody);
+      const created = await forgeApi.createIssueComment(opts.owner, opts.repo, pr.number, stickyWithMeta);
       result = { status: "posted", commentId: created.id };
     }
   }
@@ -3142,8 +3180,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       // redaction, the no-CI note, or the trailer repair branch) means the
       // persisted markdown no longer matches the record, so persist no
       // record: a stored record must never disagree with the stored markdown.
+      // The signed summary block follows the same rule: post-processing
+      // suppresses it rather than signing text the store did not produce.
       const record = gated === markdown ? verdictStore.toRecord() : undefined;
-      return await publishMarkdownVerdict(gated, record);
+      return await publishMarkdownVerdict(gated, record, record !== undefined);
     };
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     // A stale JUMI_REVIEW.md planted before this run must not count as this
@@ -3169,7 +3209,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     };
     // Shared publish tail for the MCP-verdict and file-artifact branches:
     // gated markdown in, quota-state bookkeeping and forge publish out.
-    const publishMarkdownVerdict = async (gatedMarkdown: string, record?: ReviewRecord): Promise<ReviewResult> => {
+    const publishMarkdownVerdict = async (gatedMarkdown: string, record?: ReviewRecord, exactText?: boolean) => {
       await persistOutcome({
         kind: "markdown",
         markdown: gatedMarkdown,
@@ -3217,6 +3257,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         ...(opts.reviewRound !== undefined ? { reviewRound: opts.reviewRound } : {}),
         ...(writerRunner ? { writerRunner } : {}),
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
+        meta: resolvePublishMeta({
+          meta: opts.meta,
+          ...(opts.giteaUrl ? { giteaUrl: opts.giteaUrl } : {}),
+          ...(opts.jobId ? { jobId: opts.jobId } : {}),
+          ...(record ? { record } : {}),
+          ...(exactText !== undefined ? { exactText } : {}),
+        }),
       });
     };
     try {
