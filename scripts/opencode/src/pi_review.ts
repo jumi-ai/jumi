@@ -38,13 +38,19 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
-  createExtensionRuntime,
   type ResourceLoader,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineFailedError } from "./engine.ts";
+import {
+  collectPiCodemodeCalls,
+  createTrustedPiLoaderWithCodemode,
+  findCodemodeEscape,
+  PI_CODEMODE_TOOL_NAME,
+  withPiCodemodeScratch,
+} from "./pi_codemode.ts";
 import {
   allowUnsandboxedReviews,
   ensureSandboxedShellHome,
@@ -86,24 +92,16 @@ export function resolvePiVerdictContract(explicit?: ReviewVerdictContract | null
   return REVIEW_VERDICT_CONTRACT_REQUIRED;
 }
 
-/** Trusted loader: no discovery of any kind. Everything is explicit. */
+/** Trusted loader: no discovery, plus the one deliberate built-in exception. */
 export function createTrustedPiResourceLoader(baseInstructions?: string): ResourceLoader {
   const systemPrompt = baseInstructions?.trim()
     ? `${PI_REVIEW_SYSTEM_PREAMBLE}\n\n<base_instructions>\n${baseInstructions.trim()}\n</base_instructions>`
     : PI_REVIEW_SYSTEM_PREAMBLE;
-  return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {},
-    reload: async () => {},
-  };
+  // The codemode extension is the only exception to "no extensions": an
+  // inline factory with `models: false`, so `builtin:mcp` and
+  // `builtin:tool-search` stay off and no project/head, user, or global Pi
+  // settings, hooks, packages, or MCP servers load (see `pi_codemode.ts`).
+  return createTrustedPiLoaderWithCodemode(systemPrompt);
 }
 
 /** In-memory settings: no telemetry, no update checks, no packages, no retries. */
@@ -115,7 +113,8 @@ export function createPiReviewSettings(): SettingsManager {
     enableInstallTelemetry: false,
     packages: [],
     extensions: [],
-    defaultTools: ["read", "bash", ...PI_REVIEW_TOOL_NAMES],
+    codemode: { mode: "on" },
+    defaultTools: ["read", "bash", PI_CODEMODE_TOOL_NAME, ...PI_REVIEW_TOOL_NAMES],
   } as Parameters<typeof SettingsManager.inMemory>[0]);
 }
 
@@ -620,31 +619,45 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
 
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
-    const created = await createAgentSession({
-      cwd: opts.workdir,
-      agentDir,
-      model: opts.model as never,
-      modelRuntime: opts.modelRuntime as never,
-      resourceLoader,
-      tools: ["read", "bash", ...PI_REVIEW_TOOL_NAMES],
-      customTools: [
-        ...createPiReviewCustomTools(opts.store, (record) => toolCalls.push(record)),
-        guardedBash,
-        guardedRead,
-      ] as never[],
-      sessionManager,
-      settingsManager,
-    });
+    const created = await withPiCodemodeScratch(scratchDir, () =>
+      createAgentSession({
+        cwd: opts.workdir,
+        agentDir,
+        model: opts.model as never,
+        modelRuntime: opts.modelRuntime as never,
+        resourceLoader,
+        tools: ["read", "bash", PI_CODEMODE_TOOL_NAME, ...PI_REVIEW_TOOL_NAMES],
+        customTools: [
+          ...createPiReviewCustomTools(opts.store, (record) => toolCalls.push(record)),
+          guardedBash,
+          guardedRead,
+        ] as never[],
+        sessionManager,
+        settingsManager,
+      })
+    );
     session = created.session;
     const running = created.session;
     const active = new Set(session.getActiveToolNames());
-    for (const required of ["read", "bash", ...PI_REVIEW_TOOL_NAMES]) {
+    for (const required of ["read", "bash", PI_CODEMODE_TOOL_NAME, ...PI_REVIEW_TOOL_NAMES]) {
       if (!active.has(required)) {
         throw new EngineFailedError(`pi review refused: required tool not active: ${required}`, false);
       }
     }
     if (active.has("edit") || active.has("write")) {
       throw new EngineFailedError("pi review refused: write tools must stay disabled", false);
+    }
+    // Only the role's tools plus codemode are callable. `builtin:mcp` and
+    // `builtin:tool-search` stay off: no MCP or search tool may be active.
+    for (const extra of ["tool_search", "grep", "find", "ls", "powershell"]) {
+      if (active.has(extra)) {
+        throw new EngineFailedError(`pi review refused: non-role tool active: ${extra}`, false);
+      }
+    }
+    for (const name of active) {
+      if (name.startsWith("mcp__") || name.startsWith("mcp_")) {
+        throw new EngineFailedError(`pi review refused: non-role tool active: ${name}`, false);
+      }
     }
 
     // `session.prompt` takes no signal: cancellation is `session.abort()`.
@@ -669,11 +682,36 @@ export async function runPiReviewAttempt(opts: PiReviewAttemptOptions): Promise<
     }
     try {
       if (!callerAborted) {
-        await running.prompt(opts.prompt);
+        // Codemode spill/image files use `os.tmpdir()`: keep TMPDIR pointed
+        // at job-owned scratch so they never land in the diff or outside
+        // the write roots. Cancelling aborts the session, which aborts the
+        // running script and its in-flight nested calls.
+        await withPiCodemodeScratch(scratchDir, () => running.prompt(opts.prompt));
       }
     } finally {
       clearTimeout(timer);
       opts.abortSignal?.removeEventListener("abort", onAbort);
+    }
+    // Codemode outer calls are extension tools, not guarded custom tools, so
+    // record them from the branch for telemetry and evidence. Nested calls
+    // are already in `toolCalls` via the guarded tools' `onCall`.
+    try {
+      const codemodeCalls = collectPiCodemodeCalls(sessionManager.getBranch() as readonly unknown[]);
+      for (const call of codemodeCalls) {
+        toolCalls.push({ name: call.name, args: call.args, ok: call.ok, text: call.text });
+      }
+      const escapedPath = findCodemodeEscape(codemodeCalls, scratchDir, opts.workdir);
+      if (escapedPath) {
+        return {
+          status: "incomplete",
+          markdown: opts.store.toMarkdown(),
+          reason: `Incomplete review: codemode file write escaped scratch: ${escapedPath.slice(0, 120)}`,
+          destinations,
+          toolCalls,
+        };
+      }
+    } catch {
+      // Evidence collection never fails the attempt.
     }
     if (callerAborted) {
       return {

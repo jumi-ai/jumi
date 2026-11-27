@@ -29,7 +29,9 @@
  *      the task prompt. The expected sets are declared here, never derived
  *      from the registration, so dropping a tool from one intent's
  *      registration fails the probe. Only the guarded built-ins
- *      (`read`, `bash`, `edit`, `write`) may appear alongside.
+ *      (`read`, `bash`, `edit`, `write`) plus `codemode` in `on` mode may
+ *      appear alongside (`codemode` must be present; `only` mode, which
+ *      hides the direct tools, fails).
  *   2. Round trip: a wire-format call for `jumi_add_finding` then
  *      `jumi_set_verdict` (review) and `jumi_set_pr_body` (each worker
  *      intent) is parsed, executed, and lands in the parent's store; the
@@ -88,7 +90,7 @@ export const WORKER_EXPECTED_JUMI_TOOLS: Record<string, readonly string[]> = {
 };
 
 /** Guarded built-ins that may appear alongside the `jumi_*` tools. */
-export const EXPECTED_BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
+export const EXPECTED_BUILTIN_TOOLS = ["read", "bash", "edit", "write", "codemode"] as const;
 
 export interface WireToolContract {
   /** Fields the wire schema must require. */
@@ -170,6 +172,13 @@ export function checkWireTools(tools: unknown, expectedJumi: readonly string[]):
     if (!(EXPECTED_BUILTIN_TOOLS as readonly string[]).includes(name)) {
       return `unexpected non-jumi tool on the wire: ${name}`;
     }
+  }
+  // Codemode is the one deliberate built-in exception: it must be declared
+  // in `on` mode alongside the role's direct tools, never as the only tool.
+  // `only` mode would hide the direct tools from the wire; the probe fails
+  // when codemode is missing.
+  if (!byName.has("codemode")) {
+    return "wire is missing the codemode tool (expected on mode)";
   }
   return null;
 }
