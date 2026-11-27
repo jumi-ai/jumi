@@ -291,6 +291,10 @@ describe("review eval", () => {
       expect(record.verdict).toBe("pass");
       expect(capture.hasMcp).toBe(true);
       expect(capture.contract).toBe("required");
+      expect(capture.baseDir).toBeTruthy();
+      expect(capture.baseDir ?? "").toContain("base-instructions");
+      const stagedSkill = await readFile(join(capture.baseDir ?? "", "skills", "review-proof", "SKILL.md"), "utf8");
+      expect(stagedSkill).toContain("Prove each blocking finding");
       expect(capture.taskHas?.files).toBe(true);
       expect(capture.taskHas?.mcp).toBe(true);
       expect(capture.taskHas?.reviewMd).toBe(true);

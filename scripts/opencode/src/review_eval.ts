@@ -516,6 +516,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
           reviewLabel: `review-eval:${opts.fixture.name}:${opts.half}:${opts.runner.name}`,
           logger: log,
           trace: { kind: "review", owner: opts.fixture.owner, repo: opts.fixture.repo, sha: headSha },
+          baseInstructionsDir,
           reviewMcp: { url: reviewMcpServer.url, token: reviewMcpToken },
           verdictContract: REVIEW_EVAL_CONTRACT,
         });
