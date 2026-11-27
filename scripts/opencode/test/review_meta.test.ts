@@ -7,6 +7,7 @@ import { parseLastCheckTrailer } from "../src/review_facts.ts";
 import {
   assembleReviewMeta,
   attachReviewMeta,
+  attachStickyReviewMeta,
   buildMetaAssembleFindings,
   buildReviewMetaBlock,
   countReviewMetaBlocks,
@@ -34,6 +35,7 @@ import {
   REVIEW_META_MAX_BYTES,
   REVIEW_META_VERSION,
   resetReviewMetaNoSecretLog,
+  resolvePublishMeta,
   sha256Hex,
   signMetaPayload,
   storeFindingForMeta,
@@ -975,6 +977,66 @@ describe("review meta publication", () => {
     expect(bodies).toHaveLength(1);
     expect(countReviewMetaBlocks(bodies[0] ?? "")).toBe(1);
     expect(verifyReviewMeta(bodies[0] ?? "", SECRET, { state: "failure" }).ok).toBe(true);
+  });
+
+  test("live-path merge defaults giteaUrl/jobId under explicit meta", () => {
+    const resolved = resolvePublishMeta({
+      meta: { webhookSecret: SECRET },
+      giteaUrl: "https://gitea.example.com",
+      jobId: "job-1",
+    });
+    expect(resolved).toMatchObject({
+      webhookSecret: SECRET,
+      giteaUrl: "https://gitea.example.com",
+      jobId: "job-1",
+    });
+  });
+
+  test("explicit meta wins over top-level giteaUrl/jobId", () => {
+    const resolved = resolvePublishMeta({
+      meta: { webhookSecret: SECRET, giteaUrl: "https://other.example.com", jobId: "row-9" },
+      giteaUrl: "https://gitea.example.com",
+      jobId: "job-1",
+    });
+    expect(resolved).toMatchObject({ giteaUrl: "https://other.example.com", jobId: "row-9" });
+  });
+
+  test("live-path merged meta signs under the forge-host identity with job-scoped keys", () => {
+    const comment = "src/a.ts:12: 🔴 bug: x.";
+    const trailer = "<!-- jumi-check: failure -->";
+    const resolved = resolvePublishMeta({
+      meta: { webhookSecret: SECRET },
+      giteaUrl: "https://gitea.example.com",
+      jobId: "job-1",
+    });
+    const sticky = attachStickyReviewMeta({
+      meta: resolved,
+      owner: OWNER,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      marker: MARKER,
+      botUsername: "jumi",
+      state: "failure",
+      stickyBody: topBody(comment, trailer),
+      comment,
+      log: () => undefined,
+    });
+    expect(countReviewMetaBlocks(sticky)).toBe(1);
+    const verified = verifyReviewMeta(sticky, SECRET, {
+      forgeIdentity: "gitea.example.com/jumi",
+      owner: OWNER,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      state: "failure",
+    });
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) return;
+    expect(verified.payload.forge).toBe("gitea.example.com/jumi");
+    expect(verified.payload.findings[0]?.k).toBe("k_job-1_1");
+    // The old fallback identity must not verify: this is the live-path bug.
+    expect(verifyReviewMeta(sticky, SECRET, { forgeIdentity: "gitea/jumi" }).ok).toBe(false);
   });
 });
 

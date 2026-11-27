@@ -877,6 +877,30 @@ export function withMetaBase(
   };
 }
 
+/**
+ * Merge the top-level review opts (`giteaUrl` / `jobId`) under an explicit
+ * `meta` value so a caller that threads the identity and key namespace only
+ * at the top level still signs under the documented `<forge-host>/<bot>`
+ * identity with fresh per-publication keys. An explicit `meta` value wins
+ * over the top-level default. `record` / `exactText` are forwarded the same
+ * way so every `publishMarkdownVerdict` caller shares one merge order.
+ */
+export function resolvePublishMeta(args: {
+  meta?: ReviewMetaPublishOpts;
+  giteaUrl?: string;
+  jobId?: string;
+  record?: ReviewRecord;
+  exactText?: boolean;
+}): ReviewMetaPublishOpts {
+  return {
+    ...(args.giteaUrl ? { giteaUrl: args.giteaUrl } : {}),
+    ...(args.jobId ? { jobId: args.jobId } : {}),
+    ...(args.meta ?? {}),
+    ...(args.record ? { record: args.record } : {}),
+    ...(args.exactText !== undefined ? { exactText: args.exactText } : {}),
+  };
+}
+
 /** Sticky (top-level comment) publication entry: every block is a body placement. */
 export function attachStickyReviewMeta(args: {
   meta?: ReviewMetaPublishOpts;

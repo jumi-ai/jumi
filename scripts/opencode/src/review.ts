@@ -107,6 +107,7 @@ import {
   attachPostPullReviewMeta,
   attachStickyReviewMeta,
   type ReviewMetaPublishOpts,
+  resolvePublishMeta,
   withMetaBase,
 } from "./review_meta.ts";
 import {
@@ -3256,18 +3257,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         ...(opts.reviewRound !== undefined ? { reviewRound: opts.reviewRound } : {}),
         ...(writerRunner ? { writerRunner } : {}),
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
-        meta: {
-          // Default the signing identity and key namespace from the
-          // top-level review opts so a caller that threads `giteaUrl` /
-          // `jobId` only at the top level still signs under the documented
-          // `<forge-host>/<bot>` identity with fresh per-publication keys.
-          // An explicit `opts.meta` value wins over the default.
+        meta: resolvePublishMeta({
+          meta: opts.meta,
           ...(opts.giteaUrl ? { giteaUrl: opts.giteaUrl } : {}),
           ...(opts.jobId ? { jobId: opts.jobId } : {}),
-          ...(opts.meta ?? {}),
           ...(record ? { record } : {}),
           ...(exactText !== undefined ? { exactText } : {}),
-        },
+        }),
       });
     };
     try {
