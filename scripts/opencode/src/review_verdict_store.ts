@@ -247,7 +247,9 @@ function canonicalFindingLine(
  * count). A `❓ maintainer:` buried in the middle of both parts does not
  * count, matching the text parser which only reads the published first line.
  */
-function isMaintainerStoreFinding(finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">): boolean {
+export function isMaintainerStoreFinding(
+  finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">
+): boolean {
   if (finding.severity !== "question") return false;
   // Agreement with the text parser runs on the canonical markdown, not the
   // raw input: each part is canonicalized separately by `toMarkdown()`, so a

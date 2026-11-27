@@ -1,0 +1,10 @@
+{
+  "defective": {
+    "anchors": [{ "path": "eligibility.js", "start": 2, "end": 2 }],
+    "mustContain": ["isAdult(18)", "false"],
+    "note": "The off-by-one is on eligibility.js:2. A blocking finding on line 2 counts; the text must name the concrete failure (isAdult(18) is false), not only \"check this\"."
+  },
+  "repaired": {
+    "forbiddenSeverities": ["bug", "risk"]
+  }
+}

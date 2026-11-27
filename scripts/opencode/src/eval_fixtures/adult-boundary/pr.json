@@ -1,0 +1,5 @@
+{
+  "title": "Add isAdult helper",
+  "body": "Adds `isAdult(age)` for gating adult-only flows.\n\nStated case: an 18-year-old counts as an adult (`isAdult(18)` is true).",
+  "author": "alice"
+}
