@@ -11,6 +11,7 @@ import {
   isMaintainerQuestionsHoldEnabled,
   loadSettingsSnapshot,
 } from "./repo_settings.ts";
+import { buildReviewFacts, describeSuggestionsReason, parseLastCheckTrailer } from "./review_facts.ts";
 import { inlinesForReviewGroup, reviewGroupIds } from "./review_groups.ts";
 import type { SkipLatchKey, SkipLatchStore } from "./skip_latches.ts";
 import {
@@ -21,21 +22,6 @@ import {
 } from "./suggestion_hold.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
-import {
-  blockingOpenQuestionCount,
-  countBugFindings,
-  countMaintainerQuestionFindings,
-  countRiskFindings,
-  countSuggestionFindings,
-  describeSuggestionsReason,
-  isBlockingQuestionAuthor,
-  isBugFindingFirstLine,
-  isMaintainerQuestionInline,
-  isNonMaintainerQuestionInline,
-  isRiskFindingFirstLine,
-  parseCheckLine,
-  parseReviewOutput,
-} from "./verdict.ts";
 
 /**
  * Pure hold-settlement decision for follow-up cleanup.
@@ -206,13 +192,7 @@ const REVIEW_MARKER = "<!-- jumi-review:";
 const REVIEWED_COMMIT_RE = /^Reviewed commit:\s*`([0-9a-fA-F]+)`\s*$/i;
 
 function lastCheckTrailerLocal(body: string): { state: "success" | "failure"; reason: string } | undefined {
-  const lines = body.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    return parseCheckLine(line);
-  }
-  return undefined;
+  return parseLastCheckTrailer(body);
 }
 
 function parseReviewedCommitShaLocal(body: string): string | undefined {
@@ -266,87 +246,6 @@ function isJumiPullReviewWriteupLocal(review: PullReview, botUsername: string): 
   return lastCheckTrailerLocal(body) !== undefined;
 }
 
-function isOpenJumiInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  const body = inline.body ?? "";
-  if (!body.includes(REVIEW_MARKER)) return false;
-  if (typeof botUsername === "string" && botUsername) {
-    if (!loginEquals(inline.user?.login, botUsername)) return false;
-  }
-  return inline.resolved !== true && inline.resolver == null;
-}
-
-function isBlockingQuestionInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
-  return isNonMaintainerQuestionInline(inline.path, inline.body ?? "");
-}
-
-function isBugInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
-  if (typeof inline.path === "string" && inline.path.trim() && isBugFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countBugFindings(body) > 0;
-}
-
-function isRiskInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
-  if (typeof inline.path === "string" && inline.path.trim() && isRiskFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countRiskFindings(body) > 0;
-}
-
-function isMaintainerInlineLocal(inline: InlineComment, botUsername?: string): boolean {
-  if (!isOpenJumiInlineLocal(inline, botUsername)) return false;
-  return isMaintainerQuestionInline(inline.path, inline.body ?? "");
-}
-
-function openBugsForEvidence(body: string, inlines: readonly InlineComment[], botUsername?: string): number {
-  const parsed = parseReviewOutput(body ?? "");
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isBugInlineLocal(inline, botUsername)) inlineCount++;
-  }
-  return countBugFindings(parsed.comment) + inlineCount;
-}
-
-function openRisksForEvidence(body: string, inlines: readonly InlineComment[], botUsername?: string): number {
-  const parsed = parseReviewOutput(body ?? "");
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isRiskInlineLocal(inline, botUsername)) inlineCount++;
-  }
-  return countRiskFindings(parsed.comment) + inlineCount;
-}
-
-function openMaintainersForEvidence(body: string, inlines: readonly InlineComment[], botUsername?: string): number {
-  const trimmed = (body ?? "").trim();
-  if (!trimmed) return 0;
-  if (lastCheckTrailerLocal(body)?.state !== "success") return 0;
-  const parsed = parseReviewOutput(body);
-  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isMaintainerInlineLocal(inline, botUsername)) inlineCount++;
-  }
-  return countMaintainerQuestionFindings(parsed.comment) + inlineCount;
-}
-
-function openBlockingForEvidence(
-  body: string,
-  inlines: readonly InlineComment[],
-  prAuthorLogin: string | undefined | null,
-  blockingAuthors: readonly string[] | undefined | null,
-  botUsername?: string
-): number {
-  if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
-  if (lastCheckTrailerLocal(body)?.state !== "success") return 0;
-  const bodyCount = blockingOpenQuestionCount(body, prAuthorLogin, blockingAuthors);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isBlockingQuestionInlineLocal(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
-}
-
 export interface SettleFollowUpHoldOpts {
   // biome-ignore lint/suspicious/noExplicitAny: forge fakes vary per test.
   api: any;
@@ -371,7 +270,7 @@ export interface SettleFollowUpHoldOpts {
  * the effective policy, the latest Jumi-authored review on that head with its
  * inline group (summary plus empty-body companion), and the held head's
  * current review-context status immediately before deciding; reuses the
- * verdict parsers and inline grouping. Posts `success` only on fresh positive
+ * review-facts classifier and inline grouping. Posts `success` only on fresh positive
  * evidence, otherwise keeps with one log line naming the reason. Never throws.
  */
 export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<void> {
@@ -546,19 +445,19 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
       summaryReview != null ? inlinesForReviewGroup(summaryReview, rawReviews, rawInlines, opts.botUsername) : [];
     const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, rawReviews, opts.botUsername) : [];
 
-    const parsed = parseReviewOutput(reviewBody);
-    const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
-    const openBugs = openBugsForEvidence(reviewBody, reviewInlines, opts.botUsername);
-    const openRisks = openRisksForEvidence(reviewBody, reviewInlines, opts.botUsername);
-    const openBlockingQuestions = openBlockingForEvidence(
-      reviewBody,
-      reviewInlines,
-      livePr.user?.login,
+    const facts = buildReviewFacts({
+      body: reviewBody,
+      inlines: reviewInlines,
+      botUsername: opts.botUsername,
+      prAuthorLogin: livePr.user?.login,
       blockingAuthors,
-      opts.botUsername
-    );
-    const openMaintainers = openMaintainersForEvidence(reviewBody, reviewInlines, opts.botUsername);
-    const openSuggestions = countSuggestionFindings(parsed.comment);
+    });
+    const completeSuccess = !facts.incomplete && facts.state === "success";
+    const openBugs = facts.openBugs;
+    const openRisks = facts.openRisks;
+    const openBlockingQuestions = facts.openBlockingQuestions;
+    const openMaintainers = facts.openMaintainers;
+    const openSuggestions = facts.openSuggestions;
 
     let statusInput: HoldSettlementStatus;
     try {

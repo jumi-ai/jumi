@@ -3,10 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
+import { buildReviewFacts } from "./review_facts.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./skip_why_texts.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
-import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 
 const SAME_ACTION_LIMIT = 4;
 const SAME_ERROR_LIMIT = 3;
@@ -97,10 +97,10 @@ function normalizeFinding(text: string): string {
 
 export function fingerprintReviewArtifact(markdown: string | null | undefined): string | undefined {
   if (!markdown?.trim()) return undefined;
-  const parsed = parseReviewOutput(markdown);
-  if (parsed.verdict.incomplete) return undefined;
-  if (parsed.verdict.state !== "failure") return undefined;
-  const normalized = normalizeFinding(parsed.comment);
+  const facts = buildReviewFacts({ body: markdown });
+  if (facts.incomplete) return undefined;
+  if (facts.state !== "failure") return undefined;
+  const normalized = normalizeFinding(facts.comment);
   if (!normalized) return undefined;
   return hashText(normalized);
 }
@@ -131,132 +131,10 @@ export function fingerprintError(error: string | null | undefined): string | und
   return hashText(normalized);
 }
 
-/**
- * Finding identity for same-finding stuck detection.
- *
- * Identity is location (path plus a line bucket so nearby lines count as the
- * same), severity (blocking only: bug/🔴 or risk/🟡), and a short normalized
- * summary. Per-round notes ("Re-checked on this head ..."), quoted SHAs,
- * markdown, case, punctuation, and word order do not count.
- */
-
-function bucketFindingLine(line: number): number {
-  if (!Number.isSafeInteger(line) || line < 1) return 0;
-  return Math.floor((line - 1) / 5) * 5 + 1;
-}
-
-function severityForIdentity(body: string): "bug" | "risk" | undefined {
-  const text = body.trim().replace(/^(?:[-*]|\d+\.)\s+/, "");
-  const emoji = /^(🔴|🟡)/u.exec(text);
-  if (emoji) return emoji[1] === "🔴" ? "bug" : "risk";
-  const word = /^(bug|risk)\s*:/i.exec(text);
-  if (word) return word[1].toLowerCase() === "bug" ? "bug" : "risk";
-  return undefined;
-}
-
-function stripSeverityPrefix(body: string): string {
-  return body
-    .trim()
-    .replace(/^(?:[-*]|\d+\.)\s+/, "")
-    .replace(/^(?:🔴|🟡)\s*/u, "")
-    .replace(/^(?:bug|risk)\s*:\s*/i, "");
-}
-
-const PER_ROUND_SENTENCE_RE =
-  /(re-?check|this head|head sha|merge (of|from)|base branch|on this round|per-?round note|reviewed commit)/i;
-
-const SUMMARY_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "that",
-  "this",
-  "from",
-  "have",
-  "will",
-  "would",
-  "should",
-  "there",
-  "their",
-  "which",
-  "while",
-  "also",
-  "into",
-  "about",
-  "after",
-  "before",
-  "again",
-  "still",
-  "just",
-  "than",
-  "then",
-  "them",
-  "they",
-  "been",
-  "are",
-  "was",
-  "its",
-  "you",
-  "your",
-  "all",
-  "please",
-  "thanks",
-  "rechecked",
-  "recheck",
-  "checked",
-  "head",
-  "merge",
-  "base",
-  "round",
-  "sha",
-  "commit",
-  "branch",
-  "note",
-  "review",
-  "reviewed",
-]);
-
-function firstContentSentence(paragraph: string): string {
-  const sentences = paragraph.match(/[^.!?\n]+[.!?]+|[^.!?\n]+$/g) ?? [paragraph];
-  const cleaned = sentences.map((sentence) => sentence.trim()).filter(Boolean);
-  for (const sentence of cleaned) {
-    if (!PER_ROUND_SENTENCE_RE.test(sentence)) return sentence;
-  }
-  return cleaned[0] ?? "";
-}
-
-function findingSummarySignature(body: string): string {
-  let text = stripSeverityPrefix(body);
-  text = text.replace(/<!--\s*jumi-(?:review|check|stuck|worker)[\s\S]*?-->/gi, " ");
-  text = text.replace(/\b[0-9a-f]{7,40}\b/gi, " ");
-  text = text.replace(/[`*_>#]+/g, " ");
-  text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-  const firstParagraph = text.split(/\n\s*\n/)[0] ?? "";
-  const sentence = firstContentSentence(firstParagraph.trim());
-  const words = sentence
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((word) => word.trim())
-    .filter((word) => word.length >= 3 && !SUMMARY_STOPWORDS.has(word));
-  if (words.length === 0) return "";
-  words.sort();
-  return words.join(" ");
-}
-
 /** Sorted blocking finding identities (`path|bucket|severity|summary`). Empty when no blocking finding. */
 export function blockingFindingIdentities(markdown: string | null | undefined): string[] {
   if (!markdown?.trim()) return [];
-  const findings = parseReviewFindings(markdown);
-  const identities: string[] = [];
-  for (const finding of findings) {
-    const severity = severityForIdentity(finding.body);
-    if (!severity) continue;
-    const summary = findingSummarySignature(finding.body);
-    if (!summary) continue;
-    identities.push(`${finding.path}|${bucketFindingLine(finding.line)}|${severity}|${summary}`);
-  }
-  return [...new Set(identities)].sort();
+  return buildReviewFacts({ body: markdown }).findingIdentities;
 }
 
 export function fingerprintFindingIdentity(markdown: string | null | undefined): string | undefined {
@@ -308,66 +186,18 @@ export function fingerprintSameFinding(findingHash: string, diffHash: string): s
   return hashText(`${findingHash}|${diffHash}`);
 }
 
-function firstSentenceForDisplay(body: string): string {
-  const text = stripSeverityPrefix(body).replace(/\s+/g, " ").trim();
-  const match = /^(.+?[.!?])(?:\s|$)/.exec(text);
-  const sentence = (match?.[1] ?? text).trim();
-  return sentence.length > 140 ? `${sentence.slice(0, 140).trimEnd()}…` : sentence;
-}
-
-/** Human display for the latch/board: `path:line emoji summary`, truncated. */
-function sameFindingDisplay(markdown: string | null | undefined): string | undefined {
-  if (!markdown?.trim()) return undefined;
-  const findings = parseReviewFindings(markdown);
-  for (const finding of findings) {
-    const severity = severityForIdentity(finding.body);
-    if (!severity) continue;
-    const emoji = severity === "bug" ? "🔴" : "🟡";
-    const summary = firstSentenceForDisplay(finding.body);
-    if (!summary) continue;
-    const display = `${finding.path}:${finding.line} ${emoji} ${summary}`.trim();
-    return display.length > 200 ? `${display.slice(0, 200).trimEnd()}…` : display;
-  }
-  return undefined;
-}
-
 export type FindingInlineInput = {
   path?: string | null | undefined;
   new_position?: number | null | undefined;
   body?: string | null | undefined;
 };
 
-function findingIdentityFromInline(
-  path: string | null | undefined,
-  line: number | null | undefined,
-  body: string | null | undefined
-): string | undefined {
-  const name = (path ?? "").trim();
-  if (!name) return undefined;
-  const severity = severityForIdentity(body ?? "");
-  if (!severity) return undefined;
-  const summary = findingSummarySignature(body ?? "");
-  if (!summary) return undefined;
-  const lineNum = typeof line === "number" && Number.isSafeInteger(line) && line > 0 ? line : 0;
-  return `${name}|${bucketFindingLine(lineNum)}|${severity}|${summary}`;
-}
-
 /** Blocking identities from a top-level review body plus unresolved Jumi inlines. */
 function blockingFindingIdentitiesFromParts(
   reviewBody: string | null | undefined,
   inlines?: readonly FindingInlineInput[] | null | undefined
 ): string[] {
-  const out = new Set<string>(blockingFindingIdentities(reviewBody));
-  for (const inline of inlines ?? []) {
-    if (!inline) continue;
-    const identity = findingIdentityFromInline(
-      inline.path ?? undefined,
-      typeof inline.new_position === "number" ? inline.new_position : undefined,
-      inline.body ?? undefined
-    );
-    if (identity) out.add(identity);
-  }
-  return [...out].sort();
+  return buildReviewFacts({ body: reviewBody, inlines: inlines ?? [] }).findingIdentities;
 }
 
 export function fingerprintFindingIdentityFromParts(
@@ -383,30 +213,11 @@ export function sameFindingDisplayFromParts(
   reviewBody: string | null | undefined,
   inlines?: readonly FindingInlineInput[] | null | undefined
 ): string | undefined {
-  const fromBody = sameFindingDisplay(reviewBody);
-  if (fromBody) return fromBody;
-  for (const inline of inlines ?? []) {
-    if (!inline?.path?.trim()) continue;
-    const severity = severityForIdentity(inline.body ?? "");
-    if (!severity) continue;
-    const emoji = severity === "bug" ? "🔴" : "🟡";
-    const summary = firstSentenceForDisplay(inline.body ?? "");
-    if (!summary) continue;
-    const line =
-      typeof inline.new_position === "number" && Number.isSafeInteger(inline.new_position) && inline.new_position > 0
-        ? inline.new_position
-        : 0;
-    const display =
-      line > 0
-        ? `${inline.path!.trim()}:${line} ${emoji} ${summary}`.trim()
-        : `${inline.path!.trim()} ${emoji} ${summary}`.trim();
-    return display.length > 200 ? `${display.slice(0, 200).trimEnd()}…` : display;
-  }
-  return undefined;
+  return buildReviewFacts({ body: reviewBody, inlines: inlines ?? [] }).sameFindingDisplay;
 }
 
 function sameFindingLatchReason(markdown: string | null | undefined): string {
-  const display = sameFindingDisplay(markdown);
+  const display = buildReviewFacts({ body: markdown }).sameFindingDisplay;
   if (!display) return SAME_FINDING_STUCK;
   const reason = `${SAME_FINDING_STUCK} (${display})`;
   return reason.length > 300 ? `${reason.slice(0, 300).trimEnd()}…)` : reason;
