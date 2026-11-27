@@ -39,6 +39,7 @@ import {
   isSuggestionFollowupEnabled,
   type SettingsSnapshot,
 } from "./repo_settings.ts";
+import type { ReviewTrustCtx } from "./review_facts.ts";
 import type { SkipLatchKey, SkipLatchStore } from "./skip_latches.ts";
 import {
   evaluateStuck,
@@ -122,6 +123,8 @@ export interface PrSnapshotOpts {
   /** Single pre-loaded settings read; when absent the builder loads once. */
   settings?: SettingsSnapshot;
   skipLatches: SkipLatchStore;
+  /** Signed-block verification coordinates for wake/latch inputs. */
+  trust?: ReviewTrustCtx;
 }
 
 export interface PrSnapshotDeps {
@@ -255,13 +258,24 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
   const { readFollowUpLatch } = await import("./followup.ts");
   const followupLatch = await readFollowUpLatch(opts.skipLatches, latchKey);
 
+  const snapshotTrust: ReviewTrustCtx | undefined = opts.trust
+    ? {
+        ...opts.trust,
+        owner: opts.trust.owner ?? opts.owner,
+        repo: opts.trust.repo ?? opts.repo,
+        prNumber: opts.trust.prNumber ?? opts.issueNumber,
+        headSha: opts.trust.headSha ?? opts.pr.head.sha,
+        log: opts.trust.log ?? log,
+      }
+    : undefined;
   const findingOpts = reviewFindingMatchOptsForJob(
     opts.job,
     opts.pr.head.sha,
     opts.pr.user?.login,
     lists.blockingAuthors,
     policy.followupOnSuggestions,
-    policy.followupOnRisks
+    policy.followupOnRisks,
+    snapshotTrust
   );
   const items = await collectFollowUpItems(
     api,
@@ -277,7 +291,7 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, items);
   const pendingLastReview = pickLatestJumiFinding(items, opts.pr.head.sha);
   let hasFeedback = hasUnhandledFollowUpItems(items, followupLatch);
-  if (hasFeedback && onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername)) {
+  if (hasFeedback && onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername, snapshotTrust)) {
     hasFeedback = false;
   }
   // An invalid head settings file counts as unhandled feedback like a failing
@@ -442,7 +456,7 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
   const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
   const jumiInlinesForIdentity = unresolvedJumiInlines(items);
   const findingIdentityHash = hasFeedback
-    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
+    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity, snapshotTrust)
     : undefined;
 
   const getPrDiffHash = memoize(async (): Promise<string | undefined> => {
@@ -533,6 +547,8 @@ export interface CloserSnapshotOpts {
   ignoreConflictsAuthors?: readonly string[];
   defaultBranch?: string;
   settings?: SettingsSnapshot;
+  /** Signed-block verification coordinates for wake/latch inputs. */
+  trust?: ReviewTrustCtx;
 }
 
 export interface CloserSnapshotDeps {
@@ -642,12 +658,15 @@ export async function buildCloserSnapshot(
         ...(blockingAuthors ? { blockingQuestionAuthors: blockingAuthors } : {}),
         ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
         ...(followupOnRisks ? {} : { followupOnRisks: false as const }),
+        ...(opts.trust
+          ? { trust: opts.trust.headSha ? opts.trust : { ...opts.trust, headSha: opts.pr.head.sha } }
+          : {}),
       },
       trusted
     );
     hasUnhandledFeedback = hasUnhandledFollowUpItems(items, followupLatch);
     if (hasUnhandledFeedback) {
-      maintainerOnlyPending = onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername);
+      maintainerOnlyPending = onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername, opts.trust);
     }
     if (!hasUnhandledFeedback) {
       try {

@@ -1,6 +1,6 @@
 import { lastCheckTrailer, parseReviewedCommitSha } from "./followup.ts";
 import type { Comment, InlineComment, PullReview } from "./ports.ts";
-import { buildReviewFacts } from "./review_facts.ts";
+import { type ResolvedReviewFacts, type ReviewTrustCtx, resolveReviewFacts } from "./review_facts.ts";
 import type { GitRunner } from "./workspace.ts";
 
 const REVIEW_CARRY_MARKER = "Carried forward from";
@@ -19,6 +19,10 @@ interface PreviousReviewWithVerdict {
   state: "success" | "failure";
   body: string;
   carriedFrom?: string;
+  /** Inlines the facts were folded from (for the carry ancestor refresh). */
+  inlineSubset: InlineComment[];
+  /** Verified typed facts for this artifact (undefined when the block did not verify). */
+  resolved?: ResolvedReviewFacts;
 }
 
 /**
@@ -27,6 +31,11 @@ interface PreviousReviewWithVerdict {
  * `findPreviousReview`, a failed review with no findings still returns (the
  * carry gate needs its `failure` state to refuse); callers that want the old
  * "no previous" behaviour keep using `findPreviousReview`.
+ *
+ * When `trust` is provided, finding-derived facts come from the verified
+ * signed block (`source: typed`). The head rule compares the signed head
+ * against `trust.headSha`; carry finalizes a `head-rule` fallback back to
+ * typed once its clean-merge check proves the signed head an ancestor.
  */
 function findPreviousReviewWithVerdict(opts: {
   comments: readonly Comment[];
@@ -34,6 +43,7 @@ function findPreviousReviewWithVerdict(opts: {
   inlines: readonly InlineComment[];
   botUsername: string;
   marker: string;
+  trust?: ReviewTrustCtx;
 }): PreviousReviewWithVerdict | undefined {
   type Candidate = { sha: string; at: string; body: string; pull: boolean };
   const candidates: Candidate[] = [];
@@ -86,8 +96,13 @@ function findPreviousReviewWithVerdict(opts: {
       inlineSubset.push(inline);
     }
   }
-  const facts = buildReviewFacts({ body: latest.body, inlines: inlineSubset, carryMarker: opts.marker });
-  const findings = [...facts.carryLines];
+  const facts = resolveReviewFacts({
+    body: latest.body,
+    inlines: inlineSubset,
+    carryMarker: opts.marker,
+    ...(opts.trust ? { trust: opts.trust } : {}),
+  });
+  const findings = [...facts.facts.carryLines];
   const deduped = [...new Set(findings)];
   const carriedFrom = parseCarrySourceSha(latest.body);
   return {
@@ -96,6 +111,8 @@ function findPreviousReviewWithVerdict(opts: {
     state: trailer.state,
     body: latest.body,
     ...(carriedFrom ? { carriedFrom } : {}),
+    inlineSubset,
+    resolved: facts,
   };
 }
 
@@ -239,20 +256,40 @@ async function evaluateCarry(opts: {
   cwd: string;
   env: Record<string, string | undefined>;
   log?: (message: string) => void;
+  /** Signed-block verification coordinates (secret, identity, repo/PR). The evaluated head is set here. */
+  trust?: ReviewTrustCtx;
 }): Promise<CarryEvaluation> {
+  const carryTrust: ReviewTrustCtx | undefined = opts.trust
+    ? { ...opts.trust, headSha: opts.headSha, log: opts.log ?? opts.trust.log }
+    : undefined;
   const withVerdict = findPreviousReviewWithVerdict({
     comments: opts.comments,
     reviews: opts.reviews,
     inlines: opts.inlines,
     botUsername: opts.botUsername,
     marker: opts.marker,
+    ...(carryTrust ? { trust: carryTrust } : {}),
   });
   if (!withVerdict) return { kind: "no-previous" };
   if (withVerdict.state !== "success") return { kind: "refused", reason: "previous review not success" };
-  if (hasOpenBlockers(withVerdict.findings)) return { kind: "refused", reason: "previous review has open findings" };
+  // A verified block on another head falls back with the payload exposed;
+  // the clean-merge check below may still prove it a verified ancestor.
+  const pendingPayload =
+    withVerdict.resolved?.source === "text" && withVerdict.resolved.reason === "head-rule"
+      ? withVerdict.resolved.payload
+      : undefined;
+  let findings = withVerdict.findings;
+  let blockers = withVerdict.resolved?.facts.hasOpenBlockers ?? hasOpenBlockers(findings);
+  if (blockers && !pendingPayload) {
+    return { kind: "refused", reason: "previous review has open findings" };
+  }
   if (shaMatches(withVerdict.sha, opts.headSha)) return { kind: "refused", reason: "head already reviewed" };
+  // Prefer the signed head as the ancestry anchor when it verifies; the
+  // marker SHA otherwise. A mismatch between the two on a verified block
+  // refuses below unless the merge proves the signed head.
+  const anchorSha = pendingPayload?.head ?? withVerdict.sha;
   const clean = await checkCleanMerge({
-    previousSha: withVerdict.sha,
+    previousSha: anchorSha,
     pullFilenames: opts.pullFilenames,
     git: opts.git,
     cwd: opts.cwd,
@@ -260,6 +297,25 @@ async function evaluateCarry(opts: {
     log: opts.log,
   });
   if (!clean.eligible) return { kind: "refused", reason: clean.reason ?? "not eligible" };
+  if (pendingPayload) {
+    if (!clean.parent1 || !shaMatches(clean.parent1, pendingPayload.head)) {
+      return { kind: "refused", reason: "previous review has open findings" };
+    }
+    // Verified ancestor: the signed head is the merge's first parent, so the
+    // signed entries drive the open-blocker check like an exact head match.
+    const refreshed = resolveReviewFacts({
+      body: withVerdict.body,
+      inlines: withVerdict.inlineSubset,
+      carryMarker: opts.marker,
+      trust: { ...carryTrust, ancestorOk: true },
+    });
+    if (refreshed.source !== "typed") return { kind: "refused", reason: "previous review has open findings" };
+    findings = [...new Set(refreshed.facts.carryLines)];
+    blockers = refreshed.facts.hasOpenBlockers;
+  }
+  if (blockers) {
+    return { kind: "refused", reason: "previous review has open findings" };
+  }
   return {
     kind: "carried",
     markdown: buildCarriedMarkdown({
@@ -267,10 +323,10 @@ async function evaluateCarry(opts: {
       headSha: opts.headSha,
       previousSha: withVerdict.sha,
       targetBranch: opts.targetBranch,
-      findings: withVerdict.findings,
+      findings,
     }),
     previousSha: withVerdict.sha,
-    findings: withVerdict.findings,
+    findings,
   };
 }
 
@@ -297,6 +353,8 @@ export async function tryCarryReview<T>(opts: {
   reviewLabel: string;
   persist: (markdown: string) => Promise<void>;
   publish: (markdown: string, previousSha: string, findings: string[]) => Promise<T>;
+  /** Signed-block verification coordinates (secret, identity, repo/PR). The evaluated head is set here. */
+  trust?: ReviewTrustCtx;
 }): Promise<T | undefined> {
   if (!opts.settingsEnabled) return undefined;
   const evaluated = await evaluateCarry(opts);

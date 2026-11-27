@@ -75,6 +75,7 @@ import {
   renderQueueMetrics,
   WORKER_JOB_KINDS,
 } from "./review_jobs.ts";
+import { defaultForgeIdentity } from "./review_meta.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { renderLedgerMetrics, setActiveRunUsageRecording } from "./run_usage.ts";
 import { runnerAuthFingerprints } from "./runner_cooldown.ts";
@@ -1009,6 +1010,10 @@ async function handoverFollowUp(
       maxFollowupRounds: config.maxFollowupRounds,
       blockingQuestionAuthors: config.blockingQuestionAuthors,
       logger,
+      trust: {
+        ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+        forgeIdentity: config.forgeIdentity ?? defaultForgeIdentity(config.giteaUrl, config.botUsername),
+      },
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);
     await clearPendingHandover(store, row.id);
@@ -1758,11 +1763,21 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
               deploymentTrusted: config.trustedSenderLogins,
               deploymentIgnore: config.followupIgnoreLogins,
               deploymentBlocking: config.blockingQuestionAuthors,
+              reviewTrust: {
+                ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+                forgeIdentity: config.forgeIdentity ?? defaultForgeIdentity(config.giteaUrl, config.botUsername),
+                giteaUrl: config.giteaUrl,
+              },
             }),
           logger,
           sits: store.sits,
           strictSlots: store.strictSlots,
           automergeReconcile: store.automergeReconcile,
+          reviewTrust: {
+            ...(config.webhookSecret ? { webhookSecret: config.webhookSecret } : {}),
+            forgeIdentity: config.forgeIdentity ?? defaultForgeIdentity(config.giteaUrl, config.botUsername),
+            giteaUrl: config.giteaUrl,
+          },
         },
       }),
       logger,

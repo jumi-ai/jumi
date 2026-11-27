@@ -75,6 +75,8 @@ export async function tryReleaseMaintainerHold(opts: {
   followupIgnoreLogins?: readonly string[];
   defaultBranch?: string | null;
   logger?: (message: string) => void;
+  /** Signed-block verification coordinates for this release decision. */
+  trust?: import("./review_facts.ts").ReviewTrustCtx;
 }): Promise<MaintainerHoldReleaseOutcome> {
   const log = opts.logger ?? (() => undefined);
   const botSender = isBotOrIgnored(opts.senderLogin, opts.botUsername, opts.followupIgnoreLogins);
@@ -181,6 +183,16 @@ export async function tryReleaseMaintainerHold(opts: {
   const reviewInlines =
     summaryReview != null ? inlinesForReviewGroup(summaryReview, rawReviews, rawInlines, opts.botUsername) : [];
   const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, rawReviews, opts.botUsername) : [];
+  const releaseTrust = opts.trust
+    ? {
+        ...opts.trust,
+        owner: opts.trust.owner ?? opts.owner,
+        repo: opts.trust.repo ?? opts.repo,
+        prNumber: opts.trust.prNumber ?? opts.prNumber,
+        headSha: opts.trust.headSha ?? headSha,
+        log,
+      }
+    : undefined;
   const assessment = assessMaintainerHoldRelease({
     reviewBody,
     inlines: reviewInlines,
@@ -188,6 +200,7 @@ export async function tryReleaseMaintainerHold(opts: {
     blockingAuthors,
     botUsername: opts.botUsername,
     holdEnabled,
+    ...(releaseTrust ? { trust: releaseTrust } : {}),
   });
   if (assessment.releasable) {
     const targetUrl = pr.html_url || undefined;
@@ -213,6 +226,8 @@ export async function tryReleaseMaintainerHold(opts: {
       inlines: inlinesToResolve,
       botUsername: opts.botUsername,
       log,
+      reviewBody,
+      ...(releaseTrust ? { trust: releaseTrust } : {}),
     });
     return { outcome: "released", prNumber: opts.prNumber, headSha, openMaintainers: assessment.openMaintainers };
   }

@@ -31,6 +31,8 @@ export interface WorkerConfig {
   githubAppPrivateKey?: string;
   githubAppInstallationId?: string;
   botUsername: string;
+  /** Expected `<forge-host>/<bot>` review identity. Unset signs/verifies under the documented default. */
+  forgeIdentity?: string;
   followupIgnoreLogins: string[];
   trustedSenderLogins: string[];
   ignoreConflictsLabel: string;
@@ -216,6 +218,7 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     ...forgeBind,
     githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
+    forgeIdentity: optionalEnv(resolved, "JUMI_FORGE_IDENTITY"),
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     trustedSenderLogins: csvEnv(resolved, "TRUSTED_SENDER_LOGINS"),
     ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",

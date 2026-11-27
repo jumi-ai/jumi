@@ -14,7 +14,7 @@ import {
   repoMode,
 } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
-import { buildReviewFacts, handoverWakesFromFacts } from "./review_facts.ts";
+import { handoverWakesFromFacts, type ReviewTrustCtx, resolveReviewFacts } from "./review_facts.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -35,17 +35,29 @@ export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";
  * trailers still hand over; a mixed review (maintainer plus worker-answerable
  * questions) also still hands over.
  */
-export function isMaintainerOnlyTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  return buildReviewFacts({ body: markdown, record }).viewIsMaintainerOnly;
+export function isMaintainerOnlyTrailer(
+  markdown: string | null | undefined,
+  record?: ReviewRecord | null,
+  trust?: ReviewTrustCtx
+): boolean {
+  return resolveReviewFacts({ body: markdown, record, ...(trust ? { trust } : {}) }).facts.viewIsMaintainerOnly;
 }
 
-function isCurrentHeadFailureTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  const facts = buildReviewFacts({ body: markdown, record });
+function isCurrentHeadFailureTrailer(
+  markdown: string | null | undefined,
+  record?: ReviewRecord | null,
+  trust?: ReviewTrustCtx
+): boolean {
+  const facts = resolveReviewFacts({ body: markdown, record, ...(trust ? { trust } : {}) }).facts;
   return !facts.viewIncomplete && facts.viewState === "failure";
 }
 
-function isLeftoverSimplificationTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  const facts = buildReviewFacts({ body: markdown, record });
+function isLeftoverSimplificationTrailer(
+  markdown: string | null | undefined,
+  record?: ReviewRecord | null,
+  trust?: ReviewTrustCtx
+): boolean {
+  const facts = resolveReviewFacts({ body: markdown, record, ...(trust ? { trust } : {}) }).facts;
   return !facts.viewIncomplete && facts.viewState === "success" && facts.viewSuggestionCount > 0;
 }
 
@@ -53,9 +65,13 @@ function isBlockingQuestionTrailer(
   markdown: string | null | undefined,
   prAuthorLogin: string | undefined | null,
   blockingAuthors: readonly string[] | undefined | null,
-  record?: ReviewRecord | null
+  record?: ReviewRecord | null,
+  trust?: ReviewTrustCtx
 ): boolean {
-  return buildReviewFacts({ body: markdown, record, prAuthorLogin, blockingAuthors }).viewBlockingQuestionCount > 0;
+  return (
+    resolveReviewFacts({ body: markdown, record, prAuthorLogin, blockingAuthors, ...(trust ? { trust } : {}) }).facts
+      .viewBlockingQuestionCount > 0
+  );
 }
 
 export function shouldHandoverFollowUp(opts: {
@@ -64,14 +80,17 @@ export function shouldHandoverFollowUp(opts: {
   record?: ReviewRecord | null;
   prAuthor?: string | undefined | null;
   blockingQuestionAuthors?: readonly string[] | undefined | null;
+  /** Signed-block verification coordinates for this handover decision. */
+  trust?: ReviewTrustCtx;
 }): boolean {
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
-  const facts = buildReviewFacts({
+  const facts = resolveReviewFacts({
     body: opts.markdown,
     record: opts.record,
     prAuthorLogin: opts.prAuthor,
     blockingAuthors: opts.blockingQuestionAuthors,
-  });
+    ...(opts.trust ? { trust: opts.trust } : {}),
+  }).facts;
   // A maintainer-only ❓ never starts a worker round on its own: the worker
   // has no way to file/close another issue, change labels or assignment, or
   // decide scope. Mixed reviews still hand over for the worker-answerable part.
@@ -83,10 +102,17 @@ function persistInsertSkipReason(
   markdown: string | null | undefined,
   prAuthorLogin?: string | undefined | null,
   blockingAuthors?: readonly string[] | undefined | null,
-  record?: ReviewRecord | null
+  record?: ReviewRecord | null,
+  trust?: ReviewTrustCtx
 ): string | undefined {
   if (!markdown && !record) return "incomplete";
-  const facts = buildReviewFacts({ body: markdown, record, prAuthorLogin, blockingAuthors });
+  const facts = resolveReviewFacts({
+    body: markdown,
+    record,
+    prAuthorLogin,
+    blockingAuthors,
+    ...(trust ? { trust } : {}),
+  }).facts;
   if (facts.viewIncomplete) return "incomplete";
   if (facts.viewState === "failure") return undefined;
   if (facts.viewState === "success") {
@@ -151,7 +177,8 @@ async function resolveHeldSuggestion(
   reason: string,
   targetUrl?: string,
   record?: ReviewRecord | null,
-  maintainerHoldEnabled = true
+  maintainerHoldEnabled = true,
+  trust?: ReviewTrustCtx
 ): Promise<void> {
   try {
     const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
@@ -159,7 +186,7 @@ async function resolveHeldSuggestion(
     const sha =
       hold.headSha && hold.headSha.toLowerCase() === headSha.toLowerCase() ? headSha : (hold.headSha ?? headSha);
     let count = hold.count ?? 0;
-    const facts = buildReviewFacts({ body: markdown, record });
+    const facts = resolveReviewFacts({ body: markdown, record, ...(trust ? { trust } : {}) }).facts;
     if (!count) {
       if (!facts.viewIncomplete && facts.viewState === "success") {
         count = facts.viewSuggestionCount;
@@ -205,6 +232,8 @@ export async function enqueueFollowUpFromReview(
     maxConflictRounds?: number;
     blockingQuestionAuthors?: readonly string[];
     logger?: (message: string) => void;
+    /** Signed-block verification coordinates for this handover decision. */
+    trust?: ReviewTrustCtx;
   } & PickupPolicy
 ): Promise<EnqueueResult | undefined> {
   const logSkip = (reason: string): undefined => {
@@ -236,11 +265,24 @@ export async function enqueueFollowUpFromReview(
   // The row's typed verdict when the persisted markdown is byte-identical to
   // the store's `toMarkdown()`; absent for old rows and modified markdown.
   const record = opts.row.resultJson ?? null;
+  // Verification coordinates for every handover decision below. Absent
+  // unless the caller opted in: unwired callers stay on the silent legacy
+  // path exactly as today.
+  const handoverTrust: ReviewTrustCtx | undefined = opts.trust
+    ? {
+        ...opts.trust,
+        owner: opts.trust.owner ?? opts.row.owner,
+        repo: opts.trust.repo ?? opts.row.repo,
+        prNumber: opts.trust.prNumber ?? opts.row.prNumber,
+        headSha: opts.trust.headSha ?? opts.row.headSha,
+        log: opts.logger,
+      }
+    : undefined;
 
   // Maintainer-only ❓: the worker cannot file/close another issue, change
   // labels or assignment, or decide scope, so no round starts. The board
   // keeps the PR visible as waiting on a maintainer answer instead.
-  if (isMaintainerOnlyTrailer(opts.markdown, record)) {
+  if (isMaintainerOnlyTrailer(opts.markdown, record, handoverTrust)) {
     await rememberSitBestEffort(
       opts.store.sits,
       opts.row.owner,
@@ -257,7 +299,7 @@ export async function enqueueFollowUpFromReview(
   // trailer needs the PR author plus the effective blocking list (deployer
   // plus the repository's default-branch file) to decide whether opt-in
   // blocking questions keep the follow-up alive.
-  const earlySkip = persistInsertSkipReason(opts.markdown, undefined, undefined, record);
+  const earlySkip = persistInsertSkipReason(opts.markdown, undefined, undefined, record, handoverTrust);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
 
   // One default-branch read covers the restricted-mode gate, the follow-up
@@ -344,7 +386,8 @@ export async function enqueueFollowUpFromReview(
       "head moved",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("head moved");
   }
@@ -360,13 +403,20 @@ export async function enqueueFollowUpFromReview(
       "mode restricted",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("repository mode is restricted");
   }
 
   if (earlySkip === "success trailer") {
-    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking, record);
+    const trailerSkip = persistInsertSkipReason(
+      opts.markdown,
+      pr.user?.login,
+      effectiveBlocking,
+      record,
+      handoverTrust
+    );
     if (trailerSkip) {
       // A consumed hold must never outlive the handover: the review posted
       // `pending` and consumed the one-hold flag, and no follow-up job is
@@ -383,7 +433,8 @@ export async function enqueueFollowUpFromReview(
         trailerSkip,
         pr.html_url,
         record,
-        maintainerHoldEnabled
+        maintainerHoldEnabled,
+        handoverTrust
       );
       return logSkip(trailerSkip);
     }
@@ -414,7 +465,8 @@ export async function enqueueFollowUpFromReview(
       "unassigned",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("no closer");
   }
@@ -433,7 +485,8 @@ export async function enqueueFollowUpFromReview(
       "unassigned",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("unassigned");
   }
@@ -445,9 +498,9 @@ export async function enqueueFollowUpFromReview(
   // conflicts run as today; a person asking still follows via the webhook
   // path, which never reaches this handover.
   if (
-    isLeftoverSimplificationTrailer(opts.markdown, record) &&
-    !isCurrentHeadFailureTrailer(opts.markdown, record) &&
-    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record) &&
+    isLeftoverSimplificationTrailer(opts.markdown, record, handoverTrust) &&
+    !isCurrentHeadFailureTrailer(opts.markdown, record, handoverTrust) &&
+    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record, handoverTrust) &&
     !policy.followupOnSuggestions
   ) {
     await resolveHeldSuggestion(
@@ -461,7 +514,8 @@ export async function enqueueFollowUpFromReview(
       "suggestions disabled",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("suggestions disabled");
   }
@@ -472,12 +526,19 @@ export async function enqueueFollowUpFromReview(
   // when its body also publishes 🟡 findings.
   if (!policy.followupOnRisks) {
     try {
-      const facts = buildReviewFacts({ body: opts.markdown, record });
+      const facts = resolveReviewFacts({ body: opts.markdown, record, trust: handoverTrust }).facts;
       if (!facts.incomplete && facts.state === "success") {
         const bugs = facts.bugCount;
         const advisoryRisks = facts.trailerNonBlockingRiskCount;
-        const blockingQs = isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record);
-        const suggestionWake = isLeftoverSimplificationTrailer(opts.markdown, record) && policy.followupOnSuggestions;
+        const blockingQs = isBlockingQuestionTrailer(
+          opts.markdown,
+          pr.user?.login,
+          effectiveBlocking,
+          record,
+          handoverTrust
+        );
+        const suggestionWake =
+          isLeftoverSimplificationTrailer(opts.markdown, record, handoverTrust) && policy.followupOnSuggestions;
         if (bugs === 0 && advisoryRisks > 0 && !blockingQs && !suggestionWake) {
           await resolveHeldSuggestion(
             opts.store,
@@ -490,7 +551,8 @@ export async function enqueueFollowUpFromReview(
             "risks disabled",
             pr.html_url,
             record,
-            maintainerHoldEnabled
+            maintainerHoldEnabled,
+            handoverTrust
           );
           return logSkip("risks disabled");
         }
@@ -525,12 +587,15 @@ export async function enqueueFollowUpFromReview(
       "round cap",
       pr.html_url,
       record,
-      maintainerHoldEnabled
+      maintainerHoldEnabled,
+      handoverTrust
     );
     return logSkip("round cap");
   }
 
-  const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown, record) ? "review-suggestions" : "review-failure";
+  const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown, record, handoverTrust)
+    ? "review-suggestions"
+    : "review-failure";
   return opts.store.enqueueIssue(
     followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `${triggerEvent}-${opts.row.id}`, triggerEvent)
   );
