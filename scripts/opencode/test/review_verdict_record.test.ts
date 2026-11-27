@@ -36,7 +36,7 @@ describe("ReviewVerdictStore.toRecord", () => {
         { id: "f2", severity: "question", title: "why?", body: "explain" },
         { id: "f3", path: "src/a.ts", line: 3, severity: "suggestion", title: "", body: "nit" },
       ],
-      counts: { bug: 1, risk: 0, question: 1, suggestion: 1 },
+      counts: { bug: 1, risk: 0, question: 1, suggestion: 1, maintainerQuestion: 0 },
     });
   });
 
@@ -47,7 +47,7 @@ describe("ReviewVerdictStore.toRecord", () => {
       version: 1,
       state: "incomplete",
       findings: [{ id: "f1", path: "src/a.ts", line: 2, severity: "risk", title: "", body: "race" }],
-      counts: { bug: 0, risk: 1, question: 0, suggestion: 0 },
+      counts: { bug: 0, risk: 1, question: 0, suggestion: 0, maintainerQuestion: 0 },
     });
   });
 
@@ -58,7 +58,7 @@ describe("ReviewVerdictStore.toRecord", () => {
       version: 1,
       state: "success",
       findings: [],
-      counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+      counts: { bug: 0, risk: 0, question: 0, suggestion: 0, maintainerQuestion: 0 },
     });
   });
 
@@ -258,7 +258,7 @@ describe("publishMcpVerdict record persistence", () => {
       state: "failure",
       reason: "blocking",
       findings: [{ id: "f1", path: "src/demo.ts", line: 1, severity: "bug", title: "null deref", body: "Guard it." }],
-      counts: { bug: 1, risk: 0, question: 0, suggestion: 0 },
+      counts: { bug: 1, risk: 0, question: 0, suggestion: 0, maintainerQuestion: 0 },
     });
   });
 

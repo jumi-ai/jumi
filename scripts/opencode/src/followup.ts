@@ -145,6 +145,13 @@ import {
   verifyTaskNote,
 } from "./repo_verify.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
+import {
+  buildReviewFacts,
+  classifyInlineText,
+  describeSuggestionsReason,
+  isIgnoredSuccessFromFacts,
+  parseLastCheckTrailer,
+} from "./review_facts.ts";
 import { persistFindingResponses } from "./review_findings.ts";
 import { inlinesForReviewGroup } from "./review_groups.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -166,26 +173,6 @@ import type { HoldStatusPort } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
-import {
-  blockingOpenQuestionCount,
-  countBugFindings,
-  countMaintainerQuestionFindings,
-  countQuestionFindings,
-  countRiskFindings,
-  countSuggestionFindings,
-  describeSuggestionsReason,
-  isBlockingQuestionAuthor,
-  isBugFindingFirstLine,
-  isMaintainerOnlyTrailerText,
-  isMaintainerQuestionInline,
-  isNonMaintainerQuestionInline,
-  isQuestionInline,
-  isRiskFindingFirstLine,
-  parseCheckLine,
-  parseReviewOutput,
-  trailerNonBlockingRiskCount,
-  trailerSuggestionCount,
-} from "./verdict.ts";
 import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import { loadFollowupReviewRules, withTaskBlocks } from "./worker_review_rules.ts";
 import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
@@ -472,20 +459,7 @@ const REVIEW_MARKER = "<!-- jumi-review:";
 const REVIEWED_COMMIT_RE = /^Reviewed commit:\s*`([0-9a-fA-F]+)`\s*$/i;
 
 export function lastCheckTrailer(body: string): { state: "success" | "failure"; reason: string } | undefined {
-  const lines = body.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    return parseCheckLine(line);
-  }
-  return undefined;
-}
-
-function isFindingCheck(check: { state: "success" | "failure"; reason: string } | undefined): boolean {
-  if (!check) return false;
-  if (check.state === "failure") return true;
-  if (trailerSuggestionCount(check.reason) > 0) return true;
-  return trailerNonBlockingRiskCount(check.reason) > 0;
+  return parseLastCheckTrailer(body);
 }
 
 export function parseReviewedCommitSha(body: string): string | undefined {
@@ -591,9 +565,18 @@ export function isJumiPullReviewFinding(
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   const body = pullReviewBody(review);
-  if (!isFindingCheck(lastCheckTrailer(body)) && !isBlockingQuestionFinding(body, opts, inlines, botUsername))
-    return false;
-  if (isIgnoredSuccessBody(body, opts, inlines, botUsername)) return false;
+  const facts = buildReviewFacts({
+    body,
+    inlines,
+    botUsername,
+    prAuthorLogin: opts.prAuthor,
+    blockingAuthors: opts.blockingQuestionAuthors,
+  });
+  const findingCheck =
+    facts.trailerState === "failure" ||
+    (facts.trailerState === "success" && (facts.trailerSuggestionCount > 0 || facts.trailerNonBlockingRiskCount > 0));
+  if (!findingCheck && facts.openBlockingQuestions <= 0) return false;
+  if (isIgnoredSuccessFromFacts(facts, opts)) return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -661,29 +644,25 @@ function isOpenJumiInline(inline: InlineComment, botUsername?: string): boolean 
  */
 export function isBlockingQuestionInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
-  return isNonMaintainerQuestionInline(inline.path, inline.body ?? "");
+  return classifyInlineText(inline.path, inline.body).ordinaryQuestion;
 }
 
 /** Whether an open Jumi inline carries an actionable `🔴` bug finding. */
 function isBugInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
-  if (typeof inline.path === "string" && inline.path.trim() && isBugFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countBugFindings(body) > 0;
+  return classifyInlineText(inline.path, inline.body).bugLike;
 }
 
 /** Whether an open Jumi inline carries an actionable `🟡` risk finding. */
 function isRiskInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
-  if (typeof inline.path === "string" && inline.path.trim() && isRiskFindingFirstLine(inline.path)) return true;
-  const body = inline.body ?? "";
-  return body.trim() !== "" && countRiskFindings(body) > 0;
+  return classifyInlineText(inline.path, inline.body).riskLike;
 }
 
 /** Whether an open Jumi inline carries a `❓ maintainer:` question. */
 function isMaintainerInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
-  return isMaintainerQuestionInline(inline.path, inline.body ?? "");
+  return classifyInlineText(inline.path, inline.body).maintainerQuestion;
 }
 
 /**
@@ -697,19 +676,7 @@ export function openQuestionsForReview(
   inlines: readonly InlineComment[],
   botUsername?: string
 ): number {
-  const body = reviewBody ?? "";
-  if (!body.trim()) return 0;
-  const trailer = lastCheckTrailer(body);
-  if (trailer?.state !== "success") return 0;
-  const parsed = parseReviewOutput(body);
-  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
-  const bodyCount = countQuestionFindings(parsed.comment);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (!isOpenJumiInline(inline, botUsername)) continue;
-    if (isQuestionInline(inline.path, inline.body ?? "")) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openQuestions;
 }
 
 /**
@@ -727,18 +694,7 @@ export function openMaintainerQuestionsForReview(
   inlines: readonly InlineComment[],
   botUsername?: string
 ): number {
-  const body = reviewBody ?? "";
-  if (!body.trim()) return 0;
-  const trailer = lastCheckTrailer(body);
-  if (trailer?.state !== "success") return 0;
-  const parsed = parseReviewOutput(body);
-  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
-  const bodyCount = countMaintainerQuestionFindings(parsed.comment);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isMaintainerInline(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openMaintainers;
 }
 
 /**
@@ -756,21 +712,7 @@ export function openMaintainerQuestionsAnyTrailer(
   inlines: readonly InlineComment[],
   botUsername?: string
 ): number {
-  const body = reviewBody ?? "";
-  if (!body.trim()) return 0;
-  let parsed: ReturnType<typeof parseReviewOutput>;
-  try {
-    parsed = parseReviewOutput(body);
-  } catch {
-    return 0;
-  }
-  if (parsed.verdict.incomplete) return 0;
-  const bodyCount = countMaintainerQuestionFindings(parsed.comment);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isMaintainerInline(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openMaintainersAnyTrailer;
 }
 
 export interface AnswerRoundReviewAssessment {
@@ -822,17 +764,13 @@ export function assessAnswerRoundReview(
   }
   candidates.sort((a, b) => a.at.localeCompare(b.at));
   const latest = candidates[candidates.length - 1]!;
-  let incomplete = false;
-  try {
-    incomplete = parseReviewOutput(latest.body).verdict.incomplete;
-  } catch {
-    incomplete = true;
-  }
   const groupInlines =
     latest.summary != null
       ? inlinesForReviewGroup(latest.summary, items.allReviews ?? items.jumiReviews, items.jumiInlines, botUsername)
       : [];
-  const openCount = incomplete ? 0 : openMaintainerQuestionsAnyTrailer(latest.body, groupInlines, botUsername);
+  const facts = buildReviewFacts({ body: latest.body, inlines: groupInlines, botUsername });
+  const incomplete = facts.incomplete;
+  const openCount = facts.openMaintainersAnyTrailer;
   return {
     foundOnHead: true,
     hasAnyReview,
@@ -852,13 +790,7 @@ export function openBugsForReview(
   inlines: readonly InlineComment[],
   botUsername?: string
 ): number {
-  const parsed = parseReviewOutput(reviewBody ?? "");
-  const bodyCount = countBugFindings(parsed.comment);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isBugInline(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openBugs;
 }
 
 /**
@@ -871,13 +803,7 @@ export function openRisksForReview(
   inlines: readonly InlineComment[],
   botUsername?: string
 ): number {
-  const parsed = parseReviewOutput(reviewBody ?? "");
-  const bodyCount = countRiskFindings(parsed.comment);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isRiskInline(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername }).openRisks;
 }
 
 /**
@@ -895,16 +821,8 @@ export function blockingOpenQuestionCountWithInlines(
   blockingAuthors: readonly string[] | undefined | null,
   botUsername?: string
 ): number {
-  if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
-  const body = reviewBody ?? "";
-  const trailer = lastCheckTrailer(body);
-  if (trailer?.state !== "success") return 0;
-  const bodyCount = blockingOpenQuestionCount(body, prAuthorLogin, blockingAuthors);
-  let inlineCount = 0;
-  for (const inline of inlines) {
-    if (isBlockingQuestionInline(inline, botUsername)) inlineCount++;
-  }
-  return bodyCount + inlineCount;
+  return buildReviewFacts({ body: reviewBody, inlines, botUsername, prAuthorLogin, blockingAuthors })
+    .openBlockingQuestions;
 }
 
 /**
@@ -934,19 +852,19 @@ export function assessMaintainerHoldRelease(opts: {
   holdEnabled: boolean;
 }): MaintainerHoldReleaseAssessment {
   const reviewBody = opts.reviewBody ?? "";
-  const parsed = parseReviewOutput(reviewBody);
-  const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
-  const openBugs = openBugsForReview(reviewBody, opts.inlines, opts.botUsername);
-  const openRisks = openRisksForReview(reviewBody, opts.inlines, opts.botUsername);
-  const openBlockingQuestions = blockingOpenQuestionCountWithInlines(
-    reviewBody,
-    opts.inlines,
-    opts.prAuthorLogin,
-    opts.blockingAuthors,
-    opts.botUsername
-  );
-  const openMaintainers = openMaintainerQuestionsForReview(reviewBody, opts.inlines, opts.botUsername);
-  const openSuggestions = countSuggestionFindings(parsed.comment);
+  const facts = buildReviewFacts({
+    body: reviewBody,
+    inlines: opts.inlines,
+    botUsername: opts.botUsername,
+    prAuthorLogin: opts.prAuthorLogin,
+    blockingAuthors: opts.blockingAuthors,
+  });
+  const completeSuccess = !facts.incomplete && facts.state === "success";
+  const openBugs = facts.openBugs;
+  const openRisks = facts.openRisks;
+  const openBlockingQuestions = facts.openBlockingQuestions;
+  const openMaintainers = facts.openMaintainers;
+  const openSuggestions = facts.openSuggestions;
   const releasable =
     completeSuccess &&
     openBugs === 0 &&
@@ -985,7 +903,13 @@ function isBlockingQuestionFinding(
   botUsername?: string
 ): boolean {
   return (
-    blockingOpenQuestionCountWithInlines(body, inlines, opts.prAuthor, opts.blockingQuestionAuthors, botUsername) > 0
+    buildReviewFacts({
+      body,
+      inlines,
+      botUsername,
+      prAuthorLogin: opts.prAuthor,
+      blockingAuthors: opts.blockingQuestionAuthors,
+    }).openBlockingQuestions > 0
   );
 }
 
@@ -1003,15 +927,14 @@ function isIgnoredSuccessBody(
   inlines: readonly InlineComment[] = [],
   botUsername?: string
 ): boolean {
-  const trailer = lastCheckTrailer(body);
-  if (trailer?.state !== "success") return false;
-  if (isBlockingQuestionFinding(body, opts, inlines, botUsername)) return false;
-  const hasSuggestions = trailerSuggestionCount(trailer.reason) > 0;
-  const hasRisks = trailerNonBlockingRiskCount(trailer.reason) > 0;
-  if (!hasSuggestions && !hasRisks) return false;
-  if (hasSuggestions && opts.followupOnSuggestions !== false) return false;
-  if (hasRisks && opts.followupOnRisks !== false) return false;
-  return true;
+  const facts = buildReviewFacts({
+    body,
+    inlines,
+    botUsername,
+    prAuthorLogin: opts.prAuthor,
+    blockingAuthors: opts.blockingQuestionAuthors,
+  });
+  return isIgnoredSuccessFromFacts(facts, opts);
 }
 
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
@@ -1031,13 +954,20 @@ export function isJumiReviewFinding(
   inlines: readonly InlineComment[] = []
 ): boolean {
   if (!isJumiReviewSticky(comment, botUsername)) return false;
-  if (
-    !isFindingCheck(lastCheckTrailer(comment.body ?? "")) &&
-    !isBlockingQuestionFinding(comment.body ?? "", opts, inlines, botUsername)
-  )
-    return false;
-  if (isIgnoredSuccessBody(comment.body ?? "", opts, inlines, botUsername)) return false;
-  const stickySha = parseReviewedCommitSha(comment.body ?? "");
+  const body = comment.body ?? "";
+  const facts = buildReviewFacts({
+    body,
+    inlines,
+    botUsername,
+    prAuthorLogin: opts.prAuthor,
+    blockingAuthors: opts.blockingQuestionAuthors,
+  });
+  const findingCheck =
+    facts.trailerState === "failure" ||
+    (facts.trailerState === "success" && (facts.trailerSuggestionCount > 0 || facts.trailerNonBlockingRiskCount > 0));
+  if (!findingCheck && facts.openBlockingQuestions <= 0) return false;
+  if (isIgnoredSuccessFromFacts(facts, opts)) return false;
+  const stickySha = parseReviewedCommitSha(body);
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
   if (commitMatchesHead(stickySha, headSha)) return true;
@@ -1255,15 +1185,15 @@ function isMaintainerOnlyPullReview(
   allReviews?: readonly PullReview[]
 ): boolean {
   const body = review.body ?? review.content ?? "";
-  const trailer = lastCheckTrailer(body);
-  if (trailer?.state !== "success") return false;
-  if (trailerSuggestionCount(trailer.reason) !== 0) return false;
   const inlines = allReviews
     ? inlinesForReviewGroup(review, allReviews, allJumiInlines, botUsername)
     : inlinesForPullReview(review.id, allJumiInlines);
-  const total = openQuestionsForReview(body, inlines, botUsername);
+  const facts = buildReviewFacts({ body, inlines, botUsername });
+  if (facts.trailerState !== "success") return false;
+  if (facts.trailerSuggestionCount !== 0) return false;
+  const total = facts.openQuestions;
   if (total === 0) return false;
-  return openMaintainerQuestionsForReview(body, inlines, botUsername) === total;
+  return facts.openMaintainers === total;
 }
 
 /**
@@ -1293,7 +1223,7 @@ export function onlyMaintainerQuestionsPending(
       continue;
     }
     if (handledFindings.has(reviewFindingKey(finding.id, finding.sha))) continue;
-    if (!isMaintainerOnlyTrailerText(comment.body)) return false;
+    if (!buildReviewFacts({ body: comment.body }).viewIsMaintainerOnly) return false;
     foundMaintainer = true;
   }
   for (const review of items.jumiFindingReviews ?? []) {

@@ -376,7 +376,16 @@ async function main(): Promise<number> {
       model: model as never,
       modelRuntime: runtime as never,
       resourceLoader: loader,
-      tools: ["read", "bash", "jumi_add_finding", "jumi_set_verdict", "jumi_list_findings", "jumi_previous_findings"],
+      tools: [
+        "read",
+        "bash",
+        "jumi_add_finding",
+        "jumi_update_finding",
+        "jumi_remove_finding",
+        "jumi_set_verdict",
+        "jumi_list_findings",
+        "jumi_previous_findings",
+      ],
       customTools: [
         ...createPiReviewCustomTools(store),
         createGuardedPiBashTool({ cwd: workdir, env: { PATH: "/usr/bin:/bin" } }),

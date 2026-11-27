@@ -14,6 +14,7 @@ import {
   repoMode,
 } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
+import { buildReviewFacts, handoverWakesFromFacts } from "./review_facts.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -21,7 +22,6 @@ import { upsertStuckText } from "./stuck.ts";
 import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import { countBugFindings, parseReviewOutput, reviewVerdictView, trailerNonBlockingRiskCount } from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS: string = TOO_MANY_FOLLOWUP_ROUNDS_REASON;
 
@@ -36,17 +36,17 @@ export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";
  * questions) also still hands over.
  */
 export function isMaintainerOnlyTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  return reviewVerdictView({ markdown, record }).isMaintainerOnly;
+  return buildReviewFacts({ body: markdown, record }).viewIsMaintainerOnly;
 }
 
 function isCurrentHeadFailureTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  const view = reviewVerdictView({ markdown, record });
-  return !view.incomplete && view.state === "failure";
+  const facts = buildReviewFacts({ body: markdown, record });
+  return !facts.viewIncomplete && facts.viewState === "failure";
 }
 
 function isLeftoverSimplificationTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
-  const view = reviewVerdictView({ markdown, record });
-  return !view.incomplete && view.state === "success" && view.suggestionCount > 0;
+  const facts = buildReviewFacts({ body: markdown, record });
+  return !facts.viewIncomplete && facts.viewState === "success" && facts.viewSuggestionCount > 0;
 }
 
 function isBlockingQuestionTrailer(
@@ -55,7 +55,7 @@ function isBlockingQuestionTrailer(
   blockingAuthors: readonly string[] | undefined | null,
   record?: ReviewRecord | null
 ): boolean {
-  return reviewVerdictView({ markdown, record }).blockingQuestionCount(prAuthorLogin, blockingAuthors) > 0;
+  return buildReviewFacts({ body: markdown, record, prAuthorLogin, blockingAuthors }).viewBlockingQuestionCount > 0;
 }
 
 export function shouldHandoverFollowUp(opts: {
@@ -66,28 +66,17 @@ export function shouldHandoverFollowUp(opts: {
   blockingQuestionAuthors?: readonly string[] | undefined | null;
 }): boolean {
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
+  const facts = buildReviewFacts({
+    body: opts.markdown,
+    record: opts.record,
+    prAuthorLogin: opts.prAuthor,
+    blockingAuthors: opts.blockingQuestionAuthors,
+  });
   // A maintainer-only ❓ never starts a worker round on its own: the worker
   // has no way to file/close another issue, change labels or assignment, or
   // decide scope. Mixed reviews still hand over for the worker-answerable part.
-  if (isMaintainerOnlyTrailer(opts.markdown, opts.record)) return false;
-  if (
-    isCurrentHeadFailureTrailer(opts.markdown, opts.record) ||
-    isLeftoverSimplificationTrailer(opts.markdown, opts.record) ||
-    isBlockingQuestionTrailer(opts.markdown, opts.prAuthor, opts.blockingQuestionAuthors, opts.record)
-  ) {
-    return true;
-  }
-  // A success review that names non-blocking 🟡 risks still hands over when
-  // `followup_on_risks` is on (the default); the switch itself is enforced by
-  // the caller that owns the settings (`enqueueFollowUpFromReview`,
-  // `isJumiReviewFinding`), so the pure view defaults to handing over.
-  try {
-    const parsed = parseReviewOutput(opts.markdown ?? "");
-    if (!parsed.verdict.incomplete && trailerNonBlockingRiskCount(parsed.verdict.description) > 0) return true;
-  } catch {
-    return false;
-  }
-  return false;
+  if (facts.viewIsMaintainerOnly) return false;
+  return handoverWakesFromFacts(facts);
 }
 
 function persistInsertSkipReason(
@@ -97,22 +86,17 @@ function persistInsertSkipReason(
   record?: ReviewRecord | null
 ): string | undefined {
   if (!markdown && !record) return "incomplete";
-  const view = reviewVerdictView({ markdown, record });
-  if (view.incomplete) return "incomplete";
-  if (view.state === "failure") return undefined;
-  if (view.state === "success") {
-    if (view.suggestionCount > 0) return undefined;
-    if (view.blockingQuestionCount(prAuthorLogin, blockingAuthors) > 0) return undefined;
+  const facts = buildReviewFacts({ body: markdown, record, prAuthorLogin, blockingAuthors });
+  if (facts.viewIncomplete) return "incomplete";
+  if (facts.viewState === "failure") return undefined;
+  if (facts.viewState === "success") {
+    if (facts.viewSuggestionCount > 0) return undefined;
+    if (facts.viewBlockingQuestionCount > 0) return undefined;
     // A success review that names non-blocking 🟡 risks still needs the
     // follow-up decision below (which reads `followup_on_risks`); the cheap
     // gate must not skip it as a plain success trailer.
-    try {
-      const parsed = parseReviewOutput(markdown ?? "");
-      if (!parsed.verdict.incomplete && trailerNonBlockingRiskCount(parsed.verdict.description) > 0) {
-        return undefined;
-      }
-    } catch {
-      // Fall through to the plain success skip.
+    if (!facts.incomplete && facts.trailerNonBlockingRiskCount > 0) {
+      return undefined;
     }
     return "success trailer";
   }
@@ -175,19 +159,10 @@ async function resolveHeldSuggestion(
     const sha =
       hold.headSha && hold.headSha.toLowerCase() === headSha.toLowerCase() ? headSha : (hold.headSha ?? headSha);
     let count = hold.count ?? 0;
-    let view: ReturnType<typeof reviewVerdictView> | undefined;
-    try {
-      view = reviewVerdictView({ markdown, record });
-    } catch {
-      view = undefined;
-    }
+    const facts = buildReviewFacts({ body: markdown, record });
     if (!count) {
-      try {
-        if (view && !view.incomplete && view.state === "success") {
-          count = view.suggestionCount;
-        }
-      } catch {
-        count = 0;
+      if (!facts.viewIncomplete && facts.viewState === "success") {
+        count = facts.viewSuggestionCount;
       }
     }
     if (!count) return;
@@ -197,10 +172,9 @@ async function resolveHeldSuggestion(
     // without a record fall back to the markdown parser via the same view.
     if (
       maintainerHoldEnabled &&
-      view &&
-      !view.incomplete &&
-      view.state === "success" &&
-      view.maintainerQuestionCount > 0
+      !facts.viewIncomplete &&
+      facts.viewState === "success" &&
+      facts.viewMaintainerQuestionCount > 0
     ) {
       return;
     }
@@ -498,10 +472,10 @@ export async function enqueueFollowUpFromReview(
   // when its body also publishes 🟡 findings.
   if (!policy.followupOnRisks) {
     try {
-      const parsed = parseReviewOutput(opts.markdown ?? "");
-      if (!parsed.verdict.incomplete && parsed.verdict.state === "success") {
-        const bugs = countBugFindings(parsed.comment);
-        const advisoryRisks = trailerNonBlockingRiskCount(parsed.verdict.description);
+      const facts = buildReviewFacts({ body: opts.markdown, record });
+      if (!facts.incomplete && facts.state === "success") {
+        const bugs = facts.bugCount;
+        const advisoryRisks = facts.trailerNonBlockingRiskCount;
         const blockingQs = isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record);
         const suggestionWake = isLeftoverSimplificationTrailer(opts.markdown, record) && policy.followupOnSuggestions;
         if (bugs === 0 && advisoryRisks > 0 && !blockingQs && !suggestionWake) {
