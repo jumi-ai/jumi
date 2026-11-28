@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      statuses: write
     env:
       IMAGE: ghcr.io/jumi-ai/jumi-reviewer
       REGISTRY: ghcr.io
@@ -342,40 +343,30 @@ jobs:
             "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'mkdir -p /tmp/probe-home && cd /app/scripts/opencode && timeout 600 bun src/pi_go_wire_probe.ts'
 
-      - name: Promote candidate to release tags
+      - name: Record candidate status
         if: ${{ env.VERSION != '' }}
-        # Runs only after every probe above passed: a failed probe stops the
-        # job before this step, so the previous public tags stay untouched.
-        # The promoted tags point at the exact verified candidate digest, so
-        # the version/revision baked at build time carries over unchanged.
+        # Push workflows no longer promote `:vX.Y.Z` / `:latest`: the probed
+        # candidate stays at `sha-<SHA>` and this status marks it verified.
+        # The nightly gate requires both `jumi/candidate-reviewer` and
+        # `jumi/candidate-worker` success statuses on HEAD before it tags or
+        # promotes anything.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          CANDIDATE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          CANDIDATE_DIGEST="${{ steps.build.outputs.digest }}"
           if [ -z "${CANDIDATE_DIGEST}" ]; then
             echo "missing candidate digest from the build step" >&2
             exit 1
           fi
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${VERSION}" \
-            --tag "${IMAGE}:latest" \
-            "${IMAGE}@${CANDIDATE_DIGEST}"
-          echo "Promoted ${IMAGE}@${CANDIDATE_DIGEST} to :${VERSION} and :latest"
-
-      - name: Record registry manifest digest
-        if: ${{ env.VERSION != '' }}
-        run: |
-          set -euo pipefail
-          echo "Promoted ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
-          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
-          docker buildx imagetools inspect "${IMAGE}:latest"
-          # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
-
-      - name: Verify anonymous pull
-        if: ${{ env.VERSION != '' }}
-        run: |
-          set -euo pipefail
-          docker rmi "${IMAGE}:${VERSION}" "${IMAGE}:latest" || true
-          docker logout "${REGISTRY}"
-          docker pull "${IMAGE}:${VERSION}"
-          docker pull "${IMAGE}:latest"
-          echo "Verified anonymous docker pull of ${IMAGE}:${VERSION} with no auth"
+          DESCRIPTION="digest=${CANDIDATE_DIGEST} version=${VERSION}"
+          PAYLOAD="$(jq -n --arg state success --arg url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --arg context "jumi/candidate-reviewer" --arg description "${DESCRIPTION}" '{state:$state,target_url:$url,context:$context,description:$description}')"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "${PAYLOAD}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}"
+          echo "Recorded jumi/candidate-reviewer ${DESCRIPTION}"

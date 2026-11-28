@@ -6,6 +6,7 @@
     "src/worker.ts",
     "src/worker_server.ts",
     "src/release.ts",
+    "src/nightly_release.ts",
     "src/searxng_server.ts",
     "src/*_probe.ts",
     "test/**/*.test.ts",

@@ -4,9 +4,11 @@ import { join } from "node:path";
 
 /**
  * Candidate image tag for a commit SHA. The reviewer workflow builds and
- * pushes this non-release tag first, probes that exact digest, and only
- * then moves the version and `latest` tags to the verified digest — so a
- * failed probe never leaves public tags pointing at an unverified image.
+ * pushes this non-release tag first, probes that exact digest, then records
+ * a `jumi/candidate-reviewer` commit status carrying the digest and baked
+ * version — so a failed probe leaves no public tags pointing at an
+ * unverified image, and pushes never move `:vX.Y.Z` / `:latest` at all. The
+ * nightly release workflow promotes the tested digests after its own gate.
  * Lives here (not in `src`) because the `sha-<hex>` shape is defined by the
  * workflow shell (`CANDIDATE_TAG=sha-${GITHUB_SHA}`) and no production
  * caller uses these helpers.
@@ -42,9 +44,9 @@ function stepBlock(text: string, name: string): string {
 }
 
 /**
- * Simulated registry promotion: the workflow's promote step only runs after
- * every probe passed (a failed probe stops the job), and it points the
- * public tags at the exact verified candidate digest.
+ * Simulated nightly promotion: only the nightly workflow moves the public
+ * tags, and only at the exact tested candidate digest after its gate passes.
+ * A failing gate (or a missing digest) moves nothing.
  */
 function promoteIfVerified(opts: {
   probesPassed: boolean;
@@ -97,13 +99,13 @@ describe("reviewer image promote-before-probe ordering", () => {
     expect(isReviewerCandidateTag(reviewerCandidateTag("deadbeef"))).toBe(true);
   });
 
-  test("probes run against the exact candidate digest", async () => {
+  test("probes run against the exact candidate digest, then record it", async () => {
     const text = await workflow();
     const probeStart = text.indexOf("- name: Pull candidate image for verification");
-    const probeEnd = text.indexOf("- name: Promote candidate to release tags");
+    const record = text.indexOf("- name: Record candidate status");
     expect(probeStart).toBeGreaterThan(-1);
-    expect(probeEnd).toBeGreaterThan(probeStart);
-    const probeSection = text.slice(probeStart, probeEnd);
+    expect(record).toBeGreaterThan(probeStart);
+    const probeSection = text.slice(probeStart, record);
     expect(probeSection).toContain("$" + "{{ steps.build.outputs.digest }}");
     expect(probeSection).not.toContain("$" + "{IMAGE}:$" + "{VERSION}");
     expect(probeSection).not.toContain("$" + "{IMAGE}:latest");
@@ -128,19 +130,24 @@ describe("reviewer image promote-before-probe ordering", () => {
     }
   });
 
-  test("release tags move to the verified digest only after every probe", async () => {
+  test("pushes record the probed candidate; only the nightly promotes release tags", async () => {
     const text = await workflow();
-    const lastProbe = text.indexOf("src/xai_child_auth_probe.ts");
-    const promote = text.indexOf("- name: Promote candidate to release tags");
-    const record = text.indexOf("- name: Record registry manifest digest");
-    expect(lastProbe).toBeGreaterThan(-1);
-    expect(promote).toBeGreaterThan(lastProbe);
-    expect(record).toBeGreaterThan(promote);
-    const promoteBlock = stepBlock(text, "Promote candidate to release tags");
-    expect(promoteBlock).toContain("imagetools create");
-    expect(promoteBlock).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(promoteBlock).toContain("$" + "{IMAGE}:latest");
-    expect(promoteBlock).toContain("$" + "{IMAGE}@$" + "{CANDIDATE_DIGEST}");
+    // No promotion on push: the old promote/record-manifest steps are gone.
+    expect(text).not.toContain("- name: Promote candidate to release tags");
+    expect(text).not.toContain("- name: Record registry manifest digest");
+    expect(text).not.toContain("imagetools create");
+    expect(text).not.toContain("$" + "{IMAGE}:$" + "{VERSION}");
+    expect(text).not.toContain("$" + "{IMAGE}:latest");
+    const recordBlock = stepBlock(text, "Record candidate status");
+    expect(recordBlock).toContain("$" + "{{ steps.build.outputs.digest }}");
+    expect(recordBlock).toContain("jumi/candidate-reviewer");
+    expect(recordBlock).toContain("digest=${CANDIDATE_DIGEST} version=${VERSION}");
+    expect(recordBlock).toContain("/statuses/${GITHUB_SHA}");
+    // The nightly workflow promotes the tested digests after its gate.
+    const nightly = await readFile(join(repoRoot, ".github/workflows/jumi-nightly-release.yml"), "utf8");
+    expect(nightly).toContain("imagetools create");
+    expect(nightly).toContain("$" + "{IMAGE}:$" + "{{ steps.gate.outputs.version }}");
+    expect(nightly).toContain("$" + "{IMAGE}:latest");
   });
 
   test("simulated failing probe leaves public tags unchanged; passing probe moves them", () => {
