@@ -33,7 +33,7 @@ export const PI_CLAUDE_ENDPOINT = "process://claude-code" as const;
 /** Binary reused from the pinned image install (no third image). */
 export const PI_CLAUDE_COMMAND = "claude" as const;
 /** Pinned Claude CLI (mirrors `.gitea/tool-versions.env` CLAUDE_VERSION). */
-export const PI_CLAUDE_PINNED_CLI = "2.1.331" as const;
+export const PI_CLAUDE_PINNED_CLI = "2.1.332" as const;
 /** Reviewed Pi SDK (mirrors `package.json` @earendil-works/pi-coding-agent). */
 export const PI_CLAUDE_PINNED_PI = "1.6.1" as const;
 
