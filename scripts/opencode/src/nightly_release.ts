@@ -21,7 +21,7 @@
  *   model output, transcripts, or record free text).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 export const NIGHTLY_PI_ROUTE_NAME = "pi-contributor" as const;
 export const NIGHTLY_PI_PROVIDER = "opencode-go" as const;
@@ -110,7 +110,7 @@ export function evalCaseKey(evalKind: "worker" | "review", fixture: string, half
 
 /** Normalize worker eval rows (no halves) into gate records. */
 export function workerRecordsToGate(
-  rows: Array<{ fixture: string; trial: number; verdict: GateRecord["verdict"]; inconclusiveReason?: string }>,
+  rows: Array<{ fixture: string; trial: number; verdict: GateRecord["verdict"]; inconclusiveReason?: string }>
 ): GateRecord[] {
   return rows.map((row) => ({
     caseKey: evalCaseKey("worker", row.fixture),
@@ -128,7 +128,7 @@ export function reviewRecordsToGate(
     trial: number;
     verdict: GateRecord["verdict"];
     inconclusiveReason?: string;
-  }>,
+  }>
 ): GateRecord[] {
   return rows.map((row) => ({
     caseKey: evalCaseKey("review", row.fixture, row.half),
@@ -291,6 +291,36 @@ export function parseReleaseBlockedBody(body: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Compose the rolling-issue body from a finished evaluation: outcome and
+ * reason come from the gate, failing cases from the cases that did not pass.
+ * Structured fields only, never record free text.
+ */
+export function issueBodyFromEvaluation(opts: {
+  evaluated: GateEvaluation;
+  version: string;
+  headSha: string;
+  baseTag: string | null;
+  reviewerDigest: string;
+  workerDigest: string;
+  runUrl: string;
+}): string {
+  if (opts.evaluated.outcome === "pass") throw new Error("issue-body needs a failing evaluation");
+  return buildReleaseBlockedBody({
+    outcome: opts.evaluated.outcome,
+    reasonCategory: opts.evaluated.reasonCategory,
+    version: opts.version,
+    headSha: opts.headSha,
+    baseTag: opts.baseTag,
+    reviewerDigest: opts.reviewerDigest,
+    workerDigest: opts.workerDigest,
+    failingCases: opts.evaluated.cases
+      .filter((entry) => !entry.passed)
+      .map((entry) => ({ caseKey: entry.caseKey, passes: entry.passes, total: entry.total })),
+    runUrl: opts.runUrl,
+  });
+}
+
 /** Labels per outcome: fail is picked up by Jumi (`jumi` + `no-automerge`); inconclusive is maintainer-only. */
 export function labelsForOutcome(outcome: NightlyOutcome): string[] {
   if (outcome === "fail") return ["release-blocked", "jumi", "no-automerge"];
@@ -307,24 +337,68 @@ export function decideIssueAction(opts: {
   return opts.existingOpen ? "comment" : "open";
 }
 
-/** Commit-status description carrying both digests plus the baked version. */
-export function candidateStatusDescription(opts: {
-  reviewerDigest: string;
-  workerDigest: string;
+/** Commit-status contexts the push image workflows post once every probe passes. */
+export const CANDIDATE_STATUS_CONTEXTS = {
+  reviewer: "jumi/candidate-reviewer",
+  worker: "jumi/candidate-worker",
+} as const;
+
+export interface CandidateImage {
+  digest: string;
   version: string;
-}): string {
-  return `reviewer=${opts.reviewerDigest.trim()} worker=${opts.workerDigest.trim()} version=${opts.version.trim()}`;
 }
 
-/** Parse a `jumi/candidate` status description back into digests and version. */
-export function parseCandidateStatusDescription(
-  description: string,
-): { reviewerDigest: string; workerDigest: string; version: string } | null {
-  const reviewer = /reviewer=(\S+)/.exec(description)?.[1] ?? "";
-  const worker = /worker=(\S+)/.exec(description)?.[1] ?? "";
-  const version = /version=(\S+)/.exec(description)?.[1] ?? "";
-  if (!reviewer || !worker || !version) return null;
-  return { reviewerDigest: reviewer, workerDigest: worker, version };
+/**
+ * Resolve both probed candidates from the commit statuses attached to HEAD.
+ * Each push workflow posts its own context (`digest=<d> version=<v>`) after
+ * every probe passes; anything else (missing, non-success, unparsable) means
+ * the night is inconclusive, never a pass. The statuses are already bound to
+ * the queried SHA, so no separate revision check is needed.
+ */
+export function resolveCandidatesFromStatuses(
+  statuses: Array<{ context: string; state: string; description: string }>
+): { ok: true; reviewer: CandidateImage; worker: CandidateImage } | { ok: false; detail: string } {
+  const images: Record<"reviewer" | "worker", CandidateImage | null> = { reviewer: null, worker: null };
+  for (const name of ["reviewer", "worker"] as const) {
+    const status = statuses.find((entry) => entry.context === CANDIDATE_STATUS_CONTEXTS[name]);
+    if (!status) return { ok: false, detail: `missing ${CANDIDATE_STATUS_CONTEXTS[name]} status` };
+    if (status.state !== "success") {
+      return { ok: false, detail: `${CANDIDATE_STATUS_CONTEXTS[name]} state is ${status.state || "(empty)"}` };
+    }
+    const digest = /digest=(\S+)/.exec(status.description)?.[1] ?? "";
+    const version = /version=(\S+)/.exec(status.description)?.[1] ?? "";
+    if (!digest || !version) {
+      return { ok: false, detail: `${CANDIDATE_STATUS_CONTEXTS[name]} description is not "digest=<d> version=<v>"` };
+    }
+    images[name] = { digest, version };
+  }
+  return { ok: true, reviewer: images.reviewer as CandidateImage, worker: images.worker as CandidateImage };
+}
+
+/**
+ * Expected gate cases for a full night: every shipped worker fixture plus
+ * every shipped review fixture in both halves.
+ */
+export function expectedCaseKeys(workerFixtures: readonly string[], reviewFixtures: readonly string[]): string[] {
+  const keys = workerFixtures.map((fixture) => evalCaseKey("worker", fixture));
+  for (const fixture of reviewFixtures) {
+    keys.push(evalCaseKey("review", fixture, "defective"), evalCaseKey("review", fixture, "repaired"));
+  }
+  return keys.sort();
+}
+
+/** Normalize raw worker + review eval JSONL rows into gate records. */
+export function normalizeEvalRecords(
+  workerRows: Array<{ fixture: string; trial: number; verdict: GateRecord["verdict"]; inconclusiveReason?: string }>,
+  reviewRows: Array<{
+    fixture: string;
+    half: string;
+    trial: number;
+    verdict: GateRecord["verdict"];
+    inconclusiveReason?: string;
+  }>
+): GateRecord[] {
+  return [...workerRecordsToGate(workerRows), ...reviewRecordsToGate(reviewRows)];
 }
 
 /** Which workflow files reference the `release` environment (nightly + manual only). */
@@ -385,8 +459,7 @@ export async function getLatestReleaseTag(opts: {
 }): Promise<string | null> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = opts.apiUrl.replace(/\/+$/, "");
-  const url =
-    `${base}/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}` + `/releases/latest`;
+  const url = `${base}/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}` + `/releases/latest`;
   const res = await fetchImpl(url, { headers: githubHeaders(opts.token) });
   if (res.status === 404) return null;
   const text = await res.text().catch(() => "");
@@ -488,8 +561,7 @@ export async function closeReleaseBlockedIssue(opts: {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = opts.apiUrl.replace(/\/+$/, "");
   const url =
-    `${base}/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}` +
-    `/issues/${opts.issueNumber}`;
+    `${base}/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}` + `/issues/${opts.issueNumber}`;
   const res = await fetchImpl(url, {
     method: "PATCH",
     headers: githubHeaders(opts.token),
@@ -497,6 +569,22 @@ export async function closeReleaseBlockedIssue(opts: {
   });
   const text = await res.text().catch(() => "");
   if (res.status !== 200) throw new Error(`GitHub API PATCH issue → ${res.status}: ${text.slice(0, 200)}`);
+}
+
+function readApiEnv(): { apiUrl: string; token: string; owner: string; repo: string } {
+  const apiUrl = process.env.GITHUB_API_URL || "https://api.github.com";
+  const token = process.env.GITHUB_TOKEN ?? "";
+  const repository = process.env.GITHUB_REPOSITORY ?? "";
+  if (!token) throw new Error("issue API needs GITHUB_TOKEN");
+  const [owner, repo] = repository.split("/");
+  if (!owner || !repo) throw new Error("issue API needs GITHUB_REPOSITORY as owner/repo");
+  return { apiUrl, token, owner, repo };
+}
+
+function readBodyFile(flag: string, args: string[]): string {
+  const idx = args.indexOf(flag);
+  if (idx < 0 || idx + 1 >= args.length) throw new Error(`${flag} <path> is required`);
+  return readFileSync(args[idx + 1], "utf8");
 }
 
 async function main(args: string[]): Promise<void> {
@@ -557,7 +645,10 @@ async function main(args: string[]): Promise<void> {
         trial?: number;
         inconclusiveReason?: string;
       };
-      if (!parsed.caseKey || (parsed.verdict !== "pass" && parsed.verdict !== "fail" && parsed.verdict !== "inconclusive")) {
+      if (
+        !parsed.caseKey ||
+        (parsed.verdict !== "pass" && parsed.verdict !== "fail" && parsed.verdict !== "inconclusive")
+      ) {
         throw new Error("evaluate results need {caseKey, verdict: pass|fail|inconclusive, trial}");
       }
       records.push({
@@ -570,7 +661,10 @@ async function main(args: string[]): Promise<void> {
     const expectedIdx = args.indexOf("--expected");
     const expected =
       expectedIdx >= 0 && expectedIdx + 1 < args.length
-        ? args[expectedIdx + 1].split(",").map((part) => part.trim()).filter(Boolean)
+        ? args[expectedIdx + 1]
+            .split(",")
+            .map((part) => part.trim())
+            .filter(Boolean)
         : undefined;
     const result = evaluateGate(records, expected);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -594,8 +688,150 @@ async function main(args: string[]): Promise<void> {
     process.stdout.write(`${decideIssueAction({ outcome, existingOpen: existing })}\n`);
     return;
   }
+  if (command === "normalize") {
+    const get = (flag: string): string => {
+      const idx = args.indexOf(flag);
+      if (idx < 0 || idx + 1 >= args.length) throw new Error(`normalize needs ${flag} <path>`);
+      return args[idx + 1];
+    };
+    const parseRows = (path: string): Array<Record<string, unknown>> => {
+      const rows: Array<Record<string, unknown>> = [];
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        // An eval that crashed before writing any record leaves no file;
+        // that is zero rows, so `evaluate --expected` reports missing-case
+        // (inconclusive), never a pass.
+        return rows;
+      }
+      for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        rows.push(JSON.parse(trimmed) as Record<string, unknown>);
+      }
+      return rows;
+    };
+    const workerRows = parseRows(get("--worker")).map((row) => ({
+      fixture: String(row.fixture ?? ""),
+      trial: typeof row.trial === "number" ? row.trial : 0,
+      verdict: row.verdict as GateRecord["verdict"],
+      ...(typeof row.inconclusiveReason === "string" ? { inconclusiveReason: row.inconclusiveReason } : {}),
+    }));
+    const reviewRows = parseRows(get("--review")).map((row) => ({
+      fixture: String(row.fixture ?? ""),
+      half: String(row.half ?? ""),
+      trial: typeof row.trial === "number" ? row.trial : 0,
+      verdict: row.verdict as GateRecord["verdict"],
+      ...(typeof row.inconclusiveReason === "string" ? { inconclusiveReason: row.inconclusiveReason } : {}),
+    }));
+    const records = normalizeEvalRecords(workerRows, reviewRows);
+    const lines = records.map((record) => JSON.stringify(record));
+    writeFileSync(get("--out"), `${lines.join("\n")}\n`);
+    return;
+  }
+  if (command === "expected") {
+    const { listWorkerEvalFixtures } = await import("./worker_eval.ts");
+    const { listReviewEvalFixtures } = await import("./review_eval.ts");
+    process.stdout.write(
+      `${expectedCaseKeys(await listWorkerEvalFixtures(), await listReviewEvalFixtures()).join(",")}\n`
+    );
+    return;
+  }
+  if (command === "latest-tag") {
+    process.stdout.write(`${(await getLatestReleaseTag(readApiEnv())) ?? ""}\n`);
+    return;
+  }
+  if (command === "open-issues") {
+    process.stdout.write(`${JSON.stringify(await findOpenReleaseBlockedIssues(readApiEnv()))}\n`);
+    return;
+  }
+  if (command === "candidate-status") {
+    const idx = args.indexOf("--sha");
+    if (idx < 0 || idx + 1 >= args.length) throw new Error("candidate-status needs --sha <head-sha>");
+    const env = readApiEnv();
+    const resolved = resolveCandidatesFromStatuses(await getCommitStatusStates({ ...env, sha: args[idx + 1] }));
+    if (!resolved.ok) {
+      process.stderr.write(`inconclusive: ${resolved.detail}\n`);
+      process.exit(2);
+    }
+    process.stdout.write(`${JSON.stringify(resolved)}\n`);
+    return;
+  }
+  if (command === "issue-body") {
+    const get = (flag: string): string => {
+      const idx = args.indexOf(flag);
+      if (idx < 0 || idx + 1 >= args.length) throw new Error(`issue-body needs ${flag} <value>`);
+      return args[idx + 1];
+    };
+    const evaluated = JSON.parse(readBodyFile("--evaluate-file", args)) as {
+      outcome: NightlyOutcome;
+      reasonCategory: NightlyReasonCategory;
+      cases: CaseResult[];
+    };
+    const baseTag = get("--base-tag").trim();
+    writeFileSync(
+      get("--out"),
+      issueBodyFromEvaluation({
+        evaluated,
+        version: get("--version"),
+        headSha: get("--head-sha"),
+        baseTag: baseTag ? baseTag : null,
+        reviewerDigest: get("--reviewer-digest"),
+        workerDigest: get("--worker-digest"),
+        runUrl: get("--run-url"),
+      })
+    );
+    return;
+  }
+  if (command === "issue-open") {
+    const get = (flag: string): string => {
+      const idx = args.indexOf(flag);
+      if (idx < 0 || idx + 1 >= args.length) throw new Error(`issue-open needs ${flag} <value>`);
+      return args[idx + 1];
+    };
+    const labels = get("--labels")
+      .split(",")
+      .map((label) => label.trim())
+      .filter(Boolean);
+    const opened = await createReleaseBlockedIssue({
+      ...readApiEnv(),
+      title: get("--title"),
+      body: readBodyFile("--body-file", args),
+      labels,
+    });
+    process.stdout.write(`${opened.number}\n`);
+    return;
+  }
+  if (command === "issue-comment") {
+    const get = (flag: string): string => {
+      const idx = args.indexOf(flag);
+      if (idx < 0 || idx + 1 >= args.length) throw new Error(`issue-comment needs ${flag} <value>`);
+      return args[idx + 1];
+    };
+    await commentReleaseBlockedIssue({
+      ...readApiEnv(),
+      issueNumber: Number(get("--number")),
+      body: readBodyFile("--body-file", args),
+    });
+    return;
+  }
+  if (command === "issue-close") {
+    const get = (flag: string): string => {
+      const idx = args.indexOf(flag);
+      if (idx < 0 || idx + 1 >= args.length) throw new Error(`issue-close needs ${flag} <value>`);
+      return args[idx + 1];
+    };
+    await closeReleaseBlockedIssue({
+      ...readApiEnv(),
+      issueNumber: Number(get("--number")),
+      body: readBodyFile("--body-file", args),
+    });
+    return;
+  }
   process.stdout.write(
-    "usage: nightly_release.ts <budget|pi-catalog|is-head-released|check-candidates|evaluate|labels|issue-action>\n",
+    `"usage: nightly_release.ts <budget|pi-catalog|is-head-released|check-candidates|evaluate|normalize|expected|` +
+      `latest-tag|open-issues|candidate-status|labels|issue-action|issue-body|issue-open|issue-comment|issue-close>\\n"`
   );
 }
 

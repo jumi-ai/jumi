@@ -1218,28 +1218,34 @@ describe("image labels and no double-build", () => {
     expect(workflowRebuildsOnTag(worker)).toBe(false);
     expect(shouldSkipImageBuild("tag")).toBe(true);
     expect(shouldSkipImageBuild("branch")).toBe(false);
-    expect(reviewer).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    // Both images publish VERSION/latest by promoting the probed candidate
-    // digest (imagetools create), never by pushing release tags from a second
-    // build: the only pushed tag before promotion is the sha candidate.
-    expect(worker).toContain("$" + "{{ env.IMAGE }}:$" + "{{ env.CANDIDATE_TAG }}");
-    expect(worker).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(worker).toContain("$" + "{IMAGE}:latest");
-    expect(worker).toContain("imagetools create");
-    expect(reviewer).toContain("bun src/release.ts next-version");
-    expect(worker).toContain("bun src/release.ts next-version");
-    expect(reviewer).toContain("if: $" + "{{ env.VERSION != '' }}");
-    expect(worker).toContain("if: $" + "{{ env.VERSION != '' }}");
+    // Push workflows never promote: they probe the sha candidate, then
+    // record a per-image candidate status. Only the nightly workflow moves
+    // VERSION/latest, via imagetools create on the tested digests.
+    for (const [text, context] of [
+      [reviewer, "jumi/candidate-reviewer"],
+      [worker, "jumi/candidate-worker"],
+    ] as const) {
+      expect(text).toContain("- name: Record candidate status");
+      expect(text).toContain(context);
+      expect(text).toContain("$" + "{{ env.IMAGE }}:$" + "{{ env.CANDIDATE_TAG }}");
+      expect(text).not.toContain("- name: Promote candidate to release tags");
+      expect(text).not.toContain("imagetools create");
+      expect(text).not.toContain("$" + "{IMAGE}:$" + "{VERSION}");
+      expect(text).not.toContain("$" + "{IMAGE}:latest");
+      expect(text).toContain("bun src/release.ts next-version");
+      expect(text).toContain("if: $" + "{{ env.VERSION != '' }}");
+      expect(text).toContain("branches: [main]");
+      expect(text).not.toContain("type=sha");
+      expect(text).not.toContain(":${{ github.sha");
+    }
     expect(worker).toContain("target: worker");
     expect(worker).toContain("ghcr.io/jumi-ai/jumi-worker");
-    expect(worker).toContain("branches: [main]");
-    expect(worker).not.toContain("type=sha");
-    expect(worker).not.toContain(":${{ github.sha");
     expect(reviewer).toContain("target: runtime");
     expect(reviewer).toContain("ghcr.io/jumi-ai/jumi-reviewer");
-    expect(reviewer).toContain("branches: [main]");
-    expect(reviewer).not.toContain("type=sha");
-    expect(reviewer).not.toContain(":${{ github.sha");
+    const nightly = await readFile(join(repoRoot, ".github/workflows/jumi-nightly-release.yml"), "utf8");
+    expect(nightly).toContain("imagetools create");
+    expect(nightly).toContain("$" + "{IMAGE}:$" + "{{ steps.gate.outputs.version }}");
+    expect(nightly).toContain("$" + "{IMAGE}:latest");
     const release = await readFile(join(repoRoot, ".github/workflows/jumi-release.yml"), "utf8");
     expect(release).toContain("bun src/release.ts publish-github");
     expect(release).not.toMatch(/bun src\/release\.ts publish\s*$/m);

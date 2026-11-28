@@ -1,8 +1,12 @@
 name: Jumi semver tag and GitHub Release
 
+# Manual release only: pushes to `main` never tag (the nightly gate in
+# jumi-nightly-release.yml is the only push-driven path to a release).
+# Runs under the `release` environment so the manual path shares the same
+# operator-held secrets as the nightly run.
+
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,6 +17,8 @@ permissions:
 
 jobs:
   release:
+    if: github.repository == 'jumi-ai/jumi'
+    environment: release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

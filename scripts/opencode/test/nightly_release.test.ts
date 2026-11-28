@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   buildReleaseBlockedBody,
-  candidateStatusDescription,
+  CANDIDATE_STATUS_CONTEXTS,
   categorizeInconclusive,
   checkCandidates,
   closeReleaseBlockedIssue,
@@ -13,24 +13,27 @@ import {
   defaultNightlyPiCatalog,
   evalCaseKey,
   evaluateGate,
+  expectedCaseKeys,
   findOpenReleaseBlockedIssues,
+  type GateRecord,
   getCommitStatusStates,
   getLatestReleaseTag,
   isHeadReleased,
+  issueBodyFromEvaluation,
   labelsForOutcome,
-  nightlyBudgetFromEnv,
   NIGHTLY_EVAL_BUDGET_DEFAULT,
   NIGHTLY_PI_MODEL,
   NIGHTLY_PI_PROVIDER,
   NIGHTLY_PI_ROUTE_NAME,
   NIGHTLY_PI_SKU,
-  parseCandidateStatusDescription,
+  nightlyBudgetFromEnv,
+  normalizeEvalRecords,
   parseReleaseBlockedBody,
+  resolveCandidatesFromStatuses,
   reviewRecordsToGate,
   shouldTagAndPromote,
   workerRecordsToGate,
   workflowsReferencingReleaseEnv,
-  type GateRecord,
 } from "../src/nightly_release.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
@@ -58,9 +61,9 @@ describe("candidate gate", () => {
   const goodWorker = { digest: "sha256:bbb", version: "v1.2.3", revision: head };
 
   test("both candidates present and matching version pass", () => {
-    expect(
-      checkCandidates({ headSha: head, expectedVersion: "v1.2.3", reviewer: good, worker: goodWorker }),
-    ).toEqual({ ok: true });
+    expect(checkCandidates({ headSha: head, expectedVersion: "v1.2.3", reviewer: good, worker: goodWorker })).toEqual({
+      ok: true,
+    });
   });
 
   test("a missing candidate is inconclusive", () => {
@@ -96,18 +99,48 @@ describe("candidate gate", () => {
     if (!revision.ok) expect(revision.reason).toBe("version-mismatch");
   });
 
-  test("candidate status description round-trips both digests and the version", () => {
-    const description = candidateStatusDescription({
-      reviewerDigest: "sha256:aaa",
-      workerDigest: "sha256:bbb",
-      version: "v1.2.3",
+  test("both probed statuses resolve; anything else is inconclusive", () => {
+    const both = [
+      {
+        context: CANDIDATE_STATUS_CONTEXTS.reviewer,
+        state: "success",
+        description: "digest=sha256:aaa version=v1.2.3",
+      },
+      { context: CANDIDATE_STATUS_CONTEXTS.worker, state: "success", description: "digest=sha256:bbb version=v1.2.3" },
+    ];
+    expect(resolveCandidatesFromStatuses(both)).toEqual({
+      ok: true,
+      reviewer: { digest: "sha256:aaa", version: "v1.2.3" },
+      worker: { digest: "sha256:bbb", version: "v1.2.3" },
     });
-    expect(parseCandidateStatusDescription(description)).toEqual({
-      reviewerDigest: "sha256:aaa",
-      workerDigest: "sha256:bbb",
-      version: "v1.2.3",
-    });
-    expect(parseCandidateStatusDescription("nothing here")).toBeNull();
+    const missing = both.slice(1);
+    expect(resolveCandidatesFromStatuses(missing).ok).toBe(false);
+    const pending = [{ ...both[0], state: "pending" }, both[1]];
+    const pendingResult = resolveCandidatesFromStatuses(pending);
+    expect(pendingResult.ok).toBe(false);
+    if (!pendingResult.ok) expect(pendingResult.detail).toContain("pending");
+    const garbled = [{ ...both[0], description: "nothing here" }, both[1]];
+    expect(resolveCandidatesFromStatuses(garbled).ok).toBe(false);
+  });
+
+  test("expected cases cover every worker fixture and both review halves", () => {
+    expect(expectedCaseKeys(["b", "a"], ["r"])).toEqual([
+      "review/r/defective",
+      "review/r/repaired",
+      "worker/a/single",
+      "worker/b/single",
+    ]);
+  });
+
+  test("normalize maps raw eval rows to gate records", () => {
+    const records = normalizeEvalRecords(
+      [{ fixture: "w", trial: 1, verdict: "pass" }],
+      [{ fixture: "r", half: "defective", trial: 2, verdict: "inconclusive", inconclusiveReason: "budget-exhausted" }]
+    );
+    expect(records).toEqual([
+      { caseKey: "worker/w/single", trial: 1, verdict: "pass" },
+      { caseKey: "review/r/defective", trial: 2, verdict: "inconclusive", inconclusiveReason: "budget-exhausted" },
+    ]);
   });
 });
 
@@ -139,7 +172,11 @@ describe("2-of-3 gate", () => {
   });
 
   test("budget-unmeasurable is inconclusive, never a pass", () => {
-    const records = trials("worker/fixture-a/single", ["pass", "pass", "inconclusive"], "budget-unmeasurable: no usage");
+    const records = trials(
+      "worker/fixture-a/single",
+      ["pass", "pass", "inconclusive"],
+      "budget-unmeasurable: no usage"
+    );
     const result = evaluateGate(records);
     expect(result.outcome).toBe("inconclusive");
     expect(result.reasonCategory).toBe("budget-unmeasurable");
@@ -197,7 +234,8 @@ describe("rolling release-blocked issue", () => {
       if (url.includes("/issues?state=open") && method === "GET") {
         return new Response(JSON.stringify([]), { status: 200 });
       }
-      if (url.endsWith("/issues") && method === "POST") return new Response(JSON.stringify({ number: 7 }), { status: 201 });
+      if (url.endsWith("/issues") && method === "POST")
+        return new Response(JSON.stringify({ number: 7 }), { status: 201 });
       if (url.endsWith("/comments") && method === "POST") return new Response("{}", { status: 201 });
       if (/\/issues\/\d+$/.test(url) && method === "PATCH") return new Response("{}", { status: 200 });
       return new Response("unexpected", { status: 500 });
@@ -242,19 +280,57 @@ describe("rolling release-blocked issue", () => {
     expect(parseReleaseBlockedBody(body).outcome).toBe("fail");
   });
 
+  test("issue body from an evaluation lists only the failing cases", () => {
+    const evaluated = evaluateGate(trials("worker/w/single", ["pass", "pass", "pass"]));
+    expect(() =>
+      issueBodyFromEvaluation({
+        evaluated,
+        version: "v1.2.3",
+        headSha: "abc",
+        baseTag: null,
+        reviewerDigest: "sha256:aaa",
+        workerDigest: "sha256:bbb",
+        runUrl: "https://example.test/run/1",
+      })
+    ).toThrow("failing evaluation");
+    const failing = evaluateGate([
+      ...trials("worker/w/single", ["pass", "pass", "pass"]),
+      ...trials("review/r/defective", ["pass", "fail", "fail"]),
+    ]);
+    const body = issueBodyFromEvaluation({
+      evaluated: failing,
+      version: "v1.2.3",
+      headSha: "abc",
+      baseTag: null,
+      reviewerDigest: "sha256:aaa",
+      workerDigest: "sha256:bbb",
+      runUrl: "https://example.test/run/1",
+    });
+    expect(body).toContain("outcome: fail");
+    expect(body).toContain("review/r/defective: 1/3 passed");
+    expect(body).not.toContain("worker/w/single");
+  });
+
   test("find lists the open rolling issue; latest tag and statuses read through fakes", async () => {
     const fetchImpl = async (input: string, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/issues?state=open")) {
         return new Response(JSON.stringify([{ number: 9, state: "open" }]), { status: 200 });
       }
-      if (url.endsWith("/releases/latest")) return new Response(JSON.stringify({ tag_name: "v1.2.2" }), { status: 200 });
+      if (url.endsWith("/releases/latest"))
+        return new Response(JSON.stringify({ tag_name: "v1.2.2" }), { status: 200 });
       if (url.includes("/commits/abc/status")) {
         return new Response(
           JSON.stringify({
-            statuses: [{ context: "jumi/candidate", state: "success", description: "reviewer=x worker=y version=v" }],
+            statuses: [
+              {
+                context: "jumi/candidate-reviewer",
+                state: "success",
+                description: "digest=sha256:aaa version=v1.2.3",
+              },
+            ],
           }),
-          { status: 200 },
+          { status: 200 }
         );
       }
       return new Response("unexpected", { status: 500 });
@@ -263,7 +339,9 @@ describe("rolling release-blocked issue", () => {
     expect(await findOpenReleaseBlockedIssues(base)).toEqual([{ number: 9, state: "open" }]);
     expect(await getLatestReleaseTag(base)).toBe("v1.2.2");
     const states = await getCommitStatusStates({ ...base, sha: "abc" });
-    expect(states).toEqual([{ context: "jumi/candidate", state: "success", description: "reviewer=x worker=y version=v" }]);
+    expect(states).toEqual([
+      { context: "jumi/candidate-reviewer", state: "success", description: "digest=sha256:aaa version=v1.2.3" },
+    ]);
     const missing = await getLatestReleaseTag({
       ...base,
       fetchImpl: async () => new Response("none", { status: 404 }),
@@ -301,8 +379,7 @@ describe("release environment guard", () => {
       expect(files[name]).not.toMatch(/pull_request/);
     }
     for (const name of ["jumi-reviewer-image.yml", "jumi-worker-image.yml", "opencode-checks.yml"]) {
-      const text =
-        files[name] ?? (await readFile(join(dir, name), "utf8").catch(() => ""));
+      const text = files[name] ?? (await readFile(join(dir, name), "utf8").catch(() => ""));
       expect(text).not.toMatch(/environment\s*:\s*['"]?release['"]?/);
     }
   });

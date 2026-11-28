@@ -1,0 +1,380 @@
+name: Jumi nightly release
+
+# Once a night, on main HEAD only, gated on real-model Pi evals run inside
+# the tested candidate images. Push workflows never tag or promote; this is
+# the only workflow that moves `:vX.Y.Z` / `:latest` or creates releases.
+# The gate starts blocking from its first night: run via workflow_dispatch
+# before relying on it.
+
+on:
+  schedule:
+    # 02:00 UTC is ~03:00 Stockholm (Default).
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    if: github.repository == 'jumi-ai/jumi'
+    runs-on: ubuntu-latest
+    # Operator setup: the `release` environment (restricted to `main`) holds
+    # JUMI_PI_GO_KEY plus the jumi-ai-release App credentials, and defines
+    # the EVAL_BUDGET_USD variable. No PR-triggered workflow may reference
+    # this environment.
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      statuses: read
+      actions: write
+    env:
+      REVIEWER_IMAGE: ghcr.io/jumi-ai/jumi-reviewer
+      WORKER_IMAGE: ghcr.io/jumi-ai/jumi-worker
+      EVAL_BUDGET_USD: ${{ vars.EVAL_BUDGET_USD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          # The publish step tags/releases via the GitHub API with
+          # GITHUB_TOKEN, not via the checkout credential.
+          persist-credentials: false
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+          # zizmor cache-poisoning: the release must not restore a cache
+          # from an untrusted PR build.
+          no-cache: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: scripts/opencode
+
+      - name: Resolve HEAD, version, and candidates
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        working-directory: scripts/opencode
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="${RUNNER_TEMP}/nightly-artifact"
+          mkdir -p "${ARTIFACT_DIR}"
+          echo "artifact-dir=${ARTIFACT_DIR}" >> "$GITHUB_OUTPUT"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "head-sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          write_summary() {
+            jq -n \
+              --arg decision "$1" \
+              --arg reason "$2" \
+              --arg head "${HEAD_SHA}" \
+              --arg version "${VERSION:-}" \
+              '{decision:$decision, reason:$reason, head:$head, version:$version}' \
+              > "${ARTIFACT_DIR}/summary.json"
+          }
+          VERSION="$(bun src/release.ts next-version)"
+          if [ -z "${VERSION}" ]; then
+            echo "decision=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "reason=missing-case: no next version" >> "$GITHUB_OUTPUT"
+            write_summary inconclusive "missing-case: no next version"
+            exit 0
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          LATEST_TAG="$(bun src/nightly_release.ts latest-tag)"
+          echo "base-tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          if [ -n "${LATEST_TAG}" ]; then
+            TAG_SHA="$(git rev-list -n 1 "${LATEST_TAG}")"
+          else
+            TAG_SHA=""
+          fi
+          if [ "$(bun src/nightly_release.ts is-head-released "${HEAD_SHA}" "${TAG_SHA}")" = "yes" ]; then
+            echo "decision=noop" >> "$GITHUB_OUTPUT"
+            echo "reason=head ${HEAD_SHA} already released as ${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+            write_summary noop "head already released as ${LATEST_TAG}"
+            exit 0
+          fi
+          if ! CANDIDATES="$(bun src/nightly_release.ts candidate-status --sha "${HEAD_SHA}" 2>"${ARTIFACT_DIR}/candidate-err.txt")"; then
+            REASON="missing-candidate: $(cat "${ARTIFACT_DIR}/candidate-err.txt")"
+            echo "decision=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+            write_summary inconclusive "${REASON}"
+            exit 0
+          fi
+          REVIEWER_DIGEST="$(printf '%s' "${CANDIDATES}" | jq -r '.reviewer.digest')"
+          REVIEWER_VERSION="$(printf '%s' "${CANDIDATES}" | jq -r '.reviewer.version')"
+          WORKER_DIGEST="$(printf '%s' "${CANDIDATES}" | jq -r '.worker.digest')"
+          WORKER_VERSION="$(printf '%s' "${CANDIDATES}" | jq -r '.worker.version')"
+          if ! CHECK="$(bun src/nightly_release.ts check-candidates \
+            --head-sha "${HEAD_SHA}" \
+            --expected-version "${VERSION}" \
+            --reviewer-digest "${REVIEWER_DIGEST}" \
+            --reviewer-version "${REVIEWER_VERSION}" \
+            --reviewer-revision "${HEAD_SHA}" \
+            --worker-digest "${WORKER_DIGEST}" \
+            --worker-version "${WORKER_VERSION}" \
+            --worker-revision "${HEAD_SHA}")"; then
+            echo "decision=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "reason=${CHECK}" >> "$GITHUB_OUTPUT"
+            write_summary inconclusive "${CHECK}"
+            exit 0
+          fi
+          {
+            echo "decision=eval"
+            echo "reviewer-digest=${REVIEWER_DIGEST}"
+            echo "worker-digest=${WORKER_DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+          write_summary eval "candidates verified; running evals"
+
+      - name: Run Pi evals in the tested images and decide
+        id: eval
+        if: steps.gate.outputs.decision == 'eval'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          JUMI_PI_GO_KEY: ${{ secrets.JUMI_PI_GO_KEY }}
+          JUMI_PI_ALLOWED_ROUTES: pi-contributor
+        working-directory: scripts/opencode
+        run: |
+          set -euo pipefail
+          NIGHTLY_DIR="${{ steps.gate.outputs.artifact-dir }}"
+          mkdir -p "${NIGHTLY_DIR}/worker" "${NIGHTLY_DIR}/review"
+          chmod -R a+rwx "${NIGHTLY_DIR}"
+          echo "nightly-dir=${NIGHTLY_DIR}" >> "$GITHUB_OUTPUT"
+          bun src/nightly_release.ts pi-catalog > "${NIGHTLY_DIR}/pi-profiles.json"
+          BUDGET="$(bun src/nightly_release.ts budget)"
+          echo "budget-usd=${BUDGET}" >> "$GITHUB_OUTPUT"
+          # In-container path (the host dir is mounted at /nightly).
+          SPEND_FILE="/nightly/spend.txt"
+          WORKER_EXIT=0
+          docker run --rm \
+            -v "${NIGHTLY_DIR}:/nightly" \
+            -e JUMI_PI_PROFILES_FILE=/nightly/pi-profiles.json \
+            -e JUMI_PI_ALLOWED_ROUTES \
+            -e JUMI_PI_GO_KEY \
+            "${REVIEWER_IMAGE}@${{ steps.gate.outputs.reviewer-digest }}" \
+            sh -c 'cd /app/scripts/opencode && bun src/worker_eval.ts --out /nightly/worker --harness pi --trials 3 --budget-usd "$0" --spend-file "$1"' \
+            "${BUDGET}" "${SPEND_FILE}" || WORKER_EXIT=$?
+          echo "worker-exit=${WORKER_EXIT}" >> "$GITHUB_OUTPUT"
+          REVIEW_EXIT=0
+          docker run --rm \
+            -v "${NIGHTLY_DIR}:/nightly" \
+            -e JUMI_PI_PROFILES_FILE=/nightly/pi-profiles.json \
+            -e JUMI_PI_ALLOWED_ROUTES \
+            -e JUMI_PI_GO_KEY \
+            "${WORKER_IMAGE}@${{ steps.gate.outputs.worker-digest }}" \
+            sh -c 'cd /app/scripts/opencode && bun src/review_eval.ts --out /nightly/review --harness pi --trials 3 --budget-usd "$0" --spend-file "$1"' \
+            "${BUDGET}" "${SPEND_FILE}" || REVIEW_EXIT=$?
+          echo "review-exit=${REVIEW_EXIT}" >> "$GITHUB_OUTPUT"
+          bun src/nightly_release.ts normalize \
+            --worker "${NIGHTLY_DIR}/worker/results.jsonl" \
+            --review "${NIGHTLY_DIR}/review/results.jsonl" \
+            --out "${NIGHTLY_DIR}/gate.jsonl"
+          EXPECTED="$(bun src/nightly_release.ts expected)"
+          echo "expected=${EXPECTED}" >> "$GITHUB_OUTPUT"
+          EVALUATE_EXIT=0
+          bun src/nightly_release.ts evaluate \
+            --results "${NIGHTLY_DIR}/gate.jsonl" \
+            --expected "${EXPECTED}" > "${NIGHTLY_DIR}/evaluate.json" || EVALUATE_EXIT=$?
+          echo "evaluate-exit=${EVALUATE_EXIT}" >> "$GITHUB_OUTPUT"
+          if [ ! -s "${NIGHTLY_DIR}/evaluate.json" ]; then
+            printf '%s' '{"outcome":"inconclusive","reasonCategory":"inconclusive-record","cases":[]}' > "${NIGHTLY_DIR}/evaluate.json"
+          fi
+          {
+            echo "outcome=$(jq -r '.outcome' "${NIGHTLY_DIR}/evaluate.json")"
+            echo "reason=$(jq -r '.reasonCategory' "${NIGHTLY_DIR}/evaluate.json")"
+          } >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg head "${{ steps.gate.outputs.head-sha }}" \
+            --arg version "${{ steps.gate.outputs.version }}" \
+            --arg outcome "$(jq -r '.outcome' "${NIGHTLY_DIR}/evaluate.json")" \
+            --arg reason "$(jq -r '.reasonCategory' "${NIGHTLY_DIR}/evaluate.json")" \
+            --arg reviewer "${{ steps.gate.outputs.reviewer-digest }}" \
+            --arg worker "${{ steps.gate.outputs.worker-digest }}" \
+            --arg budget "${BUDGET}" \
+            --argjson workerExit "${WORKER_EXIT}" \
+            --argjson reviewExit "${REVIEW_EXIT}" \
+            --argjson evaluateExit "${EVALUATE_EXIT}" \
+            '{head:$head, version:$version, outcome:$outcome, reason:$reason, reviewerDigest:$reviewer, workerDigest:$worker, budgetUsd:$budget, workerExit:$workerExit, reviewExit:$reviewExit, evaluateExit:$evaluateExit}' \
+            > "${NIGHTLY_DIR}/summary.json"
+
+      - name: Mint release-issue token
+        id: app-token
+        if: steps.gate.outputs.decision == 'inconclusive' || steps.gate.outputs.decision == 'eval'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.JUMI_RELEASE_APP_ID }}
+          private-key: ${{ secrets.JUMI_RELEASE_APP_PRIVATE_KEY }}
+          permission-issues: write
+
+      - name: Report a failing night
+        if: steps.gate.outputs.decision == 'inconclusive' || (steps.gate.outputs.decision == 'eval' && steps.eval.outputs.outcome != 'pass')
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        working-directory: scripts/opencode
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.gate.outputs.decision }}" = "eval" ]; then
+            OUTCOME="${{ steps.eval.outputs.outcome }}"
+          else
+            OUTCOME="inconclusive"
+          fi
+          # The workflow creates the labels if they are missing (422 means
+          # the label already exists).
+          for label in release-blocked no-automerge; do
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -d "$(jq -n --arg name "${label}" '{name:$name, color:"B60205"}')" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/labels")"
+            if [ "${CODE}" != "201" ] && [ "${CODE}" != "422" ]; then
+              echo "creating label ${label} failed with HTTP ${CODE}" >&2
+              exit 1
+            fi
+          done
+          if [ "${OUTCOME}" = "fail" ] || [ "${OUTCOME}" = "inconclusive" ]; then
+            BODY_FILE="${RUNNER_TEMP}/issue-body.txt"
+            if [ "${{ steps.gate.outputs.decision }}" = "eval" ]; then
+              NIGHTLY_DIR="${{ steps.eval.outputs.nightly-dir }}"
+              bun src/nightly_release.ts issue-body \
+                --evaluate-file "${NIGHTLY_DIR}/evaluate.json" \
+                --version "${{ steps.gate.outputs.version }}" \
+                --head-sha "${{ steps.gate.outputs.head-sha }}" \
+                --base-tag "${{ steps.gate.outputs.base-tag }}" \
+                --reviewer-digest "${{ steps.gate.outputs.reviewer-digest }}" \
+                --worker-digest "${{ steps.gate.outputs.worker-digest }}" \
+                --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+                --out "${BODY_FILE}"
+            else
+              REASON="$(printf '%s' "${{ steps.gate.outputs.reason }}" | cut -d: -f1)"
+              printf 'outcome: inconclusive\nreason: %s\nversion: %s\nhead: %s\nrange: %s..%s\nreviewer-digest: %s\nworker-digest: %s\nrun: %s\ncases:\n- none\n' \
+                "${REASON}" \
+                "${{ steps.gate.outputs.version }}" \
+                "${{ steps.gate.outputs.head-sha }}" \
+                "${{ steps.gate.outputs.base-tag }}" \
+                "${{ steps.gate.outputs.head-sha }}" \
+                "${{ steps.gate.outputs.reviewer-digest }}" \
+                "${{ steps.gate.outputs.worker-digest }}" \
+                "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+                > "${BODY_FILE}"
+            fi
+            LABELS="$(bun src/nightly_release.ts labels "${OUTCOME}" | paste -sd, -)"
+            OPEN_ISSUES="$(bun src/nightly_release.ts open-issues)"
+            if [ "$(printf '%s' "${OPEN_ISSUES}" | jq 'length')" -gt 0 ]; then
+              bun src/nightly_release.ts issue-comment \
+                --number "$(printf '%s' "${OPEN_ISSUES}" | jq -r '.[0].number')" \
+                --body-file "${BODY_FILE}"
+            else
+              bun src/nightly_release.ts issue-open \
+                --title "Nightly release blocked (${OUTCOME})" \
+                --body-file "${BODY_FILE}" \
+                --labels "release-blocked,${LABELS}"
+            fi
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.eval.outputs.outcome == 'pass'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: steps.eval.outputs.outcome == 'pass'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the release and promote the tested digests
+        if: steps.eval.outputs.outcome == 'pass'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_SHA: ${{ steps.gate.outputs.head-sha }}
+        working-directory: scripts/opencode
+        run: |
+          set -euo pipefail
+          # Race guard: re-check the gate on the same SHA right before
+          # tagging, so a push that landed during the evals cannot ship
+          # untested candidates.
+          LATEST_TAG="$(bun src/nightly_release.ts latest-tag)"
+          if [ -n "${LATEST_TAG}" ]; then
+            TAG_SHA="$(git rev-list -n 1 "${LATEST_TAG}")"
+          else
+            TAG_SHA=""
+          fi
+          if [ "$(bun src/nightly_release.ts is-head-released "${{ steps.gate.outputs.head-sha }}" "${TAG_SHA}")" = "yes" ]; then
+            echo "HEAD was released during the evals; refusing to publish" >&2
+            exit 1
+          fi
+          bun src/nightly_release.ts candidate-status --sha "${{ steps.gate.outputs.head-sha }}" > /dev/null
+          bun src/release.ts publish-github
+          for pair in "REVIEWER_IMAGE:${{ steps.gate.outputs.reviewer-digest }}" "WORKER_IMAGE:${{ steps.gate.outputs.worker-digest }}"; do
+            IMAGE_NAME="${pair%%:*}"
+            DIGEST="${pair##*:}"
+            IMAGE="${!IMAGE_NAME}"
+            docker buildx imagetools create \
+              --tag "${IMAGE}:${{ steps.gate.outputs.version }}" \
+              --tag "${IMAGE}:latest" \
+              "${IMAGE}@${DIGEST}"
+            echo "Promoted ${IMAGE}@${DIGEST} to :${{ steps.gate.outputs.version }} and :latest"
+          done
+
+      - name: Close the rolling issue on a passing night
+        if: steps.eval.outputs.outcome == 'pass'
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        working-directory: scripts/opencode
+        run: |
+          set -euo pipefail
+          OPEN_ISSUES="$(bun src/nightly_release.ts open-issues)"
+          if [ "$(printf '%s' "${OPEN_ISSUES}" | jq 'length')" -eq 0 ]; then
+            echo "no open release-blocked issue"
+            exit 0
+          fi
+          ISSUE_NUMBER="$(printf '%s' "${OPEN_ISSUES}" | jq -r '.[0].number')"
+          printf 'Night passed: released %s for %s.\nrun: %s/actions/runs/%s\n' \
+            "${{ steps.gate.outputs.version }}" \
+            "${{ steps.gate.outputs.head-sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}" > "${RUNNER_TEMP}/close-body.txt"
+          bun src/nightly_release.ts issue-close \
+            --number "${ISSUE_NUMBER}" \
+            --body-file "${RUNNER_TEMP}/close-body.txt"
+
+      - name: Upload eval records and summary
+        if: always() && steps.gate.outputs.decision != 'noop'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-eval-${{ steps.gate.outputs.head-sha }}
+          path: ${{ steps.gate.outputs.artifact-dir }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail the night when the gate did not pass
+        if: always() && (steps.gate.outputs.decision == 'inconclusive' || (steps.gate.outputs.decision == 'eval' && steps.eval.outputs.outcome != 'pass'))
+        run: |
+          if [ "${{ steps.gate.outputs.decision }}" = "eval" ]; then
+            echo "night ${{ steps.eval.outputs.outcome }} (${{ steps.eval.outputs.reason }}); yesterday's release stays current"
+          else
+            echo "night ${{ steps.gate.outputs.decision }} (${{ steps.gate.outputs.reason }}); yesterday's release stays current"
+          fi
+          exit 1
