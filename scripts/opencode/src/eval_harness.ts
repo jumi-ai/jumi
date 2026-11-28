@@ -401,7 +401,7 @@ export function evalSpendForRun(input: { usage?: unknown; allowanceUsd?: unknown
 export function parseEvalBudgetUsd(raw: unknown): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   const text = String(raw).trim();
-  if (!text) return undefined;
+  if (!text) throw new Error("Missing --budget-usd <n>");
   const value = Number(text);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`Invalid --budget-usd ${String(raw)} (want a number > 0)`);
   return value;

@@ -1579,7 +1579,7 @@ each eval adds the file's spend to its own and writes the new total back.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
-function parseWorkerEvalArgs(argv: string[]): {
+export function parseWorkerEvalArgs(argv: string[]): {
   out?: string;
   fixture?: string;
   runners?: string[];
@@ -1623,8 +1623,10 @@ function parseWorkerEvalArgs(argv: string[]): {
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
     } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
     else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
-    else if (arg === "--budget-usd" && i + 1 < argv.length) budgetUsd = parseEvalBudgetUsd(argv[++i]);
-    else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
+    else if (arg === "--budget-usd") {
+      if (i + 1 >= argv.length) throw new Error("Missing --budget-usd <n>");
+      budgetUsd = parseEvalBudgetUsd(argv[++i]);
+    } else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
     else if (arg === "--spend-file" && i + 1 < argv.length) spendFile = argv[++i];
     else if (arg.startsWith("--spend-file=")) spendFile = arg.slice("--spend-file=".length);
     else if (arg === "--") break;

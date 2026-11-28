@@ -1,19 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Engine } from "../src/engine.ts";
+import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import {
   EVAL_SPEND_INPUT_USD_PER_M,
   EVAL_SPEND_OUTPUT_USD_PER_M,
   evalListEstimateUsdFrom,
   evalSpendForRun,
+  parseEvalBudgetUsd,
   readEvalSpendFile,
   writeEvalSpendFile,
 } from "../src/eval_harness.ts";
-import { loadReviewEvalFixture, runReviewEval } from "../src/review_eval.ts";
+import { loadReviewEvalFixture, parseReviewEvalArgs, runReviewEval } from "../src/review_eval.ts";
 import { resetTokenMetricsForTests } from "../src/token_metrics.ts";
-import { loadWorkerEvalFixture, runWorkerEval } from "../src/worker_eval.ts";
+import { loadWorkerEvalFixture, parseWorkerEvalArgs, runWorkerEval } from "../src/worker_eval.ts";
 
 const RUNNER = { name: "fake", type: "opencode", model: "fake/model" } as const;
 
@@ -245,6 +246,65 @@ describe("eval spend budget", () => {
       expect(await readEvalSpendFile(path)).toBeCloseTo(0.25, 9);
     } finally {
       await rm(path, { force: true }).catch(() => undefined);
+    }
+  });
+
+  test("a missing --budget-usd value fails instead of running uncapped", () => {
+    // Empty is not "omitted" once the flag was given: it must throw.
+    expect(() => parseEvalBudgetUsd("")).toThrow(/Missing --budget-usd/);
+    expect(() => parseEvalBudgetUsd("   ")).toThrow(/Missing --budget-usd/);
+    expect(parseEvalBudgetUsd(undefined)).toBeUndefined();
+    expect(parseEvalBudgetUsd("0.5")).toBeCloseTo(0.5, 9);
+    expect(() => parseEvalBudgetUsd("nope")).toThrow(/Invalid --budget-usd/);
+    // Bare flag last swallows nothing: both CLIs throw.
+    expect(() => parseReviewEvalArgs(["--out", "x", "--budget-usd"])).toThrow(/Missing --budget-usd/);
+    expect(() => parseWorkerEvalArgs(["--out", "x", "--budget-usd"])).toThrow(/Missing --budget-usd/);
+    // The `=` form with an empty value throws too.
+    expect(() => parseReviewEvalArgs(["--out", "x", "--budget-usd="])).toThrow(/Missing --budget-usd/);
+    expect(() => parseWorkerEvalArgs(["--out", "x", "--budget-usd="])).toThrow(/Missing --budget-usd/);
+    expect(() => parseReviewEvalArgs(["--out", "x", "--budget-usd= "])).toThrow(/Missing --budget-usd/);
+    // Well-formed flags still parse.
+    expect(parseReviewEvalArgs(["--out", "x", "--budget-usd", "0.5"]).budgetUsd).toBeCloseTo(0.5, 9);
+    expect(parseWorkerEvalArgs(["--out", "x", "--budget-usd=0.5"]).budgetUsd).toBeCloseTo(0.5, 9);
+  });
+
+  test("legacy review post-run git failure keeps the priced spend", async () => {
+    const fixture = await loadReviewEvalFixture("adult-boundary");
+    const workdirRoot = await mkdtemp(join(tmpdir(), "eval-budget-rwork-"));
+    const homeRoot = await mkdtemp(join(tmpdir(), "eval-budget-rhome-"));
+    const outDir = await mkdtemp(join(tmpdir(), "eval-budget-rout-"));
+    resetTokenMetricsForTests();
+    try {
+      // The engine breaks the checkout after a priced run, so the post-run
+      // HEAD read fails. The record must still carry the spend: under a
+      // budget it stays measurable (no budget-unmeasurable throw).
+      const breakingEngine = (async (runOpts: EngineRunOptions) => {
+        await rm(join(runOpts.workdir, ".git"), { recursive: true, force: true });
+        // A bogus `.git` file (not a deletion): git walks up to a parent
+        // checkout, so only an invalid `.git` fails discovery outright.
+        await writeFile(join(runOpts.workdir, ".git"), "not a git dir\n");
+        return { status: "ok", usage: { inputTokens: 1_000_000 } };
+      }) as Engine;
+      const records = await runReviewEval({
+        fixtures: [fixture],
+        halves: ["defective"],
+        runners: [{ ...RUNNER }],
+        trials: 1,
+        outDir,
+        workdirRoot,
+        homeRoot,
+        budgetUsd: 10,
+        engineForRunner: () => breakingEngine,
+        logger: () => undefined,
+      });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.inconclusiveReason).toMatch(/post-run HEAD read failed/);
+      expect(records[0]?.spendUsd).toBeCloseTo(0.1, 9);
+      expect(records[0]?.spendSource).toBe("list-estimate");
+    } finally {
+      await rm(workdirRoot, { recursive: true, force: true }).catch(() => undefined);
+      await rm(homeRoot, { recursive: true, force: true }).catch(() => undefined);
+      await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
     }
   });
 });

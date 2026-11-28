@@ -654,6 +654,11 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
 
       await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
 
+      // Priced once the engine returns so post-run infra failures keep the
+      // spend (mirrors the worker eval `infraSpend` pattern): a priced run
+      // whose HEAD/status read fails is still measurable under --budget-usd.
+      const infraSpend = reviewEvalSpendFields(capturedUsage, capturedAllowance);
+
       // Post-run inspection is fail-closed: a HEAD read or a status read that
       // fails grades `inconclusive` with its own reason instead of
       // substituting the expected SHA or an empty status (which would read a
@@ -665,6 +670,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         const reason = `post-run HEAD read failed: ${errorMessage(err)}`.slice(0, 500);
         return finish({
           ...baseRecord,
+          ...infraSpend,
           baseSha,
           headSha,
           verdict: "inconclusive",
@@ -686,6 +692,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         const reason = `post-run status failed: ${errorMessage(err)}`.slice(0, 500);
         return finish({
           ...baseRecord,
+          ...infraSpend,
           baseSha,
           headSha,
           verdict: "inconclusive",
@@ -746,9 +753,9 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         }
       }
 
-      const spendFields = reviewEvalSpendFields(capturedUsage, capturedAllowance);
       return finish({
         ...baseRecord,
+        ...infraSpend,
         baseSha,
         headSha,
         verdict: failedAssertions.length === 0 ? "pass" : "fail",
@@ -759,9 +766,6 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         rawMarkdown: markdown,
         treeClean,
         maintainerHolds,
-        usage: spendFields.usage,
-        spendUsd: spendFields.spendUsd,
-        spendSource: spendFields.spendSource,
       });
     } finally {
       verdictStore.close();
@@ -1463,7 +1467,7 @@ each eval adds the file's spend to its own and writes the new total back.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
-function parseReviewEvalArgs(argv: string[]): {
+export function parseReviewEvalArgs(argv: string[]): {
   out?: string;
   fixture?: string;
   half?: ReviewEvalHalf;
@@ -1517,8 +1521,10 @@ function parseReviewEvalArgs(argv: string[]): {
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
     } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
     else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
-    else if (arg === "--budget-usd" && i + 1 < argv.length) budgetUsd = parseEvalBudgetUsd(argv[++i]);
-    else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
+    else if (arg === "--budget-usd") {
+      if (i + 1 >= argv.length) throw new Error("Missing --budget-usd <n>");
+      budgetUsd = parseEvalBudgetUsd(argv[++i]);
+    } else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
     else if (arg === "--spend-file" && i + 1 < argv.length) spendFile = argv[++i];
     else if (arg.startsWith("--spend-file=")) spendFile = arg.slice("--spend-file=".length);
     else if (arg === "--") break;
