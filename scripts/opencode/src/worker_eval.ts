@@ -24,16 +24,24 @@ import { dirname, join } from "node:path";
 import { type Engine, EngineFailedError } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import {
+  EVAL_BUDGET_EXHAUSTED_REASON,
+  EVAL_BUDGET_UNMEASURABLE_REASON,
   type EvalHarness,
+  type EvalSpendSource,
   ensureEvalRoots,
+  evalAllowanceUsdFrom,
   evalImageDigest,
   evalPublicRepoVisibility,
+  evalSpendForRun,
   evalUsageOrNull,
   loadEvalLegacyRunners,
   loadEvalPiDeployment,
+  parseEvalBudgetUsd,
   parseEvalHarness,
   piAllowedHostsForRoute,
+  readEvalSpendFile,
   resolveEvalPiRoute,
+  writeEvalSpendFile,
 } from "./eval_harness.ts";
 import { makeIssueApi } from "./forge_fake.ts";
 import { closesIssuePattern, refsIssuePattern, visibleClosingText } from "./gitea_issues.ts";
@@ -207,6 +215,8 @@ export interface WorkerEvalRecord {
   baseSha: string;
   durationMs: number;
   usage: unknown;
+  spendUsd: number | null;
+  spendSource: EvalSpendSource;
   inconclusiveReason?: string;
   imageDigest: string | null;
   effectiveModel: string;
@@ -214,6 +224,15 @@ export interface WorkerEvalRecord {
   payer: string | null;
   pool: string | null;
   outcome: string | null;
+}
+
+/** Spend columns for one record: priced from `usage` (allowance wins, else list estimate). */
+function workerEvalSpendFields(
+  usage: unknown,
+  allowanceUsd?: unknown
+): Pick<WorkerEvalRecord, "usage" | "spendUsd" | "spendSource"> {
+  const { spendUsd, spendSource } = evalSpendForRun({ usage, allowanceUsd });
+  return { usage: evalUsageOrNull(usage), spendUsd, spendSource };
 }
 
 export interface WorkerEvalExpected {
@@ -480,7 +499,7 @@ export interface RunWorkerEvalCaseOptions {
     store: WorkerResultStore;
     route: ReturnType<typeof resolveEvalPiRoute>;
     allowedFetchHosts: readonly string[];
-  }) => Promise<{ usage?: unknown }>;
+  }) => Promise<{ usage?: unknown; allowanceUsd?: unknown }>;
 }
 
 function workerEvalBaseRecord(
@@ -507,6 +526,8 @@ function workerEvalBaseRecord(
     runnerStamp: stamp,
     trial: opts.trial,
     usage: null,
+    spendUsd: null,
+    spendSource: "unknown" as const,
     imageDigest: evalImageDigest(),
     effectiveModel: opts.runner.model,
     route: opts.runner.name,
@@ -546,9 +567,11 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
     const hiddenCheckTimeoutMs = opts.hiddenCheckTimeoutMs ?? WORKER_EVAL_HIDDEN_CHECK_TIMEOUT_MS;
     const gradeGit = (args: string[], cwd: string) => runWorkerEvalGit(args, cwd, homeDir, gradingGitTimeoutMs);
 
+    let infraSpend: Pick<WorkerEvalRecord, "usage" | "spendUsd" | "spendSource"> | undefined;
     const inconclusiveGitInfra = (detail: string) =>
       finish({
         ...baseRecord,
+        ...(infraSpend ?? {}),
         baseSha,
         verdict: "inconclusive",
         failedAssertions: [],
@@ -644,7 +667,19 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
     const previousHome = process.env.HOME;
     process.env.HOME = homeDir;
     try {
-      const engine: Engine = opts.engine ?? registeredEngine;
+      const { snapshotTokenMetrics, diffTokenMetrics } = await import("./token_metrics.ts");
+      const spendBefore = snapshotTokenMetrics();
+      let capturedEngineUsage: unknown;
+      let capturedEngineAllowance: unknown;
+      const baseEngine: Engine = opts.engine ?? registeredEngine;
+      const engine: Engine = (async (engineOpts) => {
+        const engineResult = await baseEngine(engineOpts);
+        capturedEngineUsage = (engineResult as { usage?: unknown }).usage;
+        capturedEngineAllowance =
+          (engineResult as { allowanceUsd?: unknown }).allowanceUsd ??
+          (engineResult as { allowance?: unknown }).allowance;
+        return engineResult;
+      }) as Engine;
       const result = await implementIssue({
         api: evalApi,
         job: {
@@ -682,9 +717,23 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
 
       const status = (result as { status: string }).status;
       const reason = (result as { reason?: string }).reason;
+      const postDeltas = diffTokenMetrics(spendBefore, snapshotTokenMetrics());
+      const postDeltaUsage =
+        postDeltas.length > 0
+          ? new Map(postDeltas.map((d) => [d.model, d.tokens] as [string, typeof d.tokens]))
+          : undefined;
+      const postImplUsage = (result as { usage?: unknown }).usage;
+      const postUsage = postDeltaUsage ?? capturedEngineUsage ?? postImplUsage;
+      const postAllowance =
+        capturedEngineAllowance ??
+        (result as { allowanceUsd?: unknown; allowance?: unknown }).allowanceUsd ??
+        (result as { allowance?: unknown }).allowance;
+      const postSpend = workerEvalSpendFields(postUsage, postAllowance);
+      infraSpend = postSpend;
       if (status === "skipped" && typeof reason === "string" && (isQuotaText(reason) || isInconclusiveText(reason))) {
         return finish({
           ...baseRecord,
+          ...postSpend,
           baseSha,
           verdict: "inconclusive",
           failedAssertions: [],
@@ -704,6 +753,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         const failed = ["job-result-pr"];
         return finish({
           ...baseRecord,
+          ...postSpend,
           baseSha,
           verdict: "fail",
           failedAssertions: failed,
@@ -798,7 +848,6 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
       if (hiddenCheckStatus !== "pass") failedAssertions.push("hidden-check");
       if (!noSentinels) failedAssertions.push("no-sentinels");
 
-      const usage = (result as { usage?: unknown }).usage;
       return finish({
         ...baseRecord,
         baseSha,
@@ -813,7 +862,7 @@ export async function runWorkerEvalCase(opts: RunWorkerEvalCaseOptions): Promise
         ...(hiddenOutput ? { hiddenCheckOutput: hiddenOutput } : {}),
         noSentinels,
         pushedSha,
-        usage: evalUsageOrNull(usage),
+        ...postSpend,
       });
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
@@ -897,6 +946,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
     trial: opts.trial,
     baseSha: "unknown",
     usage: null,
+    spendUsd: null as number | null,
+    spendSource: "unknown" as const,
     imageDigest: evalImageDigest(),
     effectiveModel: resolved.model,
     route: resolved.name,
@@ -906,8 +957,14 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
   };
   const allowedFetchHosts = piAllowedHostsForRoute(resolved);
 
-  const inconclusive = (reason: string, outcome: string, usage: unknown = null): WorkerEvalRecord =>
-    finish({
+  const inconclusive = (
+    reason: string,
+    outcome: string,
+    usage: unknown = null,
+    allowanceUsd?: unknown
+  ): WorkerEvalRecord => {
+    const { spendUsd, spendSource } = evalSpendForRun({ usage, allowanceUsd });
+    return finish({
       ...baseRecord,
       baseSha,
       verdict: "inconclusive",
@@ -921,9 +978,12 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       noSentinels: true,
       pushedSha: null,
       usage: evalUsageOrNull(usage),
+      spendUsd,
+      spendSource,
       outcome,
       inconclusiveReason: reason,
     });
+  };
 
   let homeDir = "";
   let barePath = "";
@@ -959,11 +1019,13 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
 
     const store = new WorkerResultStore();
     let piUsage: unknown = null;
+    let piAllowance: unknown = null;
     let piOutcome: string = "ok";
     try {
       if (opts.piInvoke) {
         const invoked = await opts.piInvoke({ workdir: clonePath, store, route: resolved, allowedFetchHosts });
         piUsage = invoked.usage ?? null;
+        piAllowance = invoked.allowanceUsd ?? null;
       } else {
         const sessionId = `eval-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
         const deps = opts.piSessionDepsFor
@@ -1022,6 +1084,7 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           const reasonText = hop.result?.message ?? hop.reason ?? "provider failure";
           if (kind === "quota" || isQuotaText(reasonText)) {
             const normalized = normalizePiAttemptUsage(hop.result?.usage ?? null);
+            const quotaSpend = evalSpendForRun({ usage: hop.result?.usage ?? null });
             const stamp = buildPiAttemptStamp({
               route: resolved,
               role: "implement",
@@ -1042,6 +1105,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
               noSentinels: true,
               pushedSha: null,
               usage: evalUsageOrNull(stamp.usage ?? null),
+              spendUsd: quotaSpend.spendUsd,
+              spendSource: quotaSpend.spendSource,
               outcome: "quota",
               inconclusiveReason: reasonText.slice(0, 500),
             });
@@ -1055,7 +1120,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           return inconclusive(`harness crash: ${reasonText.slice(0, 500)}`, "provider-failure");
         }
         const normalized = normalizePiAttemptUsage(hop.result.usage ?? null);
-        piUsage = normalized ?? null;
+        piUsage = normalized ?? hop.result.usage ?? null;
+        piAllowance = evalAllowanceUsdFrom(hop.result.usage ?? null) ?? null;
         piOutcome = hop.result.kind === "ok" ? "ok" : hop.result.kind;
       }
     } catch (err) {
@@ -1070,7 +1136,7 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
     const prBody = store.getPrBody() ?? "";
     const skipReason = store.getSkipReason?.() ?? null;
     if (skipReason && (isQuotaText(skipReason) || isInconclusiveText(skipReason))) {
-      return inconclusive(skipReason.slice(0, 500), "quota", piUsage);
+      return inconclusive(skipReason.slice(0, 500), "quota", piUsage, piAllowance);
     }
     let statusText: string;
     try {
@@ -1079,10 +1145,12 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       return inconclusive(
         `eval git infrastructure: status failed: ${errorMessage(err)}`.slice(0, 500),
         "provider-failure",
-        piUsage
+        piUsage,
+        piAllowance
       );
     }
     if (!statusText.trim() && !prBody.trim()) {
+      const noChangesSpend = evalSpendForRun({ usage: piUsage, allowanceUsd: piAllowance });
       return finish({
         ...baseRecord,
         baseSha,
@@ -1096,6 +1164,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
         noSentinels: true,
         pushedSha: null,
         usage: evalUsageOrNull(piUsage),
+        spendUsd: noChangesSpend.spendUsd,
+        spendSource: noChangesSpend.spendSource,
         outcome: piOutcome,
       });
     }
@@ -1112,7 +1182,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       return inconclusive(
         `eval git infrastructure: commit failed: ${errorMessage(err)}`.slice(0, 500),
         "provider-failure",
-        piUsage
+        piUsage,
+        piAllowance
       );
     }
     let pushedSha: string | null = null;
@@ -1123,11 +1194,12 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       return inconclusive(
         `eval git infrastructure: push failed: ${errorMessage(err)}`.slice(0, 500),
         "provider-failure",
-        piUsage
+        piUsage,
+        piAllowance
       );
     }
     if (!pushedSha) {
-      return inconclusive("eval git infrastructure: PR head SHA unavailable", "provider-failure", piUsage);
+      return inconclusive("eval git infrastructure: PR head SHA unavailable", "provider-failure", piUsage, piAllowance);
     }
     if (opts.afterPr) {
       await opts.afterPr({ barePath, tmpDir: tmp });
@@ -1140,7 +1212,12 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
     {
       const verifyDir = await mkdtemp(join(tmp, "verify-")).catch(() => null);
       if (!verifyDir)
-        return inconclusive("eval git infrastructure: verify checkout unavailable", "provider-failure", piUsage);
+        return inconclusive(
+          "eval git infrastructure: verify checkout unavailable",
+          "provider-failure",
+          piUsage,
+          piAllowance
+        );
       try {
         try {
           await gradeGit(["clone", barePath, verifyDir], tmp);
@@ -1148,7 +1225,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           return inconclusive(
             `eval git infrastructure: clone failed: ${errorMessage(err)}`.slice(0, 500),
             "provider-failure",
-            piUsage
+            piUsage,
+            piAllowance
           );
         }
         try {
@@ -1157,7 +1235,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           return inconclusive(
             `eval git infrastructure: checkout failed: ${errorMessage(err)}`.slice(0, 500),
             "provider-failure",
-            piUsage
+            piUsage,
+            piAllowance
           );
         }
         const scriptPath = join(verifyDir, ".eval-hidden.sh");
@@ -1167,7 +1246,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           return inconclusive(
             `eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500),
             "provider-failure",
-            piUsage
+            piUsage,
+            piAllowance
           );
         }
         let result: WorkerHiddenCheckResult;
@@ -1177,7 +1257,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
           return inconclusive(
             `eval verifier startup failed: ${errorMessage(err)}`.slice(0, 500),
             "provider-failure",
-            piUsage
+            piUsage,
+            piAllowance
           );
         }
         hiddenOutput = result.output;
@@ -1196,7 +1277,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
         return inconclusive(
           `eval git infrastructure: ls-tree failed: ${errorMessage(err)}`.slice(0, 500),
           "provider-failure",
-          piUsage
+          piUsage,
+          piAllowance
         );
       }
       const leaked = listed
@@ -1219,6 +1301,7 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       outcome: (piOutcome as never) ?? "ok",
       ...(normalizedUsage ? { usage: normalizedUsage } : {}),
     });
+    const finalSpend = evalSpendForRun({ usage: piUsage, allowanceUsd: piAllowance });
     return finish({
       ...baseRecord,
       baseSha,
@@ -1233,6 +1316,8 @@ export async function runWorkerEvalCasePi(opts: RunWorkerEvalCaseOptions): Promi
       noSentinels,
       pushedSha,
       usage: evalUsageOrNull(stamp.usage ?? piUsage ?? null),
+      spendUsd: finalSpend.spendUsd,
+      spendSource: finalSpend.spendSource,
       outcome: stamp.outcome,
     });
   } catch (err) {
@@ -1290,6 +1375,10 @@ export interface RunWorkerEvalOptions {
   harnesses?: EvalHarness[];
   piSessionDepsFor?: RunWorkerEvalCaseOptions["piSessionDepsFor"];
   piInvokeForRoute?: (routeName: string) => RunWorkerEvalCaseOptions["piInvoke"];
+  /** Hard spend stop in USD. When reached, no new run starts; overshoot is at most one in-flight run. */
+  budgetUsd?: number;
+  /** Shared spend file carried across evals in one night. */
+  spendFile?: string;
 }
 
 async function writeWorkerEvalRecords(
@@ -1313,6 +1402,10 @@ export async function runWorkerEval(opts: RunWorkerEvalOptions): Promise<WorkerE
     piDeployment = loadEvalPiDeployment();
     resolveEvalPiRoute(piDeployment);
   }
+  const budgetUsd = opts.budgetUsd;
+  const spendFile = opts.spendFile?.trim() ? opts.spendFile.trim() : undefined;
+  let spendSoFar = await readEvalSpendFile(spendFile);
+  let unmeasurable = false;
   const records: WorkerEvalRecord[] = [];
   const lines: string[] = [];
   const runId = `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
@@ -1326,10 +1419,59 @@ export async function runWorkerEval(opts: RunWorkerEvalOptions): Promise<WorkerE
   const flush = async () => {
     await writeWorkerEvalRecords(opts.outDir, preexisting, lines, runId);
   };
+  const budgetSkippedRecord = (
+    fixture: LoadedWorkerEvalFixture,
+    harness: EvalHarness,
+    runner: NamedRunner,
+    trial: number,
+    reason: typeof EVAL_BUDGET_EXHAUSTED_REASON | typeof EVAL_BUDGET_UNMEASURABLE_REASON
+  ): WorkerEvalRecord => ({
+    fixture: fixture.name,
+    harness,
+    runner: harness === "pi" && piDeployment ? `pi:${piDeployment.allowlist[0]}` : runner.name,
+    runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+    trial,
+    verdict: "inconclusive",
+    failedAssertions: [],
+    jobStatus: "error",
+    jobReason: reason,
+    closingKeyword: "none",
+    remaining: [],
+    prBody: "",
+    hiddenCheck: "skip",
+    noSentinels: true,
+    pushedSha: null,
+    baseSha: "unknown",
+    durationMs: 0,
+    usage: null,
+    spendUsd: reason === EVAL_BUDGET_EXHAUSTED_REASON ? 0 : null,
+    spendSource: "unknown",
+    imageDigest: evalImageDigest(),
+    effectiveModel: runner.model,
+    route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
+    payer: null,
+    pool: null,
+    outcome: null,
+    inconclusiveReason: reason,
+  });
   for (const harness of harnesses) {
     for (const fixture of opts.fixtures) {
       for (const runner of opts.runners) {
         for (let trial = 1; trial <= opts.trials; trial++) {
+          if (unmeasurable) {
+            const record = budgetSkippedRecord(fixture, harness, runner, trial, EVAL_BUDGET_UNMEASURABLE_REASON);
+            records.push(record);
+            lines.push(JSON.stringify(record));
+            await flush();
+            continue;
+          }
+          if (budgetUsd !== undefined && spendSoFar >= budgetUsd) {
+            const record = budgetSkippedRecord(fixture, harness, runner, trial, EVAL_BUDGET_EXHAUSTED_REASON);
+            records.push(record);
+            lines.push(JSON.stringify(record));
+            await flush();
+            continue;
+          }
           let record: WorkerEvalRecord;
           try {
             record = await runWorkerEvalCase({
@@ -1370,6 +1512,8 @@ export async function runWorkerEval(opts: RunWorkerEvalOptions): Promise<WorkerE
               baseSha: "unknown",
               durationMs: 0,
               usage: null,
+              spendUsd: null,
+              spendSource: "unknown",
               imageDigest: evalImageDigest(),
               effectiveModel: runner.model,
               route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
@@ -1379,12 +1523,27 @@ export async function runWorkerEval(opts: RunWorkerEvalOptions): Promise<WorkerE
               inconclusiveReason: `harness crash: ${message}`,
             };
           }
+          if (budgetUsd !== undefined && record.spendUsd === null) {
+            // No allowance figure and no stated usage: the budget is
+            // unenforceable. Stop here; the remaining runs record
+            // `budget-unmeasurable` below and the CLI exits non-zero.
+            unmeasurable = true;
+          } else if (record.spendUsd !== null) {
+            spendSoFar += record.spendUsd;
+            if (spendFile) await writeEvalSpendFile(spendFile, spendSoFar);
+          }
           records.push(record);
           lines.push(JSON.stringify(record));
           await flush();
         }
       }
     }
+  }
+  if (spendFile) await writeEvalSpendFile(spendFile, spendSoFar);
+  if (unmeasurable) {
+    throw new Error(
+      `eval budget unmeasurable: a run reported neither an allowance figure nor stated usage, so --budget-usd ${budgetUsd} cannot be enforced`
+    );
   }
   return records;
 }
@@ -1394,28 +1553,40 @@ function printWorkerEvalHelp(): void {
 without publishing. Operator-run only; nothing is scheduled.
 
 Usage:
-  bun run src/worker_eval.ts --out <output-dir> [--fixture <name>] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi]
+  bun run src/worker_eval.ts --out <output-dir> [--fixture <name>] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi] [--budget-usd <n>] [--spend-file <path>]
 
 Fixtures are committed under src/eval_fixtures/. Each record in
 <out>/results.jsonl carries fixture, harness (legacy|pi), runner, trial, verdict
 (pass / fail / inconclusive), failed assertion names, the published closing
 keyword and remaining list, hidden-check status, duration, image digest,
-effective model, payer/route, wall time and usage (null when unknown).
+effective model, payer/route, wall time, usage (null when unknown),
+spendUsd and spendSource (allowance | list-estimate | unknown).
 Auth, quota, timeouts and harness crashes record inconclusive, never fail.
 The legacy baseline runs exactly one explicitly selected runner (via --runners)
 from a minimal catalog holding only that runner, with no fallback.
 A Pi run needs JUMI_PI_PROFILES_FILE plus JUMI_PI_ALLOWED_ROUTES naming the
 wired Go route; the fake forge reports the repo as public and allowedFetchHosts
 is just that endpoint.
+--budget-usd <n> stops starting new runs once spend reaches the budget; a run
+already in progress is never killed, so the overshoot is at most one run.
+Runs never started record inconclusive with inconclusiveReason
+budget-exhausted (a run with no allowance figure and no stated usage instead
+stops with budget-unmeasurable and a non-zero exit). Spend prefers the
+provider's opencode.allowance figure, else a conservative list-price estimate
+for muse-spark-1.3-contributor ($0.10/1M input incl. cached input, $0.20/1M
+output incl. reasoning). --spend-file <path> shares one budget across evals:
+each eval adds the file's spend to its own and writes the new total back.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
-function parseWorkerEvalArgs(argv: string[]): {
+export function parseWorkerEvalArgs(argv: string[]): {
   out?: string;
   fixture?: string;
   runners?: string[];
   trials: number;
   harness?: string;
+  budgetUsd?: number;
+  spendFile?: string;
   help: boolean;
 } {
   let out: string | undefined;
@@ -1423,6 +1594,8 @@ function parseWorkerEvalArgs(argv: string[]): {
   let runners: string[] | undefined;
   let trials = 1;
   let harness: string | undefined;
+  let budgetUsd: number | undefined;
+  let spendFile: string | undefined;
   let help = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -1450,9 +1623,15 @@ function parseWorkerEvalArgs(argv: string[]): {
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
     } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
     else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
+    else if (arg === "--budget-usd") {
+      if (i + 1 >= argv.length) throw new Error("Missing --budget-usd <n>");
+      budgetUsd = parseEvalBudgetUsd(argv[++i]);
+    } else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
+    else if (arg === "--spend-file" && i + 1 < argv.length) spendFile = argv[++i];
+    else if (arg.startsWith("--spend-file=")) spendFile = arg.slice("--spend-file=".length);
     else if (arg === "--") break;
   }
-  return { out, fixture, runners, trials, harness, help };
+  return { out, fixture, runners, trials, harness, budgetUsd, spendFile, help };
 }
 
 function loadWorkerEvalCliRunners(runnerNames: string[] | undefined): NamedRunner[] {
@@ -1491,10 +1670,20 @@ async function main(): Promise<void> {
     homeRoot: join(homeRoot, "jumi-worker-eval-homes"),
     tmpRoot: join(tmpRoot, "jumi-worker-eval"),
     harnesses,
+    ...(args.budgetUsd !== undefined ? { budgetUsd: args.budgetUsd } : {}),
+    ...(args.spendFile ? { spendFile: args.spendFile } : {}),
     logger: (message) => console.log(`[worker-eval] ${message}`),
   });
+  const totalSpend = records.reduce((sum, r) => sum + (r.spendUsd ?? 0), 0);
+  const budgetSuffix =
+    args.budgetUsd !== undefined
+      ? ` spend $${totalSpend.toFixed(6)} / budget $${args.budgetUsd}`
+      : ` spend $${totalSpend.toFixed(6)}`;
   const summary = records.map((r) => `${r.fixture}/${r.harness}/${r.runner}#${r.trial}:${r.verdict}`).join(" ");
-  console.log(`[worker-eval] done: ${records.length} records -> ${args.out}/results.jsonl ${summary}`);
+  console.log(`[worker-eval] done: ${records.length} records -> ${args.out}/results.jsonl${budgetSuffix} ${summary}`);
+  if (records.some((r) => r.inconclusiveReason === EVAL_BUDGET_UNMEASURABLE_REASON)) {
+    throw new Error("eval budget unmeasurable: a run reported neither an allowance figure nor stated usage");
+  }
 }
 
 if (import.meta.main) {

@@ -46,15 +46,23 @@ import { type Engine, EngineFailedError, throwIfEngineFailed } from "./engine.ts
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import {
+  EVAL_BUDGET_EXHAUSTED_REASON,
+  EVAL_BUDGET_UNMEASURABLE_REASON,
   type EvalHarness,
+  type EvalSpendSource,
   ensureEvalRoots,
+  evalAllowanceUsdFrom,
   evalImageDigest,
+  evalSpendForRun,
   evalUsageOrNull,
   loadEvalLegacyRunners,
   loadEvalPiDeployment,
+  parseEvalBudgetUsd,
   parseEvalHarness,
   piAllowedHostsForRoute,
+  readEvalSpendFile,
   resolveEvalPiRoute,
+  writeEvalSpendFile,
 } from "./eval_harness.ts";
 import { buildPiAttemptStamp, normalizePiAttemptUsage } from "./pi_attempt.ts";
 import { runPiHop } from "./pi_hop.ts";
@@ -122,6 +130,8 @@ export interface ReviewEvalRecord {
   headSha: string;
   durationMs: number;
   usage: unknown;
+  spendUsd: number | null;
+  spendSource: EvalSpendSource;
   inconclusiveReason?: string;
   jobReason?: string;
   imageDigest: string | null;
@@ -130,6 +140,15 @@ export interface ReviewEvalRecord {
   payer: string | null;
   pool: string | null;
   outcome: string | null;
+}
+
+/** Spend columns for one record: priced from `usage` (allowance wins, else list estimate). */
+function reviewEvalSpendFields(
+  usage: unknown,
+  allowanceUsd?: unknown
+): Pick<ReviewEvalRecord, "usage" | "spendUsd" | "spendSource"> {
+  const { spendUsd, spendSource } = evalSpendForRun({ usage, allowanceUsd });
+  return { usage: evalUsageOrNull(usage), spendUsd, spendSource };
 }
 
 export interface LoadedReviewEvalFixture {
@@ -412,7 +431,7 @@ export interface RunReviewEvalCaseOptions {
     route: ReturnType<typeof resolveEvalPiRoute>;
     allowedFetchHosts: readonly string[];
     prompt: string;
-  }) => Promise<{ usage?: unknown }>;
+  }) => Promise<{ usage?: unknown; allowanceUsd?: unknown }>;
 }
 
 export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise<ReviewEvalRecord> {
@@ -435,6 +454,8 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
     baseSha: "unknown",
     headSha: "unknown",
     usage: null as unknown,
+    spendUsd: null as number | null,
+    spendSource: "unknown" as const,
     imageDigest: evalImageDigest(),
     effectiveModel: opts.runner.model,
     route: opts.runner.name,
@@ -588,8 +609,11 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
 
       const previousHome = process.env.HOME;
       let capturedUsage: unknown;
+      let capturedAllowance: unknown;
       process.env.HOME = homeDir;
       try {
+        const { snapshotTokenMetrics, diffTokenMetrics } = await import("./token_metrics.ts");
+        const spendBefore = snapshotTokenMetrics();
         const engine: Engine = opts.engine ?? registeredEngine;
         const result = await engine({
           type: opts.runner.type,
@@ -616,13 +640,24 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
           throw new Error(result.message);
         }
         throwIfEngineFailed(result);
-        capturedUsage = (result as { usage?: unknown }).usage;
+        const deltas = diffTokenMetrics(spendBefore, snapshotTokenMetrics());
+        const deltaUsage =
+          deltas.length > 0 ? new Map(deltas.map((d) => [d.model, d.tokens] as [string, typeof d.tokens])) : undefined;
+        const returnedUsage = (result as { usage?: unknown }).usage;
+        capturedUsage = deltaUsage ?? returnedUsage;
+        capturedAllowance =
+          (result as { allowanceUsd?: unknown }).allowanceUsd ?? (result as { allowance?: unknown }).allowance;
       } finally {
         if (previousHome === undefined) delete process.env.HOME;
         else process.env.HOME = previousHome;
       }
 
       await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
+
+      // Priced once the engine returns so post-run infra failures keep the
+      // spend (mirrors the worker eval `infraSpend` pattern): a priced run
+      // whose HEAD/status read fails is still measurable under --budget-usd.
+      const infraSpend = reviewEvalSpendFields(capturedUsage, capturedAllowance);
 
       // Post-run inspection is fail-closed: a HEAD read or a status read that
       // fails grades `inconclusive` with its own reason instead of
@@ -635,6 +670,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         const reason = `post-run HEAD read failed: ${errorMessage(err)}`.slice(0, 500);
         return finish({
           ...baseRecord,
+          ...infraSpend,
           baseSha,
           headSha,
           verdict: "inconclusive",
@@ -656,6 +692,7 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         const reason = `post-run status failed: ${errorMessage(err)}`.slice(0, 500);
         return finish({
           ...baseRecord,
+          ...infraSpend,
           baseSha,
           headSha,
           verdict: "inconclusive",
@@ -716,9 +753,9 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         }
       }
 
-      const usage: unknown = evalUsageOrNull(capturedUsage);
       return finish({
         ...baseRecord,
+        ...infraSpend,
         baseSha,
         headSha,
         verdict: failedAssertions.length === 0 ? "pass" : "fail",
@@ -729,7 +766,6 @@ export async function runReviewEvalCase(opts: RunReviewEvalCaseOptions): Promise
         rawMarkdown: markdown,
         treeClean,
         maintainerHolds,
-        usage,
       });
     } finally {
       verdictStore.close();
@@ -809,6 +845,8 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
     baseSha: "unknown",
     headSha: "unknown",
     usage: null as unknown,
+    spendUsd: null as number | null,
+    spendSource: "unknown" as const,
     imageDigest: evalImageDigest(),
     effectiveModel: resolved.model,
     route: resolved.name,
@@ -822,9 +860,11 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
     reason: string,
     outcome: string,
     usage: unknown = null,
-    reviewState: ReviewEvalRecord["reviewState"] = "skip"
-  ): ReviewEvalRecord =>
-    finish({
+    reviewState: ReviewEvalRecord["reviewState"] = "skip",
+    allowanceUsd?: unknown
+  ): ReviewEvalRecord => {
+    const { spendUsd, spendSource } = evalSpendForRun({ usage, allowanceUsd });
+    return finish({
       ...baseRecord,
       verdict: "inconclusive",
       failedAssertions: [],
@@ -835,10 +875,13 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
       treeClean: true,
       maintainerHolds: true,
       usage: evalUsageOrNull(usage),
+      spendUsd,
+      spendSource,
       outcome,
       inconclusiveReason: reason,
       jobReason: reason,
     });
+  };
 
   let homeDir = "";
   let workdir = "";
@@ -954,6 +997,7 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
       await writeFile(join(workdir, "JUMI_TASK.md"), prompt, "utf8");
 
       let piUsage: unknown = null;
+      let piAllowance: unknown = null;
       let piOutcome = "ok";
       try {
         if (opts.piInvoke) {
@@ -965,6 +1009,7 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
             prompt,
           });
           piUsage = invoked.usage ?? null;
+          piAllowance = invoked.allowanceUsd ?? null;
         } else {
           const sessionId = `eval-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
           const deps = opts.piSessionDepsFor
@@ -1019,6 +1064,7 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
             const reasonText = hop.result?.message ?? hop.reason ?? "provider failure";
             const normalized = normalizePiAttemptUsage(hop.result?.usage ?? null);
             if (kind === "quota" || isQuotaText(reasonText)) {
+              const quotaSpend = evalSpendForRun({ usage: hop.result?.usage ?? null });
               const stamp = buildPiAttemptStamp({
                 route: resolved,
                 role: "review",
@@ -1038,6 +1084,8 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
                 treeClean: true,
                 maintainerHolds: true,
                 usage: evalUsageOrNull(stamp.usage ?? null),
+                spendUsd: quotaSpend.spendUsd,
+                spendSource: quotaSpend.spendSource,
                 outcome: "quota",
                 inconclusiveReason: reasonText.slice(0, 500),
                 jobReason: reasonText.slice(0, 500),
@@ -1046,21 +1094,30 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
             return inconclusive(
               reasonText.slice(0, 500),
               kind === "auth-expired" ? "auth-expired" : "provider-failure",
-              normalized ?? null
+              normalized ?? null,
+              "skip",
+              evalAllowanceUsdFrom(hop.result?.usage ?? null)
             );
           }
           const normalized = normalizePiAttemptUsage(hop.result.usage ?? null);
-          piUsage = normalized ?? null;
+          piUsage = normalized ?? hop.result.usage ?? null;
+          piAllowance = evalAllowanceUsdFrom(hop.result.usage ?? null) ?? null;
           piOutcome = hop.result.kind === "ok" ? "ok" : hop.result.kind;
         }
       } catch (err) {
         const message = errorMessage(err);
-        if (isQuotaText(message)) return inconclusive(message.slice(0, 500), "quota", piUsage);
+        if (isQuotaText(message)) return inconclusive(message.slice(0, 500), "quota", piUsage, "skip", piAllowance);
         if (/auth|unauthorized|forbidden|token/i.test(message))
-          return inconclusive(message.slice(0, 500), "auth-expired", piUsage);
+          return inconclusive(message.slice(0, 500), "auth-expired", piUsage, "skip", piAllowance);
         if (/timeout|timed out|deadline/i.test(message))
-          return inconclusive(message.slice(0, 500), "provider-failure", piUsage);
-        return inconclusive(`harness crash: ${message}`.slice(0, 500), "provider-failure", piUsage);
+          return inconclusive(message.slice(0, 500), "provider-failure", piUsage, "skip", piAllowance);
+        return inconclusive(
+          `harness crash: ${message}`.slice(0, 500),
+          "provider-failure",
+          piUsage,
+          "skip",
+          piAllowance
+        );
       }
 
       await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
@@ -1069,14 +1126,14 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
         headAfter = await runPlainGit(["rev-parse", "HEAD"], workdir, homeDir);
       } catch (err) {
         const reason = `post-run HEAD read failed: ${errorMessage(err)}`.slice(0, 500);
-        return inconclusive(reason, piOutcome, piUsage);
+        return inconclusive(reason, piOutcome, piUsage, "skip", piAllowance);
       }
       let porcelain: string | null = null;
       try {
         porcelain = await runPlainGit(["status", "--porcelain"], workdir, homeDir);
       } catch (err) {
         const reason = `post-run status failed: ${errorMessage(err)}`.slice(0, 500);
-        return inconclusive(reason, piOutcome, piUsage);
+        return inconclusive(reason, piOutcome, piUsage, "skip", piAllowance);
       }
       const headUnchanged = (headAfter ?? "").trim().toLowerCase() === headSha.toLowerCase();
       const treeClean = headUnchanged && porcelainTreeClean(porcelain ?? "");
@@ -1123,6 +1180,7 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
         outcome: (piOutcome as never) ?? "ok",
         ...(normalizedUsage ? { usage: normalizedUsage } : {}),
       });
+      const finalSpend = evalSpendForRun({ usage: piUsage, allowanceUsd: piAllowance });
       return finish({
         ...baseRecord,
         baseSha,
@@ -1136,6 +1194,8 @@ export async function runReviewEvalCasePi(opts: RunReviewEvalCaseOptions): Promi
         treeClean,
         maintainerHolds,
         usage: evalUsageOrNull(stamp.usage ?? piUsage ?? null),
+        spendUsd: finalSpend.spendUsd,
+        spendSource: finalSpend.spendSource,
         outcome: stamp.outcome,
       });
     } finally {
@@ -1192,6 +1252,10 @@ export interface RunReviewEvalOptions {
   harnesses?: EvalHarness[];
   piSessionDepsFor?: RunReviewEvalCaseOptions["piSessionDepsFor"];
   piInvokeForRoute?: (routeName: string) => RunReviewEvalCaseOptions["piInvoke"];
+  /** Hard spend stop in USD. When reached, no new run starts; overshoot is at most one in-flight run. */
+  budgetUsd?: number;
+  /** Shared spend file carried across evals in one night. */
+  spendFile?: string;
 }
 
 async function writeReviewEvalRecords(
@@ -1214,6 +1278,10 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
     piDeployment = loadEvalPiDeployment();
     resolveEvalPiRoute(piDeployment);
   }
+  const budgetUsd = opts.budgetUsd;
+  const spendFile = opts.spendFile?.trim() ? opts.spendFile.trim() : undefined;
+  let spendSoFar = await readEvalSpendFile(spendFile);
+  let unmeasurable = false;
   let preexisting: string[] = [];
   try {
     const current = await readFile(join(opts.outDir, "results.jsonl"), "utf8");
@@ -1227,11 +1295,70 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
   const flush = async () => {
     await writeReviewEvalRecords(opts.outDir, preexisting, lines, runId);
   };
+  const budgetSkippedRecord = (
+    fixture: LoadedReviewEvalFixture,
+    half: ReviewEvalHalf,
+    harness: EvalHarness,
+    runner: NamedRunner,
+    trial: number,
+    reason: typeof EVAL_BUDGET_EXHAUSTED_REASON | typeof EVAL_BUDGET_UNMEASURABLE_REASON
+  ): ReviewEvalRecord => ({
+    fixture: fixture.name,
+    harness,
+    half,
+    runner: harness === "pi" && piDeployment ? `pi:${piDeployment.allowlist[0]}` : runner.name,
+    runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+    trial,
+    verdict: "inconclusive",
+    failedAssertions: [],
+    reviewState: "skip",
+    findingsCount: 0,
+    blockingCount: 0,
+    rawMarkdown: "",
+    contract: REVIEW_EVAL_CONTRACT,
+    treeClean: true,
+    maintainerHolds: true,
+    baseSha: "unknown",
+    headSha: "unknown",
+    durationMs: 0,
+    usage: null,
+    spendUsd: reason === EVAL_BUDGET_EXHAUSTED_REASON ? 0 : null,
+    spendSource: "unknown",
+    imageDigest: evalImageDigest(),
+    effectiveModel: runner.model,
+    route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
+    payer: null,
+    pool: null,
+    outcome: null,
+    inconclusiveReason: reason,
+    jobReason: reason,
+  });
   for (const harness of harnesses) {
     for (const fixture of opts.fixtures) {
       for (const half of opts.halves) {
         for (const runner of opts.runners) {
           for (let trial = 1; trial <= opts.trials; trial++) {
+            if (unmeasurable) {
+              const record = budgetSkippedRecord(
+                fixture,
+                half,
+                harness,
+                runner,
+                trial,
+                EVAL_BUDGET_UNMEASURABLE_REASON
+              );
+              records.push(record);
+              lines.push(JSON.stringify(record));
+              await flush();
+              continue;
+            }
+            if (budgetUsd !== undefined && spendSoFar >= budgetUsd) {
+              const record = budgetSkippedRecord(fixture, half, harness, runner, trial, EVAL_BUDGET_EXHAUSTED_REASON);
+              records.push(record);
+              lines.push(JSON.stringify(record));
+              await flush();
+              continue;
+            }
             let record: ReviewEvalRecord;
             try {
               record = await runReviewEvalCase({
@@ -1273,6 +1400,8 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
                 headSha: "unknown",
                 durationMs: 0,
                 usage: null,
+                spendUsd: null,
+                spendSource: "unknown",
                 imageDigest: evalImageDigest(),
                 effectiveModel: runner.model,
                 route: harness === "pi" && piDeployment ? piDeployment.allowlist[0]! : runner.name,
@@ -1283,6 +1412,12 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
                 jobReason: message,
               };
             }
+            if (budgetUsd !== undefined && record.spendUsd === null) {
+              unmeasurable = true;
+            } else if (record.spendUsd !== null) {
+              spendSoFar += record.spendUsd;
+              if (spendFile) await writeEvalSpendFile(spendFile, spendSoFar);
+            }
             records.push(record);
             lines.push(JSON.stringify(record));
             await flush();
@@ -1290,6 +1425,12 @@ export async function runReviewEval(opts: RunReviewEvalOptions): Promise<ReviewE
         }
       }
     }
+  }
+  if (spendFile) await writeEvalSpendFile(spendFile, spendSoFar);
+  if (unmeasurable) {
+    throw new Error(
+      `eval budget unmeasurable: a run reported neither an allowance figure nor stated usage, so --budget-usd ${budgetUsd} cannot be enforced`
+    );
   }
   return records;
 }
@@ -1299,30 +1440,42 @@ function printReviewEvalHelp(): void {
 without publishing. Operator-run only; nothing is scheduled.
 
 Usage:
-  bun run src/review_eval.ts --out <output-dir> [--fixture <name>] [--half defective|repaired] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi]
+  bun run src/review_eval.ts --out <output-dir> [--fixture <name>] [--half defective|repaired] [--runners <name1,name2>] [--trials <n>] [--harness legacy|pi|legacy,pi] [--budget-usd <n>] [--spend-file <path>]
 
 Fixtures are committed under src/eval_fixtures/<name>/. Each record in
 <out>/results.jsonl carries fixture, harness (legacy|pi), half, runner, trial, verdict
 (pass / fail / inconclusive), failed assertion names, the recorded review
 state (success / failure), finding counts, the required-contract marker,
 tree-clean and maintainer-hold checks, duration, image digest, effective model,
-payer/route, wall time and usage (null when unknown). Auth, quota,
+payer/route, wall time, usage (null when unknown),
+spendUsd and spendSource (allowance | list-estimate | unknown). Auth, quota,
 timeouts and harness crashes record inconclusive, never fail.
 The legacy baseline runs exactly one explicitly selected runner (via --runners)
 from a minimal catalog holding only that runner, with no fallback.
 A Pi run needs JUMI_PI_PROFILES_FILE plus JUMI_PI_ALLOWED_ROUTES naming the
 wired Go route; the fake forge reports the repo as public and allowedFetchHosts
 is just that endpoint.
+--budget-usd <n> stops starting new runs once spend reaches the budget; a run
+already in progress is never killed, so the overshoot is at most one run.
+Runs never started record inconclusive with inconclusiveReason
+budget-exhausted (a run with no allowance figure and no stated usage instead
+stops with budget-unmeasurable and a non-zero exit). Spend prefers the
+provider's opencode.allowance figure, else a conservative list-price estimate
+for muse-spark-1.3-contributor ($0.10/1M input incl. cached input, $0.20/1M
+output incl. reasoning). --spend-file <path> shares one budget across evals:
+each eval adds the file's spend to its own and writes the new total back.
 The first real-model runs are operator-run; no CI wiring in this change.`);
 }
 
-function parseReviewEvalArgs(argv: string[]): {
+export function parseReviewEvalArgs(argv: string[]): {
   out?: string;
   fixture?: string;
   half?: ReviewEvalHalf;
   runners?: string[];
   trials: number;
   harness?: string;
+  budgetUsd?: number;
+  spendFile?: string;
   help: boolean;
 } {
   let out: string | undefined;
@@ -1331,6 +1484,8 @@ function parseReviewEvalArgs(argv: string[]): {
   let runners: string[] | undefined;
   let trials = 1;
   let harness: string | undefined;
+  let budgetUsd: number | undefined;
+  let spendFile: string | undefined;
   let help = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -1366,9 +1521,25 @@ function parseReviewEvalArgs(argv: string[]): {
       if (Number.isFinite(parsed) && parsed > 0) trials = parsed;
     } else if (arg === "--harness" && i + 1 < argv.length) harness = argv[++i];
     else if (arg.startsWith("--harness=")) harness = arg.slice("--harness=".length);
+    else if (arg === "--budget-usd") {
+      if (i + 1 >= argv.length) throw new Error("Missing --budget-usd <n>");
+      budgetUsd = parseEvalBudgetUsd(argv[++i]);
+    } else if (arg.startsWith("--budget-usd=")) budgetUsd = parseEvalBudgetUsd(arg.slice("--budget-usd=".length));
+    else if (arg === "--spend-file" && i + 1 < argv.length) spendFile = argv[++i];
+    else if (arg.startsWith("--spend-file=")) spendFile = arg.slice("--spend-file=".length);
     else if (arg === "--") break;
   }
-  return { out, fixture, runners, trials, harness, help, ...(half ? { half } : {}) };
+  return {
+    out,
+    fixture,
+    runners,
+    trials,
+    harness,
+    help,
+    ...(half ? { half } : {}),
+    ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+    ...(spendFile ? { spendFile } : {}),
+  };
 }
 
 function loadReviewEvalCliRunners(runnerNames: string[] | undefined): NamedRunner[] {
@@ -1407,12 +1578,22 @@ async function main(): Promise<void> {
     workdirRoot,
     homeRoot: join(homeRoot, "jumi-review-eval-homes"),
     harnesses,
+    ...(args.budgetUsd !== undefined ? { budgetUsd: args.budgetUsd } : {}),
+    ...(args.spendFile ? { spendFile: args.spendFile } : {}),
     logger: (message) => console.log(`[review-eval] ${message}`),
   });
+  const totalSpend = records.reduce((sum, r) => sum + (r.spendUsd ?? 0), 0);
+  const budgetSuffix =
+    args.budgetUsd !== undefined
+      ? ` spend $${totalSpend.toFixed(6)} / budget $${args.budgetUsd}`
+      : ` spend $${totalSpend.toFixed(6)}`;
   const summary = records
     .map((r) => `${r.fixture}/${r.half}/${r.harness}/${r.runner}#${r.trial}:${r.verdict}`)
     .join(" ");
-  console.log(`[review-eval] done: ${records.length} records -> ${args.out}/results.jsonl ${summary}`);
+  console.log(`[review-eval] done: ${records.length} records -> ${args.out}/results.jsonl${budgetSuffix} ${summary}`);
+  if (records.some((r) => r.inconclusiveReason === EVAL_BUDGET_UNMEASURABLE_REASON)) {
+    throw new Error("eval budget unmeasurable: a run reported neither an allowance figure nor stated usage");
+  }
 }
 
 if (import.meta.main) {
